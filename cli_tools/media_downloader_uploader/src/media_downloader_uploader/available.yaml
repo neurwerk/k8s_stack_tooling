@@ -1,0 +1,480 @@
+schemaVersion: 1
+models:
+  - id: ai4privacy-multilingual-pii
+    category: ner
+    displayName: AI4Privacy Multilingual Categorical Anonymiser OpenPII
+    description: Multilingual PII token classifier for English, German, and Dutch Presidio analysis.
+    recommended: true
+    source: ai4privacy/llama-ai4privacy-multilingual-categorical-anonymiser-openpii
+    revision: 83ef30d5e7c9d113ad80ce745b564cdd2320c5d5
+    gated: false
+    license:
+      name: MIT
+      url: https://huggingface.co/ai4privacy/llama-ai4privacy-multilingual-categorical-anonymiser-openpii
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: token-classification
+      parameterCount: null
+      contextLength: null
+      languages: [en, de, nl]
+      intendedUse: pii-detection
+      piiAlias: multilingual-pii
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 1300000000
+
+  - id: ai4privacy-english-pii
+    category: ner
+    displayName: AI4Privacy English Anonymiser OpenPII
+    description: English PII token classifier for Presidio analysis.
+    recommended: true
+    source: ai4privacy/llama-ai4privacy-english-anonymiser-openpii
+    revision: 1efb619f6d9f5a84b5d6ccf65f1f45df961a2167
+    gated: false
+    license:
+      name: MIT
+      url: https://huggingface.co/ai4privacy/llama-ai4privacy-english-anonymiser-openpii
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: token-classification
+      parameterCount: null
+      contextLength: null
+      languages: [en]
+      intendedUse: pii-detection
+      piiAlias: english-pii
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 1300000000
+
+  - id: openmed-german-pii
+    category: ner
+    displayName: OpenMed German PII SuperClinical Large 434M
+    description: German clinical-domain PII token classifier.
+    recommended: true
+    source: OpenMed/OpenMed-PII-German-SuperClinical-Large-434M-v1
+    revision: fa8d9c0186635e1ad74f667d320b9d90955523ad
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/OpenMed/OpenMed-PII-German-SuperClinical-Large-434M-v1
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: token-classification
+      parameterCount: 434M
+      contextLength: null
+      languages: [de]
+      intendedUse: pii-detection
+      piiAlias: german-pii
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 1800000000
+
+  - id: openmed-dutch-pii
+    category: ner
+    displayName: OpenMed Dutch PII SuperClinical Large 434M
+    description: Dutch clinical-domain PII token classifier.
+    recommended: true
+    source: OpenMed/OpenMed-PII-Dutch-SuperClinical-Large-434M-v1
+    revision: 2372595a693ae27ce4c658d3e26fcb3bd5113051
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/OpenMed/OpenMed-PII-Dutch-SuperClinical-Large-434M-v1
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: token-classification
+      parameterCount: 434M
+      contextLength: null
+      languages: [nl]
+      intendedUse: pii-detection
+      piiAlias: dutch-pii
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 1800000000
+
+  - id: dslim-bert-base-ner
+    category: ner
+    displayName: dslim BERT Base NER
+    description: General English named-entity recognition baseline; not specialised for PII.
+    recommended: false
+    source: dslim/bert-base-NER
+    revision: main
+    gated: false
+    license:
+      name: MIT
+      url: https://huggingface.co/dslim/bert-base-NER
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: token-classification
+      parameterCount: 110M
+      contextLength: 512
+      languages: [en]
+      intendedUse: general-ner
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 440000000
+
+  - id: davlan-xlm-roberta-ner
+    category: ner
+    displayName: Davlan XLM-Roberta NER HRL
+    description: Multilingual general named-entity recognition baseline; not specialised for PII.
+    recommended: false
+    source: Davlan/xlm-roberta-base-ner-hrl
+    revision: main
+    gated: false
+    license:
+      name: MIT
+      url: https://huggingface.co/Davlan/xlm-roberta-base-ner-hrl
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: token-classification
+      parameterCount: 278M
+      contextLength: 512
+      languages: [en, de, nl]
+      intendedUse: general-ner
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 1100000000
+
+  - id: qwen36-27b-fable-fusion-711
+    category: llm
+    displayName: Qwen3.6 27B Fable Fusion 711 Uncensored Heretic NM NEO MAX MTP
+    description: Decensored Qwen3.6 27B fusion tuned with the Heretic ARA method for creative writing, roleplay, and uncensored instruction following.
+    recommended: false
+    source: DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: causal-language-model
+      parameterCount: 27B
+      contextLength: 262144
+      languages: [en, zh]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: DavidAU/Qwen3.6-27B-Fable-Fusion-711-Uncensored-Heretic-NM-DAU-NEO-MAX-MTP-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 18498575840
+        include: ["*MTP-Q4_K_M.gguf"]
+
+  - id: gemma4-26b-a4b
+    category: llm
+    displayName: Gemma 4 26B A4B
+    description: Top-ranked open model; multimodal MoE from Google DeepMind with 3.8B active parameters and 256K context.
+    recommended: false
+    source: google/gemma-4-26B-A4B-it
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/google/gemma-4-26B-A4B-it
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 25.2B
+      contextLength: 262144
+      languages: [multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/gemma-4-26B-A4B-it-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 16947541728
+        include: ["*UD-Q4_K_M.gguf"]
+
+  - id: gemma4-31b
+    category: llm
+    displayName: Gemma 4 31B
+    description: Second-ranked open model; dense multimodal instruction model from Google DeepMind with 256K context.
+    recommended: false
+    source: google/gemma-4-31B-it
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/google/gemma-4-31B-it
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: multimodal-causal-language-model
+      parameterCount: 31B
+      contextLength: 262144
+      languages: [multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/gemma-4-31B-it-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 18323733440
+        include: ["*Q4_K_M.gguf"]
+
+  - id: nemotron3-nano-omni-30b
+    category: llm
+    displayName: Nemotron 3 Nano Omni
+    description: Multimodal reasoning MoE from NVIDIA with 3B active parameters and 256K context.
+    recommended: false
+    source: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+    revision: main
+    gated: false
+    license:
+      name: NVIDIA-Open-Model-Agreement
+      url: https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 30B
+      contextLength: 262144
+      languages: [multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 23887023552
+        include: ["*UD-Q4_K_M.gguf"]
+
+  - id: mimo-v25
+    category: llm
+    displayName: MiMo-V2.5
+    description: Sparse MoE model from Xiaomi with 15B active parameters and 1.1M token context.
+    recommended: false
+    source: XiaomiMiMo/MiMo-V2.5
+    revision: main
+    gated: false
+    license:
+      name: MIT
+      url: https://huggingface.co/XiaomiMiMo/MiMo-V2.5
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-causal-language-model
+      parameterCount: 310B
+      contextLength: 1048576
+      languages: [multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/MiMo-V2.5-GGUF
+        revision: main
+        format: gguf
+        quantization: UD-Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 190917099040
+        include: ["*UD-Q4_K_M*.gguf"]
+
+  - id: inkling
+    category: llm
+    displayName: Inkling
+    description: Large multimodal MoE from thinkingmachines with 41B active parameters and 1M token context.
+    recommended: false
+    source: thinkingmachines/Inkling
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/thinkingmachines/Inkling
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 975B
+      contextLength: 1000000
+      languages: [en, multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: DevQuasar/thinkingmachines.Inkling-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 572500476128
+        include: ["Q4_K_M/*.gguf"]
+
+  - id: minimax-m3
+    category: llm
+    displayName: MiniMax M3
+    description: Native multimodal MoE from MiniMax with 23B active parameters and 1M token context.
+    recommended: false
+    source: MiniMaxAI/MiniMax-M3
+    revision: main
+    gated: false
+    license:
+      name: MiniMax-Community
+      url: https://huggingface.co/MiniMaxAI/MiniMax-M3/blob/main/LICENSE
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 428B
+      contextLength: 1000000
+      languages: [multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/MiniMax-M3-GGUF
+        revision: main
+        format: gguf
+        quantization: UD-Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 264031796736
+        include: ["*UD-Q4_K_M*.gguf"]
+
+  - id: inkling-small
+    category: llm
+    displayName: Inkling Small
+    description: Compact multimodal MoE from thinkingmachines with 12B active parameters and 524K token context.
+    recommended: false
+    source: thinkingmachines/Inkling-Small
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/thinkingmachines/Inkling-Small
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 276B
+      contextLength: 524288
+      languages: [en, multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/Inkling-Small-GGUF
+        revision: main
+        format: gguf
+        quantization: UD-Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 162537607392
+        include: ["*UD-Q4_K_M*.gguf"]
+
+  - id: qwen36-27b
+    category: llm
+    displayName: Qwen3.6 27B
+    description: Multilingual instruction model from Alibaba with 262K token context.
+    recommended: false
+    source: Qwen/Qwen3.6-27B
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/Qwen/Qwen3.6-27B
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: multimodal-causal-language-model
+      parameterCount: 27B
+      contextLength: 262144
+      languages: [en, zh, multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/Qwen3.6-27B-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 16817244384
+        include: ["*Q4_K_M.gguf"]
+
+  - id: qwen35-397b-a17b
+    category: llm
+    displayName: Qwen3.5 397B A17B
+    description: Large mixture-of-experts model from Alibaba with 17B active parameters and 262K token context.
+    recommended: false
+    source: Qwen/Qwen3.5-397B-A17B
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/Qwen/Qwen3.5-397B-A17B
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 397B
+      contextLength: 262144
+      languages: [en, zh, multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/Qwen3.5-397B-A17B-GGUF
+        revision: main
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 244093630912
+        include: ["Q4_K_M/*.gguf"]
+
+  - id: qwen35-35b-a3b
+    category: llm
+    displayName: Qwen3.5 35B A3B
+    description: Efficient mixture-of-experts model from Alibaba with 3B active parameters and 262K token context.
+    recommended: false
+    source: Qwen/Qwen3.5-35B-A3B
+    revision: main
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/Qwen/Qwen3.5-35B-A3B
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mixture-of-experts-multimodal-causal-language-model
+      parameterCount: 35B
+      contextLength: 262144
+      languages: [en, zh, multilingual]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-q4-k-m
+        source: unsloth/Qwen3.5-35B-A3B-MTP-GGUF
+        revision: main
+        format: gguf
+        quantization: UD-Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 22627735712
+        include: ["*UD-Q4_K_M.gguf"]

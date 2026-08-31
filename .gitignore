@@ -1,0 +1,50 @@
+/.git_backup*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Ruff
+.ruff_cache/
+
+# Pytest
+.pytest_cache/
+
+# Type checking
+.mypy_cache/
+.ty_cache/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# OpenBao custody material (defense in depth)
+**/operator-custody/
+**/custodian-packages/
+**/openbao-seal.json
+**/.openbao-seal.json.*
+**/custodian-*.zip
+**/.custodian-*.zip.*
+**/custodian-*.asc
+**/private-key.asc
+**/recovery-share.pgp

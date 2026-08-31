@@ -1,0 +1,252 @@
+# =============================================================================
+# Build and push k8s-stack-tooling image to GHCR
+#
+# Triggers:
+#   - tag v* -> builds and tags as :<semver>
+# =============================================================================
+name: Build and Push
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: tooling-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: neurwerk/k8s-stack-tooling
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Validate tag and root project version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            printf 'Release tag must match vX.Y.Z exactly: %s\n' "${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          RELEASE_VERSION="${BASH_REMATCH[1]}" python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          expected = os.environ["RELEASE_VERSION"]
+          with Path("pyproject.toml").open("rb") as file:
+              project_version = tomllib.load(file)["project"]["version"]
+          with Path("uv.lock").open("rb") as file:
+              lock = tomllib.load(file)
+          locked_version = next(
+              package["version"]
+              for package in lock["package"]
+              if package["name"] == "k8s-stack-tooling"
+          )
+
+          versions = {
+              "release tag": expected,
+              "pyproject.toml": project_version,
+              "uv.lock": locked_version,
+          }
+          if any(version != expected for version in versions.values()):
+              raise SystemExit(
+                  "Root release versions are not aligned: "
+                  + ", ".join(f"{source}={version}" for source, version in versions.items())
+              )
+          PY
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Verify root lockfile
+        run: uv lock --check
+
+  quality:
+    name: Run repository quality gates
+    uses: ./.github/workflows/cli-quality.yaml
+
+  build:
+    needs: [validate, quality]
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.resolve.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Inspect existing full version
+        id: inspect
+        env:
+          EXPECTED_REVISION: ${{ github.sha }}
+          IMAGE_NAME: ghcr.io/neurwerk/k8s-stack-tooling
+        run: |
+          FULL_IMAGE="$IMAGE_NAME:${GITHUB_REF_NAME#v}"
+          set +e
+          manifest_json="$(
+            docker buildx imagetools inspect "$FULL_IMAGE" \
+              --format '{{json .Manifest}}' 2>&1
+          )"
+          inspect_status=$?
+          set -e
+          if (( inspect_status != 0 )); then
+            if [[ "$manifest_json" == *"not found"* ]] || \
+               [[ "$manifest_json" == *"manifest unknown"* ]]; then
+              printf '%s\n' "Full version image is absent: $FULL_IMAGE"
+              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            printf '%s\n' "$manifest_json" >&2
+            printf '%s\n' "Could not safely determine whether $FULL_IMAGE exists" >&2
+            exit 1
+          fi
+
+          digest="$(jq -er '.digest | select(type == "string")' <<< "$manifest_json")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "Existing image manifest has an invalid digest: $digest" >&2
+            exit 1
+          fi
+          image_json="$(
+            docker buildx imagetools inspect "$IMAGE_NAME@$digest" \
+              --format '{{json .Image}}'
+          )"
+          if ! jq -e '.os == "linux" and .architecture == "amd64"' \
+            <<< "$image_json" >/dev/null; then
+            printf '%s\n' "Existing image has no valid linux/amd64 image config" >&2
+            exit 1
+          fi
+          revision="$(
+            jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string")' \
+              <<< "$image_json"
+          )"
+          if [[ "$revision" != "$EXPECTED_REVISION" ]]; then
+            printf 'Existing image revision %s does not match tagged commit %s\n' \
+              "$revision" "$EXPECTED_REVISION" >&2
+            exit 1
+          fi
+          printf '%s\n' "Reusing $FULL_IMAGE@$digest"
+          {
+            printf 'exists=true\n'
+            printf 'digest=%s\n' "$digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        if: steps.inspect.outputs.exists == 'false'
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Resolve image digest
+        id: resolve
+        env:
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.inspect.outputs.digest }}
+          IMAGE_EXISTS: ${{ steps.inspect.outputs.exists }}
+        run: |
+          if [[ "$IMAGE_EXISTS" == "true" ]]; then
+            digest="$EXISTING_DIGEST"
+          else
+            digest="$BUILT_DIGEST"
+          fi
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "Could not resolve a valid image digest" >&2
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "image publication did not return a valid digest" >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          image_tag="ghcr.io/neurwerk/k8s-stack-tooling:$version"
+          image_digest_ref="ghcr.io/neurwerk/k8s-stack-tooling@$IMAGE_DIGEST"
+          image_row="| \`$image_tag\` | \`$image_digest_ref\` |"
+          release_exists=false
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            release_exists=true
+            existing_notes="$(
+              gh release view "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json body \
+                --jq .body
+            )"
+            if [[ "$existing_notes" == *"$image_row"* ]]; then
+              printf '%s\n' "GitHub Release $RELEASE_TAG already has current image notes"
+              exit 0
+            fi
+          fi
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" --jq .body > "$RUNNER_TEMP/generated-notes.md"
+          {
+            printf '## Published Image\n\n'
+            printf '| Version tag | Manifest digest |\n'
+            printf '| --- | --- |\n'
+            printf '| `%s` | `%s` |\n\n' "$image_tag" "$image_digest_ref"
+            cat "$RUNNER_TEMP/generated-notes.md"
+          } > "$RUNNER_TEMP/release-notes.md"
+          if [[ "$release_exists" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "K8s Stack Tooling $RELEASE_TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "K8s Stack Tooling $RELEASE_TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "k8s-stack-tooling"
+version = "0.5.4"
+description = "Kubernetes initialization utilities for Keycloak and OpenSearch."
+readme = "README.md"
+authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = ["requests>=2.31", "kubernetes>=36.0.2"]
+
+[project.scripts]
+upsert-realm = "k8s_stack_tooling.keycloak.upsert_realm:main"
+upsert-oidc-client = "k8s_stack_tooling.keycloak.upsert_oidc_client:main"
+upsert-realm-roles = "k8s_stack_tooling.keycloak.upsert_realm_roles:main"
+upsert-active-directory = "k8s_stack_tooling.keycloak.upsert_active_directory:main"
+upsert-user = "k8s_stack_tooling.keycloak.upsert_user:main"
+send-user-actions-email = "k8s_stack_tooling.keycloak.send_user_actions_email:main"
+upsert-composite-roles = "k8s_stack_tooling.keycloak.upsert_composite_roles:main"
+upsert-opensearch-user = "k8s_stack_tooling.opensearch.upsert_opensearch_user:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/k8s_stack_tooling"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["cli_tools/"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ty]
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = ["ruff>=0.15.17", "ty>=0.0.49", "pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/neurwerk/k8s_stack_tooling"
+Repository = "https://github.com/neurwerk/k8s_stack_tooling"
+Issues = "https://github.com/neurwerk/k8s_stack_tooling/issues"
+Security = "https://github.com/neurwerk/k8s_stack_tooling/security/policy"

@@ -1,0 +1,67 @@
+name: Task
+description: Track bounded Tooling or operator CLI work
+title: "[Task]: "
+labels:
+  - "type: task"
+body:
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "priority: p0"
+        - "priority: p1"
+        - "priority: p2"
+        - "priority: p3"
+        - "priority: p4"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - "area: docs"
+        - "area: platform"
+        - "area: client"
+        - "area: service"
+        - "area: operations"
+        - "area: security"
+    validations:
+      required: true
+  - type: dropdown
+    id: release
+    attributes:
+      label: Release classification
+      options:
+        - "release: none"
+        - "release: notes"
+        - "release: platform"
+        - "release: client"
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Required outcome
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Affected contracts
+      description: List CLI, image, provider, recovery, package, or platform contracts, or state None.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and validation
+    validations:
+      required: true

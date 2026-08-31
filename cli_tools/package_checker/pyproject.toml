@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "package-checker"
+version = "0.1.0"
+description = "Report the newest neurwerk GHCR container versions and active builds."
+readme = "README.md"
+authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+package-checker = "package_checker.main:main"
+
+[project.urls]
+Homepage = "https://github.com/neurwerk/k8s_stack_tooling/tree/main/cli_tools/package_checker"
+Repository = "https://github.com/neurwerk/k8s_stack_tooling"
+Issues = "https://github.com/neurwerk/k8s_stack_tooling/issues"
+Security = "https://github.com/neurwerk/k8s_stack_tooling/security/policy"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/package_checker"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=6",
+    "ruff>=0.15.17",
+    "ty>=0.0.49",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "N", "UP", "B", "C90", "BLE", "G", "S", "ANN", "D",
+    "RUF", "FA", "SIM", "RET", "PTH", "C4", "TRY", "T20",
+]
+ignore = ["D203", "D212", "TRY003"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "ANN", "S", "T20", "TRY003"]
+"**/__init__.py" = ["D104"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["package_checker"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.analysis]
+strict-literal-narrowing = true
+
+[tool.pytest.ini_options]
+addopts = "-v --tb=short --cov=src --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

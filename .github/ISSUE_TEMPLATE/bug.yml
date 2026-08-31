@@ -1,0 +1,84 @@
+name: Bug report
+description: Report a reproducible problem in Tooling or one of its CLI projects.
+title: "[Bug]: "
+labels:
+  - "type: bug"
+body:
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "priority: p0"
+        - "priority: p1"
+        - "priority: p2"
+        - "priority: p3"
+        - "priority: p4"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - "area: docs"
+        - "area: platform"
+        - "area: client"
+        - "area: service"
+        - "area: operations"
+        - "area: security"
+    validations:
+      required: true
+  - type: dropdown
+    id: release
+    attributes:
+      label: Release classification
+      options:
+        - "release: none"
+        - "release: notes"
+        - "release: platform"
+        - "release: client"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Kubernetes Tooling image
+        - Package Checker
+        - Media Downloader Uploader
+        - OpenBao Stack Setup
+        - Release automation
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe what happened and the operator impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the command and the smallest reliable sequence of steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package or image version
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant diagnostics
+      description: Redact credentials, tokens, recovery material, and client data.
+      render: shell

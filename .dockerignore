@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Local-only CLI projects
+cli_tools/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Ruff
+.ruff_cache/
+
+# Type checking
+.mypy_cache/
+.ty_cache/
+
+# Tests (not needed in image)
+tests/
+
+# GitHub
+.github/
