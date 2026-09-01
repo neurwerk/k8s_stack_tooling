@@ -75,3 +75,19 @@ jobs:
 
       - name: Build
         run: uv build
+
+  required_ci:
+    name: Required CI
+    needs: quality
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report required CI result
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          if [[ "$QUALITY_RESULT" != "success" ]]; then
+            printf 'CLI quality matrix result was %s, expected success.\n' \
+              "$QUALITY_RESULT" >&2
+            exit 1
+          fi
