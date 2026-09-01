@@ -101,7 +101,7 @@ class Settings(BaseSettings):
 
 
 _PACKAGE_NAME = re.compile(r"^(?:k8s-stack|addon)-[a-z0-9]+(?:-[a-z0-9]+)*$")
-_REPOSITORY = re.compile(r"^neurwerk/(?:k8s_stack_[a-z0-9_]+|dify_ce_builder)$")
+_REPOSITORY = re.compile(r"^neurwerk/(?:k8s_stack_[a-z0-9_]+|addon_dify_ce_builder)$")
 _CHANNEL = re.compile(r"^[a-z0-9]+$")
 
 PACKAGES: tuple[PackageConfig, ...] = (
@@ -113,7 +113,7 @@ PACKAGES: tuple[PackageConfig, ...] = (
     PackageConfig(
         "k8s-stack-keycloak-api-key-bridge", "neurwerk/k8s_stack_keycloak_api_key_bridge"
     ),
-    PackageConfig("addon-dify-ce-builder-api", "neurwerk/dify_ce_builder"),
+    PackageConfig("addon-dify-ce-builder-api", "neurwerk/addon_dify_ce_builder"),
     PackageConfig("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
-    PackageConfig("addon-dify-ce-builder-web", "neurwerk/dify_ce_builder"),
+    PackageConfig("addon-dify-ce-builder-web", "neurwerk/addon_dify_ce_builder"),
 )
