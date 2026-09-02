@@ -79,6 +79,18 @@ The image runs as a non-root user and has no default entrypoint. Workloads must
 select the required command explicitly. Tagged releases are built and published
 to GHCR by GitHub Actions using the repository-scoped `GITHUB_TOKEN`.
 
+### Keycloak Action Emails
+
+`send-user-actions-email` waits for both Keycloak's internal health endpoint and
+the public realm OIDC discovery endpoint before requesting an email. The public
+endpoint must use HTTPS, present a trusted certificate, and advertise the exact
+issuer derived from `KC_PUBLIC_URL` and `KC_REALM`. The command then asks
+Keycloak to email the user's remaining required actions. The optional
+`KC_ACTION_EMAIL_LIFESPAN` setting controls how long the action link remains
+valid, defaults to 30 minutes (`1800` seconds), and accepts values from 5 to 60
+minutes. A Helm Job can override it when needed. The command never handles the
+server-generated action token.
+
 ### Active Directory Reconciliation
 
 `upsert-active-directory` reconciles the managed Microsoft Active Directory
