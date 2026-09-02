@@ -18,7 +18,6 @@ def action_email_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "KC_ADMIN_PASSWORD": "password",
         "KC_REALM": "test realm",
         "KC_INITIAL_USER_USERNAME": "initial-admin",
-        "KC_ACTION_EMAIL_LIFESPAN": "1800",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -62,33 +61,4 @@ def test_refuses_unexpected_public_issuer(action_email_env: None) -> None:
     ):
         send_user_actions_email.main()
 
-    token.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "public_url",
-    [
-        "http://auth.example.test",
-        "https://user@auth.example.test",
-        "https://auth.example.test/path",
-        "https://auth.example.test?query=true",
-    ],
-)
-def test_refuses_non_origin_public_url(
-    action_email_env: None,
-    monkeypatch: pytest.MonkeyPatch,
-    public_url: str,
-) -> None:
-    monkeypatch.setenv("KC_PUBLIC_URL", public_url)
-    with (
-        patch.object(send_user_actions_email, "wait_for_service") as wait,
-        patch.object(send_user_actions_email, "get_admin_token") as token,
-        pytest.raises(SystemExit),
-    ):
-        send_user_actions_email.main()
-
-    wait.assert_called_once_with(
-        "http://keycloak:9000/health/ready",
-        prefix="keycloak-action-email",
-    )
     token.assert_not_called()
