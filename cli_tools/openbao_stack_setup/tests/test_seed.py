@@ -56,7 +56,7 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         identity(),
     )
     assert report.external_records_changed == 5
-    assert report.internal_records_changed == 13
+    assert report.internal_records_changed == 14
     assert session.secrets["stack-setup/providers/smtp"].values == {
         "smtpUsername": "user",
         "smtpPassword": "password",
@@ -76,6 +76,9 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
     assert session.secrets["infra-postgres-operations/internal"].values == {
         "adminPassword": session.secrets["infra-postgres-operations/internal"].values[
             "adminPassword"
+        ],
+        "agentgatewayPassword": session.secrets["infra-agentgateway/internal"].values[
+            "postgresqlPassword"
         ],
         "documentdbPassword": session.secrets["frontend-librechat/internal"].values[
             "documentdbPassword"

@@ -22,7 +22,7 @@ from openbao_stack_setup.credentials import (
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS
 
 STATE_SCHEMA_VERSION = 1
-CURRENT_RECONCILIATION_VERSION = 3
+CURRENT_RECONCILIATION_VERSION = 4
 
 
 @dataclass(frozen=True)

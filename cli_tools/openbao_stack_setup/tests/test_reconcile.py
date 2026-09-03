@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -35,14 +36,19 @@ def source(session: FakeSession) -> None:
     )
 
 
-def state_values(*, applied: int = 3, client_name: str = "client") -> dict[str, JsonValue]:
+def state_values(
+    *,
+    applied: int = 4,
+    client_name: str = "client",
+    package_version: str = "0.2.11",
+) -> dict[str, JsonValue]:
     return {
         "schemaVersion": 1,
         "appliedVersion": applied,
         "client": client_name,
         "clusterId": "cluster",
         "namespaceUid": "namespace",
-        "packageVersion": "0.2.10",
+        "packageVersion": package_version,
     }
 
 
@@ -87,7 +93,7 @@ def test_reconcile_is_idempotent_and_preserves_state_cas_version(tmp_path: Path)
     ("values", "message"),
     [
         ({"schemaVersion": 1}, "invalid schema"),
-        (state_values(applied=4), "newer"),
+        (state_values(applied=5), "newer"),
         (state_values(client_name="other"), "does not belong"),
     ],
 )
@@ -148,6 +154,70 @@ def test_postgres_conflict_does_not_advance_state_and_retry_converges(tmp_path: 
         "adminPassword": "postgres-admin",
         "keycloakPassword": canonical,
     }
+
+
+def test_schema_4_agentgateway_conflict_does_not_advance_and_retry_converges(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    previous_state = state_values(applied=3, package_version="0.2.10")
+    session.secrets[RECONCILIATION_STATE_PATH].values = previous_state
+    del session.secrets["infra-agentgateway/internal"]
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    operations["agentgatewayPassword"] = "conflict"
+
+    with pytest.raises(
+        OpenBaoError,
+        match=r"credential mismatch.*infra-postgres-operations/internal/agentgatewayPassword",
+    ):
+        reconcile_openbao(api, identity())
+
+    assert session.secrets[RECONCILIATION_STATE_PATH].values == previous_state
+    canonical = session.secrets["infra-agentgateway/internal"].values["postgresqlPassword"]
+    operations["agentgatewayPassword"] = canonical
+
+    report = reconcile_openbao(api, identity())
+
+    assert report.previous_version == 3
+    assert report.applied_version == CURRENT_RECONCILIATION_VERSION
+    assert session.secrets[RECONCILIATION_STATE_PATH].values == state_values()
+    assert operations["agentgatewayPassword"] == canonical
+
+
+def test_schema_3_adds_only_agentgateway_database_credentials(tmp_path: Path) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    session.secrets[RECONCILIATION_STATE_PATH].values = state_values(
+        applied=3, package_version="0.2.10"
+    )
+    del session.secrets["infra-agentgateway/internal"]
+    del session.secrets["infra-postgres-operations/internal"].values["agentgatewayPassword"]
+    session.secrets["frontend-studio/internal"].values.update(
+        langfusePublicKey="legacy-public", langfuseSecretKey="legacy-secret"
+    )
+    previous = {
+        path: deepcopy(secret.values)
+        for path, secret in session.secrets.items()
+        if path != RECONCILIATION_STATE_PATH
+    }
+
+    report = reconcile_openbao(api, identity())
+
+    canonical = session.secrets["infra-agentgateway/internal"].values["postgresqlPassword"]
+    assert report.previous_version == 3
+    assert (
+        session.secrets["infra-postgres-operations/internal"].values["agentgatewayPassword"]
+        == canonical
+    )
+    for path, values in previous.items():
+        for field, value in values.items():
+            assert session.secrets[path].values[field] == value
+    assert reconcile_openbao(api, identity()).internal_fields_added == 0
 
 
 def test_schema_2_librechat_credentials_migrate_exactly_once(tmp_path: Path) -> None:

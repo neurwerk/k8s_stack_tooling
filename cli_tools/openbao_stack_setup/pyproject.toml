@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbao-stack-setup"
-version = "0.2.10"
+version = "0.2.11"
 description = "Initialize and operate neurwerk OpenBao installations from a trusted workstation."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
