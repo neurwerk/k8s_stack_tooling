@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -99,11 +100,18 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     )
     assert code_interpreter["jwtPublicKey"] == librechat["codeInterpreterJwtPublicKey"]
     assert code_interpreter["valkeyPassword"] != librechat["valkeyPassword"]
+    agentgateway = original["infra-agentgateway/internal"]
+    assert set(agentgateway) == {"postgresqlPassword"}
+    agentgateway_password = agentgateway["postgresqlPassword"]
+    assert isinstance(agentgateway_password, str)
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", agentgateway_password)
+    assert set(original["frontend-studio/internal"]) == {"opensearchPassword"}
     postgres_auth = original["infra-postgres-auth/internal"]
     postgres_operations = original["infra-postgres-operations/internal"]
     assert set(postgres_auth) == {"adminPassword", "keycloakPassword"}
     assert set(postgres_operations) == {
         "adminPassword",
+        "agentgatewayPassword",
         "documentdbPassword",
         "difyPassword",
         "langfusePassword",
@@ -111,6 +119,7 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     }
     assert postgres_auth["adminPassword"]
     assert postgres_operations["adminPassword"]
+    assert postgres_operations["agentgatewayPassword"] == agentgateway_password
     assert postgres_auth["keycloakPassword"] == original["auth-keycloak/internal"]["dbPassword"]
     assert postgres_operations["documentdbPassword"] == librechat["documentdbPassword"]
     assert (
@@ -134,10 +143,32 @@ def test_internal_fixed_value_mismatch_is_rejected(tmp_path: Path) -> None:
         reconcile_internal_credentials(api, {})
 
 
+def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
+    session = FakeSession()
+    session.secrets["frontend-studio/internal"] = StoredSecret(
+        {
+            "langfusePublicKey": "legacy-public-key",
+            "langfuseSecretKey": "legacy-secret-key",
+        }
+    )
+    api = client(tmp_path, session)
+
+    reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
+
+    assert session.secrets["frontend-studio/internal"].values == {
+        "langfusePublicKey": "legacy-public-key",
+        "langfuseSecretKey": "legacy-secret-key",
+        "opensearchPassword": session.secrets["monitor-opensearch/internal"].values[
+            "studioPassword"
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("path", "field"),
     [
         ("infra-postgres-auth/internal", "keycloakPassword"),
+        ("infra-postgres-operations/internal", "agentgatewayPassword"),
         ("infra-postgres-operations/internal", "documentdbPassword"),
         ("infra-postgres-operations/internal", "difyPassword"),
         ("infra-postgres-operations/internal", "langfusePassword"),

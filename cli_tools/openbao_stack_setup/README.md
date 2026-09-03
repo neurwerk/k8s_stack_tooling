@@ -95,10 +95,14 @@ command-line input.
 Reconciliation schema version 3 adds the `infra-postgres-auth` and
 `infra-postgres-operations` namespace roles and records. Each database record receives an
 independently generated administrator password. Its application-user passwords are exact,
-fail-closed copies of the canonical Keycloak, Dify, Langfuse, and LibreChat internal fields;
-LibreChat's `documentdbPassword` is the operations DocumentDB password. Existing matching copies are
-preserved, while a conflicting copy prevents the schema version from advancing and remains safe to
-retry after correction.
+fail-closed copies of the canonical application fields.
+
+Schema version 4 adds `infra-agentgateway/internal:postgresqlPassword` and copies it exactly to
+`infra-postgres-operations/internal:agentgatewayPassword`. Existing matching copies are preserved,
+while a conflicting operations copy prevents schema advancement and remains safe to retry after
+correction. Fresh Studio records no longer receive Langfuse project credentials; existing Studio
+Langfuse fields remain untouched during this additive transition, and the canonical project
+credentials remain in `monitor-langfuse/internal`.
 
 `reconcile` requires exactly two distinct, cluster-bound custodian packages and a completed local
 recovery kit. It creates a temporary recovery root, applies only cataloged additive changes,

@@ -27,6 +27,7 @@ INTERNAL_PATHS: tuple[str, ...] = (
     "monitor-langfuse/internal",
     "monitor-opensearch/internal",
     "frontend-studio/internal",
+    "infra-agentgateway/internal",
     "infra-postgres-auth/internal",
     "infra-postgres-operations/internal",
     "monitor-fluent-bit/internal",
@@ -226,8 +227,6 @@ def reconcile_internal_credentials(
             {},
             {
                 "opensearchPassword": _required_text(opensearch, "studioPassword"),
-                "langfusePublicKey": _required_text(langfuse, "initProjectPublicKey"),
-                "langfuseSecretKey": _required_text(langfuse, "initProjectSecretKey"),
             },
         ),
         (
@@ -256,6 +255,14 @@ def reconcile_internal_credentials(
         _record_change(changed, path, count)
         added += count
 
+    agentgateway, count = _upsert(
+        client,
+        "infra-agentgateway/internal",
+        _random_fields("postgresqlPassword"),
+    )
+    _record_change(changed, "infra-agentgateway/internal", count)
+    added += count
+
     postgres_records = (
         (
             "infra-postgres-auth/internal",
@@ -266,6 +273,7 @@ def reconcile_internal_credentials(
             {
                 "documentdbPassword": _required_text(librechat, "documentdbPassword"),
                 "difyPassword": _required_text(dify, "postgresPassword"),
+                "agentgatewayPassword": _required_text(agentgateway, "postgresqlPassword"),
                 "langfusePassword": _required_text(langfuse, "postgresqlPassword"),
                 "librechatRagPassword": _required_text(librechat, "ragPostgresqlPassword"),
             },
