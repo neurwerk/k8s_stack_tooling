@@ -30,6 +30,9 @@ jobs:
           - name: OpenBao Stack Setup
             project: cli_tools/openbao_stack_setup
             needs_base: false
+          - name: OpenRouter Catalog Sync
+            project: cli_tools/openrouter_catalog_sync
+            needs_base: false
     defaults:
       run:
         working-directory: ${{ matrix.project }}
