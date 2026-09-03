@@ -1,0 +1,1 @@
+"""OpenRouter catalog synchronization CLI."""
