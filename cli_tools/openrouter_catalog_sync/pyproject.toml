@@ -4,14 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openrouter-catalog-sync"
-version = "0.1.0"
-description = "Generate deterministic model catalog and pricing files from OpenRouter."
+version = "0.2.0"
+description = "Select OpenRouter models and generate a complete client model cost catalog."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
+    "InquirerPy>=0.3.4",
     "PyYAML>=6.0",
     "requests>=2.31",
 ]

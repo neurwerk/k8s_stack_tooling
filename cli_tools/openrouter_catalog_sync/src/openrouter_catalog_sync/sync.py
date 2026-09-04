@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,17 +21,24 @@ import yaml
 
 DEFAULT_SOURCE_URL = "https://openrouter.ai/api/v1/models"
 PUBLIC_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+PROVIDER_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 TOKEN_FIELDS = {
-    "prompt": "input",
-    "completion": "output",
-    "input_cache_read": "cacheRead",
-    "input_cache_write": "cacheWrite",
-    "internal_reasoning": "reasoning",
-    "audio": "inputAudio",
+    "input": ("prompt",),
+    "output": ("completion",),
+    "cacheRead": ("input_cache_read", "input_audio_cache"),
+    "cacheWrite": ("input_cache_write", "input_cache_write_1h"),
+    "reasoning": ("internal_reasoning",),
+    "inputAudio": ("audio",),
+    "outputAudio": ("audio_output",),
 }
-UNSUPPORTED_UNIT_FIELDS = {"request", "image", "web_search"}
+TOKEN_SOURCE_FIELDS = frozenset(source for sources in TOKEN_FIELDS.values() for source in sources)
+RATE_FIELD_ORDER = tuple(TOKEN_FIELDS)
+RATE_FIELDS = frozenset(RATE_FIELD_ORDER)
+UNSUPPORTED_UNIT_FIELDS = {"request", "image", "image_output", "web_search"}
 CONDITION_FIELDS = {"min_prompt_tokens", "utc_start", "utc_end", "utc_days"}
-MAX_GENERATED_MODELS = 512
+MAX_SELECTED_MODELS = 256
+MAX_DESTINATION_METADATA_BYTES = 16_384
 MAX_PAGES = 20
 MAX_RAW_RECORDS = 5_000
 MAX_RESPONSE_BYTES = 10_000_000
@@ -70,18 +78,30 @@ class HttpClient(Protocol):
 
 @dataclass(frozen=True)
 class Policy:
-    """Store catalog naming overrides and exclusions."""
+    """Store the explicit client model and pricing policy."""
 
+    selected_models: tuple[str, ...]
     public_name_overrides: Mapping[str, str]
-    excluded_models: frozenset[str]
+    negotiated_pricing: Mapping[str, Mapping[str, object]]
+    custom_pricing: Mapping[str, Mapping[str, Mapping[str, object]]]
+    grant_to_access_groups: bool
 
 
 @dataclass(frozen=True)
 class GeneratedFiles:
     """Store complete generated file contents."""
 
+    policy: bytes
     catalog: bytes
     pricing: bytes
+
+
+@dataclass(frozen=True)
+class SelectionChoice:
+    """Describe one compatible model shown by the interactive selector."""
+
+    upstream_id: str
+    display_name: str
 
 
 def load_policy(path: Path) -> Policy:
@@ -93,11 +113,46 @@ def load_policy(path: Path) -> Policy:
     except (OSError, json.JSONDecodeError) as error:
         raise CatalogSyncError(f"could not read policy {path}: {error}") from error
     policy = _object(raw, "policy")
-    unknown = set(policy) - {"publicNameOverrides", "excludedModels"}
+    expected_fields = {
+        "selectedModels",
+        "publicNameOverrides",
+        "negotiatedPricing",
+        "customPricing",
+        "grantToAccessGroups",
+    }
+    unknown = set(policy) - expected_fields
     if unknown:
         raise CatalogSyncError(f"policy contains unknown field: {min(unknown)}")
+    missing = expected_fields - set(policy)
+    if missing:
+        raise CatalogSyncError(f"policy is missing required field: {min(missing)}")
 
-    overrides_raw = _object(policy.get("publicNameOverrides", {}), "publicNameOverrides")
+    selections = _policy_selections(policy["selectedModels"])
+    overrides = _policy_overrides(policy["publicNameOverrides"])
+    negotiated = _policy_negotiated_pricing(policy["negotiatedPricing"])
+    custom = _policy_custom_pricing(policy["customPricing"])
+    grant = policy["grantToAccessGroups"]
+    if not isinstance(grant, bool):
+        raise CatalogSyncError("grantToAccessGroups must be a boolean")
+    return Policy(selections, overrides, negotiated, custom, grant)
+
+
+def _policy_selections(raw: object) -> tuple[str, ...]:
+    selections_raw = raw
+    if not isinstance(selections_raw, list) or not all(
+        isinstance(item, str) and item for item in selections_raw
+    ):
+        raise CatalogSyncError("selectedModels must be a list of nonempty strings")
+    selections = cast("list[str]", selections_raw)
+    if len(selections) != len(set(selections)):
+        raise CatalogSyncError("selectedModels must not contain duplicates")
+    if len(selections) > MAX_SELECTED_MODELS:
+        raise CatalogSyncError(f"selectedModels exceeds {MAX_SELECTED_MODELS} models")
+    return tuple(selections)
+
+
+def _policy_overrides(raw: object) -> dict[str, str]:
+    overrides_raw = _object(raw, "publicNameOverrides")
     overrides: dict[str, str] = {}
     for upstream_id, public_name in overrides_raw.items():
         if not isinstance(upstream_id, str) or not upstream_id:
@@ -105,22 +160,50 @@ def load_policy(path: Path) -> Policy:
         if not isinstance(public_name, str) or not PUBLIC_NAME_PATTERN.fullmatch(public_name):
             raise CatalogSyncError(f"invalid public name override for {upstream_id}")
         overrides[upstream_id] = public_name
+    return overrides
 
-    exclusions_raw = policy.get("excludedModels", [])
-    if not isinstance(exclusions_raw, list) or not all(
-        isinstance(item, str) and item for item in exclusions_raw
-    ):
-        raise CatalogSyncError("excludedModels must be a list of nonempty strings")
-    exclusions = cast("list[str]", exclusions_raw)
-    if len(exclusions) != len(set(exclusions)):
-        raise CatalogSyncError("excludedModels must not contain duplicates")
-    return Policy(overrides, frozenset(exclusions))
+
+def _policy_negotiated_pricing(raw: object) -> dict[str, Mapping[str, object]]:
+    return _policy_pricing_models(raw, "negotiatedPricing", "negotiated pricing")
+
+
+def _policy_custom_pricing(
+    raw: object,
+) -> dict[str, Mapping[str, Mapping[str, object]]]:
+    providers_raw = _object(raw, "customPricing")
+    providers: dict[str, Mapping[str, Mapping[str, object]]] = {}
+    for provider_id, raw_models in providers_raw.items():
+        if not PROVIDER_ID_PATTERN.fullmatch(provider_id):
+            raise CatalogSyncError(f"invalid customPricing provider id: {provider_id}")
+        providers[provider_id] = _policy_pricing_models(
+            raw_models,
+            f"customPricing provider {provider_id}",
+            f"custom pricing for {provider_id}",
+        )
+    return providers
+
+
+def _policy_pricing_models(
+    raw: object, object_label: str, schedule_label: str
+) -> dict[str, Mapping[str, object]]:
+    models = _object(raw, object_label)
+    result: dict[str, Mapping[str, object]] = {}
+    for model_id, raw_schedule in models.items():
+        if not model_id or not MODEL_ID_PATTERN.fullmatch(model_id):
+            raise CatalogSyncError(f"invalid {object_label} model id: {model_id}")
+        result[model_id] = _pricing_schedule(raw_schedule, f"{schedule_label}/{model_id}")
+    return result
 
 
 def fetch_models(source_url: str, client: HttpClient | None = None) -> list[object]:
     """Fetch all pages from the public models endpoint."""
     origin = _safe_source_url(source_url)
-    http = client or requests.Session()
+    if client is None:
+        session = requests.Session()
+        session.auth = _without_auth
+        http: HttpClient = session
+    else:
+        http = client
     models: list[object] = []
     next_url: str | None = source_url
     visited: set[str] = set()
@@ -239,21 +322,83 @@ def generate(
 ) -> GeneratedFiles:
     """Normalize models and render deterministic catalog and pricing bytes."""
     current_date = today or datetime.now(tz=UTC).date()
-    normalized: dict[str, Mapping[str, object]] = {}
-    for index, raw_model in enumerate(models):
-        model = _object(raw_model, f"model {index}")
-        upstream_id = _required_string(model, "id", f"model {index}")
-        if upstream_id in normalized:
-            raise CatalogSyncError(f"duplicate model id: {upstream_id}")
-        normalized[upstream_id] = model
+    normalized = _normalized_models(models)
+    selected = _validated_selected_ids(policy, normalized)
+    catalog_models, pricing_models, public_names = _selected_catalog_entries(
+        normalized, selected, policy, current_date
+    )
+    _validate_destination_metadata(public_names)
 
+    catalog = yaml.safe_dump(
+        {
+            "openrouterCatalog": {
+                "enabled": True,
+                "excludedModels": [],
+                "grantToAccessGroups": policy.grant_to_access_groups,
+                "models": catalog_models,
+            },
+            "infraAgentgatewayWrapper": {
+                "modelCatalog": {
+                    "sources": [
+                        {
+                            "configMap": {
+                                "name": "client-model-cost-catalog",
+                                "key": "catalog.json",
+                            }
+                        }
+                    ]
+                }
+            },
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    ).encode()
+    pricing = (
+        json.dumps(
+            {"providers": _complete_pricing_catalog(pricing_models, policy.custom_pricing)},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    ).encode()
+    rendered_policy = render_policy(policy)
+    for label, content in (
+        ("policy", rendered_policy),
+        ("catalog", catalog),
+        ("pricing", pricing),
+    ):
+        if len(content) > MAX_OUTPUT_BYTES:
+            raise CatalogSyncError(
+                f"generated {label} exceeds the {MAX_OUTPUT_BYTES}-byte safety limit"
+            )
+    return GeneratedFiles(rendered_policy, catalog, pricing)
+
+
+def _validated_selected_ids(
+    policy: Policy, normalized: Mapping[str, Mapping[str, object]]
+) -> set[str]:
+    if len(policy.selected_models) > MAX_SELECTED_MODELS:
+        raise CatalogSyncError(f"selectedModels exceeds {MAX_SELECTED_MODELS} models")
+    selected = set(policy.selected_models)
+    unknown = selected - set(normalized)
+    if unknown:
+        raise CatalogSyncError(f"selected model is unknown: {min(unknown)}")
+    return selected
+
+
+def _selected_catalog_entries(
+    normalized: Mapping[str, Mapping[str, object]],
+    selected: set[str],
+    policy: Policy,
+    current_date: date,
+) -> tuple[list[dict[str, str]], dict[str, object], dict[str, str]]:
     catalog_models: list[dict[str, str]] = []
     pricing_models: dict[str, object] = {}
     public_names: dict[str, str] = {}
-    for upstream_id in sorted(normalized):
+    for upstream_id in sorted(selected):
         model = normalized[upstream_id]
-        if not _included(model, upstream_id, policy, current_date):
-            continue
+        if not _compatible(model, upstream_id, current_date):
+            raise CatalogSyncError(f"selected model is incompatible: {upstream_id}")
         public_name = policy.public_name_overrides.get(
             upstream_id, _default_public_name(upstream_id)
         )
@@ -267,8 +412,6 @@ def generate(
             )
         public_names[public_name] = upstream_id
         label, publisher = _labels(model, upstream_id)
-        if len(catalog_models) >= MAX_GENERATED_MODELS:
-            raise CatalogSyncError(f"compatible catalog exceeds {MAX_GENERATED_MODELS} models")
         catalog_models.append(
             {
                 "name": public_name,
@@ -277,49 +420,159 @@ def generate(
                 "group": f"Remote-OpenRouter-{publisher}",
             }
         )
-        pricing_models[upstream_id] = _pricing(model, upstream_id)
+        if upstream_id in policy.negotiated_pricing:
+            pricing_models[upstream_id] = policy.negotiated_pricing[upstream_id]
+        else:
+            pricing_models[upstream_id] = _pricing(model, upstream_id)
+    return catalog_models, pricing_models, public_names
 
-    catalog = yaml.safe_dump(
-        {"openrouterCatalog": {"models": catalog_models}},
-        allow_unicode=True,
-        sort_keys=False,
+
+def _validate_destination_metadata(public_names: Mapping[str, str]) -> None:
+    metadata = json.dumps(
+        dict.fromkeys(sorted(public_names), True), ensure_ascii=False, separators=(",", ":")
     ).encode()
-    pricing = (
-        json.dumps(
-            {"providers": {"openrouter": {"models": pricing_models}}},
-            ensure_ascii=False,
-            indent=2,
+    if len(metadata) > MAX_DESTINATION_METADATA_BYTES:
+        raise CatalogSyncError(
+            f"selected public-name metadata exceeds {MAX_DESTINATION_METADATA_BYTES} UTF-8 bytes"
         )
-        + "\n"
-    ).encode()
-    for label, content in (("catalog", catalog), ("pricing", pricing)):
-        if len(content) > MAX_OUTPUT_BYTES:
-            raise CatalogSyncError(
-                f"generated {label} exceeds the {MAX_OUTPUT_BYTES}-byte safety limit"
-            )
-    return GeneratedFiles(catalog, pricing)
 
 
-def write_files(generated: GeneratedFiles, catalog_output: Path, pricing_output: Path) -> None:
-    """Stage both files and roll back the pair when either replacement fails."""
-    _different_outputs(catalog_output, pricing_output)
-    _require_regular_outputs(catalog_output, pricing_output)
+def selection_choices(
+    models: Sequence[object], policy: Policy, *, today: date | None = None
+) -> list[SelectionChoice]:
+    """Return compatible choices plus removable stale existing selections."""
+    current_date = today or datetime.now(tz=UTC).date()
+    normalized = _normalized_models(models)
+    choices: list[SelectionChoice] = []
+    compatible_ids: set[str] = set()
+    for upstream_id in sorted(normalized):
+        model = normalized[upstream_id]
+        if not _compatible(model, upstream_id, current_date):
+            continue
+        compatible_ids.add(upstream_id)
+        label, _publisher = _labels(model, upstream_id)
+        choices.append(SelectionChoice(upstream_id, f"{label} [{upstream_id}]"))
+    for upstream_id in sorted(set(policy.selected_models) - compatible_ids):
+        reason = "unknown" if upstream_id not in normalized else "incompatible"
+        choices.append(SelectionChoice(upstream_id, f"Unavailable ({reason}) [{upstream_id}]"))
+    return choices
+
+
+def with_selected_models(policy: Policy, selected_models: Sequence[str]) -> Policy:
+    """Create policy with canonical selections while retaining applicable review data."""
+    selected = tuple(sorted(selected_models))
+    if len(selected) != len(set(selected)):
+        raise CatalogSyncError("selected models must not contain duplicates")
+    if len(selected) > MAX_SELECTED_MODELS:
+        raise CatalogSyncError(f"selected models exceeds {MAX_SELECTED_MODELS} models")
+    return Policy(
+        selected,
+        policy.public_name_overrides,
+        policy.negotiated_pricing,
+        policy.custom_pricing,
+        policy.grant_to_access_groups,
+    )
+
+
+def render_policy(policy: Policy) -> bytes:
+    """Render policy in its canonical reviewed representation."""
+    raw = {
+        "selectedModels": sorted(policy.selected_models),
+        "grantToAccessGroups": policy.grant_to_access_groups,
+        "publicNameOverrides": {
+            key: policy.public_name_overrides[key] for key in sorted(policy.public_name_overrides)
+        },
+        "negotiatedPricing": {
+            key: policy.negotiated_pricing[key] for key in sorted(policy.negotiated_pricing)
+        },
+        "customPricing": {
+            provider_id: {
+                model_id: policy.custom_pricing[provider_id][model_id]
+                for model_id in sorted(policy.custom_pricing[provider_id])
+            }
+            for provider_id in sorted(policy.custom_pricing)
+        },
+    }
+    return (json.dumps(raw, ensure_ascii=False, indent=2) + "\n").encode()
+
+
+def _complete_pricing_catalog(
+    openrouter_models: Mapping[str, object],
+    custom_pricing: Mapping[str, Mapping[str, Mapping[str, object]]],
+) -> dict[str, object]:
+    direct_openrouter_models = custom_pricing.get("openrouter", {})
+    collisions = set(openrouter_models) & set(direct_openrouter_models)
+    if collisions:
+        raise CatalogSyncError(
+            "customPricing openrouter model is also selected: " + min(collisions)
+        )
+    models_by_provider: dict[str, Mapping[str, object]] = {
+        **{
+            provider_id: models
+            for provider_id, models in custom_pricing.items()
+            if provider_id != "openrouter"
+        },
+        "openrouter": {**direct_openrouter_models, **openrouter_models},
+    }
+    return {
+        provider_id: {
+            "models": {
+                model_id: models_by_provider[provider_id][model_id]
+                for model_id in sorted(models_by_provider[provider_id])
+            }
+        }
+        for provider_id in sorted(models_by_provider)
+    }
+
+
+def _normalized_models(models: Sequence[object]) -> dict[str, Mapping[str, object]]:
+    normalized: dict[str, Mapping[str, object]] = {}
+    for index, raw_model in enumerate(models):
+        model = _object(raw_model, f"model {index}")
+        upstream_id = _required_string(model, "id", f"model {index}")
+        if upstream_id in normalized:
+            raise CatalogSyncError(f"duplicate model id: {upstream_id}")
+        normalized[upstream_id] = model
+    return normalized
+
+
+def write_files(
+    generated: GeneratedFiles, policy: Path, catalog_output: Path, pricing_output: Path
+) -> None:
+    """Stage all files and roll back the set when any replacement fails."""
+    validate_paths(policy, catalog_output, pricing_output)
+    _require_regular_outputs(policy, catalog_output, pricing_output)
     staged: list[tuple[Path, Path]] = []
     backups: list[tuple[Path | None, Path]] = []
+    replaced: list[tuple[Path | None, Path]] = []
     preserve_backups = False
     try:
-        _stage_outputs(generated, catalog_output, pricing_output, staged)
+        _stage_outputs(generated, policy, catalog_output, pricing_output, staged)
         _backup_outputs(staged, backups)
-        for temporary, destination in staged:
+        for (temporary, destination), (backup, _backup_destination) in zip(
+            staged, backups, strict=True
+        ):
+            replaced.append((backup, destination))
             temporary.replace(destination)
-    except CatalogSyncError:
-        _rollback_outputs(backups)
+    except CatalogSyncError as error:
+        rollback_error = _rollback_outputs(replaced)
+        preserve_backups = rollback_error is not None
+        if rollback_error:
+            raise CatalogSyncError(f"{error}; rollback failed: {rollback_error}") from error
         raise
     except OSError as error:
-        rollback_error = _rollback_outputs(backups)
+        rollback_error = _rollback_outputs(replaced)
         preserve_backups = rollback_error is not None
         suffix = f"; rollback failed: {rollback_error}" if rollback_error else ""
         raise CatalogSyncError(f"could not write output files: {error}{suffix}") from error
+    except BaseException as error:
+        rollback_error = _rollback_outputs(replaced)
+        preserve_backups = rollback_error is not None
+        if rollback_error:
+            raise CatalogSyncError(
+                f"write interrupted; rollback failed: {rollback_error}"
+            ) from error
+        raise
     finally:
         for temporary, _destination in staged:
             temporary.unlink(missing_ok=True)
@@ -330,11 +583,13 @@ def write_files(generated: GeneratedFiles, catalog_output: Path, pricing_output:
 
 def _stage_outputs(
     generated: GeneratedFiles,
+    policy: Path,
     catalog_output: Path,
     pricing_output: Path,
     staged: list[tuple[Path, Path]],
 ) -> None:
     for destination, content in (
+        (policy, generated.policy),
         (catalog_output, generated.catalog),
         (pricing_output, generated.pricing),
     ):
@@ -363,17 +618,20 @@ def _backup_outputs(
             )
             os.close(descriptor)
             backup = Path(backup_name)
-            backup.unlink()
-            destination.replace(backup)
         backups.append((backup, destination))
+        if backup is not None:
+            shutil.copy2(destination, backup)
 
 
-def check_files(generated: GeneratedFiles, catalog_output: Path, pricing_output: Path) -> None:
-    """Require both output files to exactly match generated bytes."""
-    _different_outputs(catalog_output, pricing_output)
-    _require_regular_outputs(catalog_output, pricing_output)
+def check_files(
+    generated: GeneratedFiles, policy: Path, catalog_output: Path, pricing_output: Path
+) -> None:
+    """Require policy and both output files to exactly match generated bytes."""
+    validate_paths(policy, catalog_output, pricing_output)
+    _require_regular_outputs(policy, catalog_output, pricing_output)
     mismatches: list[str] = []
     for label, path, expected in (
+        ("policy", policy, generated.policy),
         ("catalog", catalog_output, generated.catalog),
         ("pricing", pricing_output, generated.pricing),
     ):
@@ -399,15 +657,21 @@ def validate_paths(policy: Path, catalog_output: Path, pricing_output: Path) -> 
     )
     for index, (left_label, left) in enumerate(paths):
         for right_label, right in paths[index + 1 :]:
-            if _resolved(left) == _resolved(right) or _same_file(left, right):
+            left_resolved = _resolved(left)
+            right_resolved = _resolved(right)
+            if left_resolved == right_resolved or _same_file(left, right):
                 raise CatalogSyncError(f"{left_label} and {right_label} paths must differ")
+            if left_resolved in right_resolved.parents or right_resolved in left_resolved.parents:
+                raise CatalogSyncError(
+                    f"{left_label} and {right_label} paths must not contain one another"
+                )
 
 
-def _included(model: Mapping[str, object], upstream_id: str, policy: Policy, today: date) -> bool:
+def _compatible(model: Mapping[str, object], upstream_id: str, today: date) -> bool:
     if (
         upstream_id.startswith("~")
+        or upstream_id.startswith("openrouter/")
         or upstream_id.endswith(":batch")
-        or upstream_id in policy.excluded_models
     ):
         return False
     architecture = _object(model.get("architecture"), f"architecture for {upstream_id}")
@@ -447,6 +711,9 @@ def _included(model: Mapping[str, object], upstream_id: str, policy: Policy, tod
 
 def _has_supported_base_pricing(model: Mapping[str, object], upstream_id: str) -> bool:
     pricing = _object(model.get("pricing"), f"pricing for {upstream_id}")
+    unknown = set(pricing) - TOKEN_SOURCE_FIELDS - UNSUPPORTED_UNIT_FIELDS - {"overrides"}
+    if unknown:
+        raise CatalogSyncError(f"pricing for {upstream_id} contains unknown field: {min(unknown)}")
     prompt = _decimal(pricing.get("prompt"), "prompt", upstream_id)
     completion = _decimal(pricing.get("completion"), "completion", upstream_id)
     return prompt >= 0 and completion >= 0
@@ -474,7 +741,7 @@ def _labels(model: Mapping[str, object], upstream_id: str) -> tuple[str, str]:
 
 def _publisher_fallback(upstream_id: str) -> str:
     author = upstream_id.split("/", 1)[0]
-    safe = " ".join(part for part in re.split(r"[^A-Za-z0-9]+", author) if part)
+    safe = " ".join(part.capitalize() for part in re.split(r"[^A-Za-z0-9]+", author) if part)
     if not safe:
         raise CatalogSyncError(f"could not derive publisher label for {upstream_id}")
     return safe
@@ -482,33 +749,129 @@ def _publisher_fallback(upstream_id: str) -> str:
 
 def _pricing(model: Mapping[str, object], upstream_id: str) -> dict[str, object]:
     pricing = _object(model.get("pricing"), f"pricing for {upstream_id}")
+    _reject_per_request_pricing(pricing, upstream_id)
     rates = _rates(pricing, upstream_id, required=True)
     result: dict[str, object] = {"rates": rates}
     overrides = pricing.get("overrides", [])
     if not isinstance(overrides, list):
         raise CatalogSyncError(f"pricing overrides for {upstream_id} must be a list")
-    threshold_overrides: list[tuple[int, dict[str, str]]] = []
+    threshold_overrides: list[tuple[int, Mapping[str, object]]] = []
     for index, raw_override in enumerate(overrides):
         override = _object(raw_override, f"pricing override {index} for {upstream_id}")
         fields = set(override)
-        unknown_fields = fields - set(TOKEN_FIELDS) - UNSUPPORTED_UNIT_FIELDS - CONDITION_FIELDS
+        unknown_fields = fields - TOKEN_SOURCE_FIELDS - UNSUPPORTED_UNIT_FIELDS - CONDITION_FIELDS
+        if unknown_fields:
+            raise CatalogSyncError(
+                f"pricing override {index} for {upstream_id} contains unknown field: "
+                f"{min(unknown_fields)}"
+            )
         other_conditions = fields & (CONDITION_FIELDS - {"min_prompt_tokens"})
-        if unknown_fields or other_conditions or "min_prompt_tokens" not in override:
-            continue
+        if other_conditions or "min_prompt_tokens" not in override:
+            raise CatalogSyncError(
+                f"pricing override {index} for {upstream_id} cannot be represented; "
+                "add negotiatedPricing"
+            )
         threshold = _threshold(override["min_prompt_tokens"], upstream_id)
-        tier_rates = _rates(override, upstream_id, required=False)
-        if not tier_rates:
+        _reject_per_request_pricing(override, upstream_id)
+        if not fields & TOKEN_SOURCE_FIELDS:
             continue
-        threshold_overrides.append((threshold, tier_rates))
+        threshold_overrides.append((threshold, override))
     if threshold_overrides:
         tiers: list[dict[str, object]] = []
         for threshold in sorted({item[0] for item in threshold_overrides}):
-            effective_rates = rates.copy()
-            for override_threshold, override_rates in threshold_overrides:
+            effective_pricing = dict(pricing)
+            for override_threshold, override in threshold_overrides:
                 if override_threshold <= threshold:
-                    effective_rates.update(override_rates)
-            tiers.append({"contextOver": threshold, "rates": effective_rates.copy()})
+                    effective_pricing.update(
+                        (field, override[field])
+                        for field in TOKEN_SOURCE_FIELDS
+                        if field in override
+                    )
+            tiers.append(
+                {
+                    "contextOver": threshold,
+                    "rates": _rates(effective_pricing, upstream_id, required=True),
+                }
+            )
         result["tiers"] = tiers
+    return result
+
+
+def _reject_per_request_pricing(pricing: Mapping[str, object], upstream_id: str) -> None:
+    if "request" not in pricing:
+        return
+    value = _decimal(pricing["request"], "request", upstream_id)
+    if not value.is_zero():
+        raise CatalogSyncError(
+            f"per-request pricing for {upstream_id} cannot be represented; add negotiatedPricing"
+        )
+
+
+def _pricing_schedule(raw: object, label: str) -> Mapping[str, object]:
+    schedule = _object(raw, label)
+    unknown = set(schedule) - {"rates", "tiers"}
+    if unknown:
+        raise CatalogSyncError(f"{label} contains unknown field: {min(unknown)}")
+    if "rates" not in schedule:
+        raise CatalogSyncError(f"{label} is missing rates")
+    result: dict[str, object] = {"rates": _schedule_rates(schedule["rates"], label, "base rates")}
+    tiers_raw = schedule.get("tiers")
+    if tiers_raw is None:
+        return result
+    if not isinstance(tiers_raw, list):
+        raise CatalogSyncError(f"{label} tiers must be a list")
+    tiers: list[dict[str, object]] = []
+    previous_threshold = -1
+    for index, raw_tier in enumerate(tiers_raw):
+        tier = _object(raw_tier, f"{label} tier {index}")
+        if set(tier) != {"contextOver", "rates"}:
+            raise CatalogSyncError(f"{label} tier {index} must contain only contextOver and rates")
+        threshold = _threshold(tier["contextOver"], label)
+        if threshold <= previous_threshold:
+            raise CatalogSyncError(f"{label} tiers must have increasing thresholds")
+        previous_threshold = threshold
+        tiers.append(
+            {
+                "contextOver": threshold,
+                "rates": _schedule_rates(tier["rates"], label, f"tier {index} rates"),
+            }
+        )
+    result["tiers"] = tiers
+    return result
+
+
+def _schedule_rates(raw: object, schedule_label: str, rates_label: str) -> dict[str, str]:
+    rates = _object(raw, f"{schedule_label} {rates_label}")
+    unknown = set(rates) - RATE_FIELDS
+    if unknown:
+        raise CatalogSyncError(
+            f"{schedule_label} {rates_label} contains unknown rate: {min(unknown)}"
+        )
+    missing = {"input", "output"} - set(rates)
+    if missing:
+        raise CatalogSyncError(f"{schedule_label} {rates_label} is missing rate: {min(missing)}")
+    result: dict[str, str] = {}
+    for field in RATE_FIELD_ORDER:
+        if field not in rates:
+            continue
+        raw_value = rates[field]
+        significant_fractional_digits = (
+            len(raw_value.rsplit(".", 1)[1].rstrip("0"))
+            if isinstance(raw_value, str) and "." in raw_value
+            else 0
+        )
+        if significant_fractional_digits > 6:
+            raise CatalogSyncError(
+                f"{schedule_label} {field} must have at most six fractional digits"
+            )
+        value = _decimal(raw_value, field, schedule_label)
+        if value < 0:
+            raise CatalogSyncError(f"invalid {schedule_label} {field}: {raw_value}")
+        if value.is_zero():
+            result[field] = "0"
+        else:
+            rendered = format(value, "f")
+            result[field] = rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
     return result
 
 
@@ -525,8 +888,19 @@ def _threshold(raw: object, upstream_id: str) -> int:
 
 def _rates(pricing: Mapping[str, object], upstream_id: str, *, required: bool) -> dict[str, str]:
     rates: dict[str, str] = {}
-    for source, destination in TOKEN_FIELDS.items():
-        if source in pricing:
+    for destination, sources in TOKEN_FIELDS.items():
+        candidates = [
+            (source, _decimal(pricing[source], source, upstream_id))
+            for source in sources
+            if source in pricing
+        ]
+        for source, value in candidates:
+            if value < 0:
+                raise CatalogSyncError(
+                    f"invalid pricing {source} for {upstream_id}: {pricing[source]}"
+                )
+        if candidates:
+            source, _value = max(candidates, key=lambda candidate: candidate[1])
             rates[destination] = _per_million(pricing[source], source, upstream_id)
     if required and not rates:
         raise CatalogSyncError(f"pricing for {upstream_id} has no supported token rates")
@@ -570,6 +944,11 @@ def _decimal(raw: object, field: str, upstream_id: str) -> Decimal:
     return value
 
 
+def _without_auth(request: requests.PreparedRequest) -> requests.PreparedRequest:
+    """Prevent ambient netrc credentials from reaching the public endpoint."""
+    return request
+
+
 def _object(raw: object, label: str) -> Mapping[str, object]:
     if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
         raise CatalogSyncError(f"{label} must be a JSON object")
@@ -590,15 +969,6 @@ def _required_string(model: Mapping[str, object], field: str, label: str) -> str
     if not isinstance(value, str) or not value:
         raise CatalogSyncError(f"{field} for {label} must be a nonempty string")
     return value
-
-
-def _different_outputs(catalog_output: Path, pricing_output: Path) -> None:
-    catalog_resolved = _resolved(catalog_output)
-    pricing_resolved = _resolved(pricing_output)
-    if catalog_resolved == pricing_resolved or _same_file(catalog_output, pricing_output):
-        raise CatalogSyncError("catalog and pricing output paths must differ")
-    if catalog_resolved in pricing_resolved.parents or pricing_resolved in catalog_resolved.parents:
-        raise CatalogSyncError("catalog and pricing output paths must not contain one another")
 
 
 def _safe_source_url(url: str) -> tuple[str, str, int]:
@@ -657,10 +1027,10 @@ def _rollback_outputs(backups: Sequence[tuple[Path | None, Path]]) -> str | None
     failure: str | None = None
     for backup, destination in reversed(backups):
         try:
-            if _lexists(destination):
-                destination.unlink()
             if backup is not None and _lexists(backup):
                 backup.replace(destination)
+            elif backup is None and _lexists(destination):
+                destination.unlink()
         except OSError as error:
             failure = f"could not restore {backup} to {destination}: {error}"
     return failure
