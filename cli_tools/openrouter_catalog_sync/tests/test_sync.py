@@ -18,7 +18,9 @@ from openrouter_catalog_sync.sync import (
     fetch_models,
     generate,
     load_policy,
+    selection_choices,
     validate_paths,
+    with_selected_models,
     write_files,
 )
 
@@ -85,7 +87,11 @@ def model(
 
 
 def empty_policy() -> Policy:
-    return Policy({}, frozenset())
+    return Policy((), {}, {}, {}, True)
+
+
+def selected_policy(*upstream_ids: str) -> Policy:
+    return Policy(tuple(upstream_ids), {}, {}, {}, True)
 
 
 def decoded(generated: object) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -236,13 +242,13 @@ def test_fetch_models_translates_stream_errors_and_closes_response() -> None:
     assert response.closed is True
 
 
-def test_generate_filters_models_and_sorts_stably() -> None:
+def test_selection_filters_models_and_generate_sorts_selected_stably() -> None:
     models = [
         model("zeta/model"),
         model("~temporary/model"),
         model("acme/model:batch"),
         model("acme/model:batch-capable"),
-        model("excluded/model"),
+        model("openrouter/free"),
         model("image/model", outputs=["image"]),
         model("parameterless/model", parameters=[]),
         model("expired/model", expiration="2026-09-03T23:59:59Z"),
@@ -250,10 +256,20 @@ def test_generate_filters_models_and_sorts_stably() -> None:
         model("future/model", expiration="2026-09-04"),
         model("alpha/model"),
     ]
-    policy = Policy({}, frozenset({"excluded/model"}))
+    policy = selected_policy(
+        "zeta/model", "future/model", "alpha/model", "acme/model:batch-capable"
+    )
+
+    choices = selection_choices(models, policy, today=date(2026, 9, 3))
 
     catalog, pricing = decoded(generate(models, policy, today=date(2026, 9, 3)))
 
+    assert [choice.upstream_id for choice in choices] == [
+        "acme/model:batch-capable",
+        "alpha/model",
+        "future/model",
+        "zeta/model",
+    ]
     entries = catalog["openrouterCatalog"]["models"]
     assert [entry["upstreamModel"] for entry in entries] == [
         "acme/model:batch-capable",
@@ -267,7 +283,33 @@ def test_generate_filters_models_and_sorts_stably() -> None:
         "future/model",
         "zeta/model",
     ]
+    assert {entry["upstreamModel"] for entry in entries} == set(
+        pricing["providers"]["openrouter"]["models"]
+    )
     assert "description" not in str(catalog)
+
+
+def test_selection_exposes_stale_models_as_preselected_removable_choices() -> None:
+    models = [model("acme/good"), model("image/model", outputs=["image"])]
+    schedule = {"rates": {"input": "1", "output": "2"}}
+    policy = Policy(
+        ("missing/model", "image/model", "acme/good"),
+        {},
+        {"acme/good": schedule},
+        {},
+        True,
+    )
+
+    choices = selection_choices(models, policy, today=date(2026, 9, 3))
+
+    assert [(choice.upstream_id, choice.display_name) for choice in choices] == [
+        ("acme/good", "Useful Model [acme/good]"),
+        ("image/model", "Unavailable (incompatible) [image/model]"),
+        ("missing/model", "Unavailable (unknown) [missing/model]"),
+    ]
+    cleaned = with_selected_models(policy, ["acme/good"])
+    assert cleaned.negotiated_pricing == {"acme/good": schedule}
+    generate(models, cleaned, today=date(2026, 9, 3))
 
 
 def test_alias_name_override_labels_and_collision() -> None:
@@ -276,7 +318,11 @@ def test_alias_name_override_labels_and_collision() -> None:
         model("nous_research/hermes", name=None),
     ]
     policy = Policy(
-        {"google/gemini-2.5:free": "remote/openrouter/google/legacy-gemini"}, frozenset()
+        ("google/gemini-2.5:free", "nous_research/hermes"),
+        {"google/gemini-2.5:free": "remote/openrouter/google/legacy-gemini"},
+        {},
+        {},
+        True,
     )
 
     catalog, _pricing = decoded(generate(models, policy, today=date(2026, 9, 3)))
@@ -292,12 +338,16 @@ def test_alias_name_override_labels_and_collision() -> None:
             "name": "remote/openrouter/nous_research/hermes",
             "upstreamModel": "nous_research/hermes",
             "label": "nous_research/hermes",
-            "group": "Remote-OpenRouter-nous research",
+            "group": "Remote-OpenRouter-Nous Research",
         },
     ]
 
     collision_policy = Policy(
-        {"google/gemini-2.5:free": "remote/openrouter/nous_research/hermes"}, frozenset()
+        ("google/gemini-2.5:free", "nous_research/hermes"),
+        {"google/gemini-2.5:free": "remote/openrouter/nous_research/hermes"},
+        {},
+        {},
+        True,
     )
     with pytest.raises(CatalogSyncError, match="public name collision"):
         generate(models, collision_policy, today=date(2026, 9, 3))
@@ -305,14 +355,18 @@ def test_alias_name_override_labels_and_collision() -> None:
 
 def test_default_alias_replaces_colon_and_rejects_bad_id() -> None:
     catalog, _pricing = decoded(
-        generate([model("author/model:free")], empty_policy(), today=date(2026, 9, 3))
+        generate(
+            [model("author/model:free")],
+            selected_policy("author/model:free"),
+            today=date(2026, 9, 3),
+        )
     )
     assert catalog["openrouterCatalog"]["models"][0]["name"] == (
         "remote/openrouter/author/model-free"
     )
 
     with pytest.raises(CatalogSyncError, match="author and slug"):
-        generate([model("model")], empty_policy(), today=date(2026, 9, 3))
+        generate([model("model")], selected_policy("model"), today=date(2026, 9, 3))
 
 
 def test_pricing_tiers_inherit_overlap_and_apply_source_order() -> None:
@@ -321,25 +375,30 @@ def test_pricing_tiers_inherit_overlap_and_apply_source_order() -> None:
         "completion": "0.000002",
         "input_cache_read": "0",
         "input_cache_write": "0.0000031",
+        "input_cache_write_1h": "0.0000035",
+        "input_audio_cache": "0.0000009",
         "internal_reasoning": "0.000004",
         "audio": "0.000005",
-        "request": "1.25",
+        "audio_output": "0.000006",
+        "request": "0",
         "overrides": [
             {
                 "min_prompt_tokens": 200000,
                 "prompt": "0.000000987654321",
-                "request": "2",
+                "request": "0",
             },
             {"min_prompt_tokens": 100000.0, "completion": "0.000003"},
             {"min_prompt_tokens": 200000, "prompt": "0.0000007777777"},
-            {"min_prompt_tokens": 10, "utc_start": 800, "prompt": "9"},
-            {"min_prompt_tokens": 20, "new_condition": True, "prompt": "9"},
-            {"min_prompt_tokens": 30, "request": "9"},
+            {"min_prompt_tokens": 30, "request": "0"},
         ],
     }
 
     _catalog, rendered = decoded(
-        generate([model("acme/model", pricing=pricing)], empty_policy(), today=date(2026, 9, 3))
+        generate(
+            [model("acme/model", pricing=pricing)],
+            selected_policy("acme/model"),
+            today=date(2026, 9, 3),
+        )
     )
     result = rendered["providers"]["openrouter"]["models"]["acme/model"]
 
@@ -347,10 +406,11 @@ def test_pricing_tiers_inherit_overlap_and_apply_source_order() -> None:
         "rates": {
             "input": "0.123457",
             "output": "2",
-            "cacheRead": "0",
-            "cacheWrite": "3.1",
+            "cacheRead": "0.9",
+            "cacheWrite": "3.5",
             "reasoning": "4",
             "inputAudio": "5",
+            "outputAudio": "6",
         },
         "tiers": [
             {
@@ -358,10 +418,11 @@ def test_pricing_tiers_inherit_overlap_and_apply_source_order() -> None:
                 "rates": {
                     "input": "0.123457",
                     "output": "3",
-                    "cacheRead": "0",
-                    "cacheWrite": "3.1",
+                    "cacheRead": "0.9",
+                    "cacheWrite": "3.5",
                     "reasoning": "4",
                     "inputAudio": "5",
+                    "outputAudio": "6",
                 },
             },
             {
@@ -369,10 +430,11 @@ def test_pricing_tiers_inherit_overlap_and_apply_source_order() -> None:
                 "rates": {
                     "input": "0.777778",
                     "output": "3",
-                    "cacheRead": "0",
-                    "cacheWrite": "3.1",
+                    "cacheRead": "0.9",
+                    "cacheWrite": "3.5",
                     "reasoning": "4",
                     "inputAudio": "5",
+                    "outputAudio": "6",
                 },
             },
         ],
@@ -388,10 +450,99 @@ def test_tier_rates_inherit_omitted_base_fields() -> None:
             "overrides": [{"min_prompt_tokens": 10, "prompt": "0.000003"}],
         },
     )
-    _catalog, pricing = decoded(generate([item], empty_policy(), today=date(2026, 9, 3)))
+    _catalog, pricing = decoded(
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
+    )
     assert pricing["providers"]["openrouter"]["models"]["acme/model"]["tiers"] == [
         {"contextOver": 10, "rates": {"input": "3", "output": "2"}}
     ]
+
+
+def test_tier_cache_aliases_use_effective_source_rates() -> None:
+    item = model(
+        "acme/model",
+        pricing={
+            "prompt": "0.000001",
+            "completion": "0.000002",
+            "input_cache_read": "0.0000005",
+            "input_audio_cache": "0.0000004",
+            "input_cache_write": "0.000003",
+            "input_cache_write_1h": "0.000004",
+            "overrides": [
+                {
+                    "min_prompt_tokens": 10,
+                    "prompt": "0.000002",
+                    "input_audio_cache": "0.0000006",
+                    "input_cache_write": "0.0000035",
+                },
+                {
+                    "min_prompt_tokens": 20,
+                    "input_cache_read": "0.0000007",
+                    "input_cache_write_1h": "0.000005",
+                },
+            ],
+        },
+    )
+
+    _catalog, pricing = decoded(
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
+    )
+
+    assert pricing["providers"]["openrouter"]["models"]["acme/model"]["tiers"] == [
+        {
+            "contextOver": 10,
+            "rates": {
+                "input": "2",
+                "output": "2",
+                "cacheRead": "0.6",
+                "cacheWrite": "4",
+            },
+        },
+        {
+            "contextOver": 20,
+            "rates": {
+                "input": "2",
+                "output": "2",
+                "cacheRead": "0.7",
+                "cacheWrite": "5",
+            },
+        },
+    ]
+
+
+def test_unrepresentable_fetched_pricing_requires_reviewed_pricing() -> None:
+    for override in (
+        {"min_prompt_tokens": 10, "utc_start": 800, "prompt": "0.000003"},
+        {"min_prompt_tokens": 10, "discount": "0.5", "prompt": "0.000003"},
+    ):
+        item = model(
+            "acme/model",
+            pricing={
+                "prompt": "0.000001",
+                "completion": "0.000002",
+                "overrides": [override],
+            },
+        )
+        with pytest.raises(CatalogSyncError, match=r"negotiatedPricing|unknown field"):
+            generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
+
+
+@pytest.mark.parametrize("location", ["base", "override"])
+def test_positive_per_request_pricing_requires_reviewed_pricing(location: str) -> None:
+    pricing: dict[str, object] = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "request": "0.01" if location == "base" else "0",
+    }
+    if location == "override":
+        pricing["overrides"] = [{"min_prompt_tokens": 10, "prompt": "0.000003", "request": "0.01"}]
+
+    with pytest.raises(CatalogSyncError, match=r"per-request pricing.*negotiatedPricing"):
+        generate(
+            [model("acme/model", pricing=pricing)],
+            selected_policy("acme/model"),
+            today=date(2026, 9, 3),
+        )
 
 
 def test_higher_tier_inherits_lower_threshold_changes() -> None:
@@ -406,7 +557,9 @@ def test_higher_tier_inherits_lower_threshold_changes() -> None:
             ],
         },
     )
-    _catalog, pricing = decoded(generate([item], empty_policy(), today=date(2026, 9, 3)))
+    _catalog, pricing = decoded(
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
+    )
     tiers = pricing["providers"]["openrouter"]["models"]["acme/model"]["tiers"]
     assert tiers[1] == {"contextOver": 20, "rates": {"input": "3", "output": "4"}}
 
@@ -423,20 +576,26 @@ def test_applicable_tier_overrides_apply_in_global_source_order() -> None:
             ],
         },
     )
-    _catalog, pricing = decoded(generate([item], empty_policy(), today=date(2026, 9, 3)))
+    _catalog, pricing = decoded(
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
+    )
     tiers = pricing["providers"]["openrouter"]["models"]["acme/model"]["tiers"]
     assert tiers[1] == {"contextOver": 20, "rates": {"input": "3", "output": "2"}}
 
 
-def test_negative_base_token_pricing_excludes_routing_models() -> None:
+def test_negative_base_token_pricing_excludes_routing_models_from_selection() -> None:
     models = [
         model("openrouter/auto", pricing={"prompt": "-1", "completion": "-1"}),
         model("acme/negative-output", pricing={"prompt": "0.1", "completion": "-0.1"}),
         model("acme/supported"),
     ]
 
-    catalog, pricing = decoded(generate(models, empty_policy(), today=date(2026, 9, 3)))
+    choices = selection_choices(models, selected_policy("acme/supported"), today=date(2026, 9, 3))
+    catalog, pricing = decoded(
+        generate(models, selected_policy("acme/supported"), today=date(2026, 9, 3))
+    )
 
+    assert [choice.upstream_id for choice in choices] == ["acme/supported"]
     assert [entry["upstreamModel"] for entry in catalog["openrouterCatalog"]["models"]] == [
         "acme/supported"
     ]
@@ -447,7 +606,7 @@ def test_signed_zero_rates_normalize_to_zero() -> None:
     _catalog, pricing = decoded(
         generate(
             [model("acme/zero", pricing={"prompt": "-0", "completion": "+0.0000000"})],
-            empty_policy(),
+            selected_policy("acme/zero"),
             today=date(2026, 9, 3),
         )
     )
@@ -490,13 +649,13 @@ def test_generate_rejects_malformed_required_data(change: dict[str, object], mes
     item = model("acme/model")
     item.update(change)
     with pytest.raises(CatalogSyncError, match=message):
-        generate([item], empty_policy(), today=date(2026, 9, 3))
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
 
 
 def test_generate_rejects_duplicate_ids_and_thresholds() -> None:
     item = model("acme/model")
     with pytest.raises(CatalogSyncError, match="duplicate model id"):
-        generate([item, item], empty_policy(), today=date(2026, 9, 3))
+        generate([item, item], selected_policy("acme/model"), today=date(2026, 9, 3))
 
     item = model(
         "acme/model",
@@ -509,7 +668,9 @@ def test_generate_rejects_duplicate_ids_and_thresholds() -> None:
             ],
         },
     )
-    _catalog, pricing = decoded(generate([item], empty_policy(), today=date(2026, 9, 3)))
+    _catalog, pricing = decoded(
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
+    )
     assert pricing["providers"]["openrouter"]["models"]["acme/model"]["tiers"] == [
         {"contextOver": 10, "rates": {"input": "200000", "output": "300000"}}
     ]
@@ -526,60 +687,237 @@ def test_generate_rejects_invalid_thresholds(threshold: object) -> None:
         },
     )
     with pytest.raises(CatalogSyncError, match="invalid min_prompt_tokens"):
-        generate([item], empty_policy(), today=date(2026, 9, 3))
+        generate([item], selected_policy("acme/model"), today=date(2026, 9, 3))
 
 
-def test_generated_model_limit_accepts_512_and_rejects_513() -> None:
-    models = [model(f"author/model-{index}") for index in range(513)]
-    catalog, _pricing = decoded(generate(models[:512], empty_policy(), today=date(2026, 9, 3)))
-    assert len(catalog["openrouterCatalog"]["models"]) == 512
-    with pytest.raises(CatalogSyncError, match="exceeds 512 models"):
-        generate(models, empty_policy(), today=date(2026, 9, 3))
+def test_selected_model_limit_accepts_256_and_rejects_257() -> None:
+    models = [model(f"author/model-{index}") for index in range(257)]
+    selected = tuple(f"author/model-{index}" for index in range(256))
+    catalog, _pricing = decoded(
+        generate(models, selected_policy(*selected), today=date(2026, 9, 3))
+    )
+    assert len(catalog["openrouterCatalog"]["models"]) == 256
+    with pytest.raises(CatalogSyncError, match="exceeds 256 models"):
+        generate(
+            models,
+            selected_policy(*(f"author/model-{index}" for index in range(257))),
+            today=date(2026, 9, 3),
+        )
 
 
-def test_load_policy_defaults_and_validation(tmp_path: Path) -> None:
+def test_load_policy_requires_complete_contract_and_validates_it(tmp_path: Path) -> None:
     policy_path = tmp_path / "policy.json"
     policy_path.write_text("{}", encoding="utf-8")
-    assert load_policy(policy_path) == empty_policy()
+    with pytest.raises(CatalogSyncError, match="missing required field"):
+        load_policy(policy_path)
+
+    valid = {
+        "selectedModels": ["acme/model"],
+        "publicNameOverrides": {},
+        "negotiatedPricing": {},
+        "customPricing": {},
+        "grantToAccessGroups": True,
+    }
+    policy_path.write_text(json.dumps(valid), encoding="utf-8")
+    assert load_policy(policy_path) == selected_policy("acme/model")
 
     policy_path.write_text('{"unknown": true}', encoding="utf-8")
     with pytest.raises(CatalogSyncError, match="unknown field"):
         load_policy(policy_path)
 
-    policy_path.write_text('{"publicNameOverrides": {"acme/model": "bad name"}}', encoding="utf-8")
+    invalid = valid | {"publicNameOverrides": {"acme/model": "bad name"}}
+    policy_path.write_text(json.dumps(invalid), encoding="utf-8")
     with pytest.raises(CatalogSyncError, match="invalid public name"):
         load_policy(policy_path)
 
-    policy_path.write_text('{"excludedModels": ["same", "same"]}', encoding="utf-8")
+    invalid = valid | {"selectedModels": ["same", "same"]}
+    policy_path.write_text(json.dumps(invalid), encoding="utf-8")
     with pytest.raises(CatalogSyncError, match="duplicates"):
         load_policy(policy_path)
 
-    policy_path.write_text('{"excludedModels": [], "excludedModels": []}', encoding="utf-8")
-    with pytest.raises(CatalogSyncError, match="duplicate JSON key: excludedModels"):
+    invalid = valid | {"grantToAccessGroups": 1}
+    policy_path.write_text(json.dumps(invalid), encoding="utf-8")
+    with pytest.raises(CatalogSyncError, match="must be a boolean"):
         load_policy(policy_path)
 
     policy_path.write_text(
-        '{"publicNameOverrides": {"acme/model": "one", "acme/model": "two"}}',
+        '{"selectedModels": [], "selectedModels": [], '
+        '"publicNameOverrides": {}, "negotiatedPricing": {}, "customPricing": {}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(CatalogSyncError, match="duplicate JSON key: selectedModels"):
+        load_policy(policy_path)
+
+    policy_path.write_text(
+        '{"selectedModels": [], "publicNameOverrides": '
+        '{"acme/model": "one", "acme/model": "two"}, '
+        '"negotiatedPricing": {}, "customPricing": {}}',
         encoding="utf-8",
     )
     with pytest.raises(CatalogSyncError, match="duplicate JSON key: acme/model"):
         load_policy(policy_path)
 
 
+def test_reviewed_pricing_is_complete_and_canonical(tmp_path: Path) -> None:
+    raw_policy = {
+        "selectedModels": ["acme/model"],
+        "publicNameOverrides": {},
+        "negotiatedPricing": {
+            "acme/model": {
+                "rates": {"input": "+0001.2300000", "output": "-0.0000000"},
+                "tiers": [
+                    {
+                        "contextOver": 100000,
+                        "rates": {"input": "0.000001", "output": "2.500000"},
+                    }
+                ],
+            }
+        },
+        "customPricing": {
+            "custom": {"llama3.2:3b": {"rates": {"input": "0", "output": "0"}}},
+            "deepseek": {
+                "deepseek-chat": {
+                    "rates": {"input": "0.14", "output": "0.28", "cacheRead": "0.0028"}
+                }
+            },
+            "openrouter": {"legacy/model": {"rates": {"input": "0.5", "output": "1"}}},
+        },
+        "grantToAccessGroups": False,
+    }
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(raw_policy), encoding="utf-8")
+    policy = load_policy(policy_path)
+
+    catalog, pricing = decoded(generate([model("acme/model")], policy, today=date(2026, 9, 3)))
+
+    assert catalog["openrouterCatalog"]["grantToAccessGroups"] is False
+    assert catalog["infraAgentgatewayWrapper"] == {
+        "modelCatalog": {
+            "sources": [
+                {
+                    "configMap": {
+                        "name": "client-model-cost-catalog",
+                        "key": "catalog.json",
+                    }
+                }
+            ]
+        }
+    }
+    assert policy.negotiated_pricing["acme/model"] == {
+        "rates": {"input": "1.23", "output": "0"},
+        "tiers": [{"contextOver": 100000, "rates": {"input": "0.000001", "output": "2.5"}}],
+    }
+    providers = pricing["providers"]
+    assert list(providers) == ["custom", "deepseek", "openrouter"]
+    assert providers["custom"]["models"] == {
+        "llama3.2:3b": {"rates": {"input": "0", "output": "0"}}
+    }
+    assert providers["deepseek"]["models"] == {
+        "deepseek-chat": {"rates": {"input": "0.14", "output": "0.28", "cacheRead": "0.0028"}}
+    }
+    assert providers["openrouter"]["models"] == {
+        "acme/model": policy.negotiated_pricing["acme/model"],
+        "legacy/model": {"rates": {"input": "0.5", "output": "1"}},
+    }
+
+
+def test_custom_openrouter_pricing_must_not_overlap_selected_models() -> None:
+    schedule = {"rates": {"input": "1", "output": "2"}}
+    policy = Policy(
+        ("acme/model",),
+        {},
+        {},
+        {"openrouter": {"acme/model": schedule}},
+        True,
+    )
+
+    with pytest.raises(CatalogSyncError, match="also selected: acme/model"):
+        generate([model("acme/model")], policy, today=date(2026, 9, 3))
+
+
+@pytest.mark.parametrize(
+    ("custom_pricing", "message"),
+    [
+        ({"DeepSeek": {}}, "invalid customPricing provider id"),
+        (
+            {"deepseek": {"bad model": {"rates": {"input": "1", "output": "2"}}}},
+            "invalid customPricing provider deepseek model id",
+        ),
+        (
+            {"deepseek": {"deepseek-chat": {"rates": {"input": "1"}}}},
+            "missing rate: output",
+        ),
+        (
+            {"deepseek": {"deepseek-chat": {"rates": {"input": "-1", "output": "0"}}}},
+            "invalid custom pricing",
+        ),
+        (
+            {"deepseek": {"deepseek-chat": {"rates": {"input": "0.0000001", "output": "1"}}}},
+            "at most six fractional digits",
+        ),
+    ],
+)
+def test_custom_pricing_rejects_collisions_and_invalid_identifiers(
+    tmp_path: Path, custom_pricing: object, message: str
+) -> None:
+    raw_policy = {
+        "selectedModels": [],
+        "publicNameOverrides": {},
+        "negotiatedPricing": {},
+        "customPricing": custom_pricing,
+        "grantToAccessGroups": True,
+    }
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps(raw_policy), encoding="utf-8")
+
+    with pytest.raises(CatalogSyncError, match=message):
+        load_policy(policy_path)
+
+
+@pytest.mark.parametrize(
+    ("selected", "message"),
+    [(("missing/model",), "unknown"), (("image/model",), "incompatible")],
+)
+def test_selected_models_fail_closed(selected: tuple[str, ...], message: str) -> None:
+    models = [model("image/model", outputs=["image"])]
+    with pytest.raises(CatalogSyncError, match=message):
+        generate(models, selected_policy(*selected), today=date(2026, 9, 3))
+
+
+def test_public_name_metadata_limit_uses_compact_utf8_map() -> None:
+    count = 122
+    upstream_ids = tuple(f"author/model-{index}" for index in range(count))
+    overrides = {
+        upstream_id: f"n{index:03d}" + "x" * 124 for index, upstream_id in enumerate(upstream_ids)
+    }
+    policy = Policy(upstream_ids, overrides, {}, {}, True)
+
+    with pytest.raises(CatalogSyncError, match="16384 UTF-8 bytes"):
+        generate(
+            [model(upstream_id) for upstream_id in upstream_ids],
+            policy,
+            today=date(2026, 9, 3),
+        )
+
+
 def test_write_then_check_is_deterministic_and_reports_both_mismatches(tmp_path: Path) -> None:
-    generated = generate([model("acme/model")], empty_policy(), today=date(2026, 9, 3))
+    generated = generate(
+        [model("acme/model")], selected_policy("acme/model"), today=date(2026, 9, 3)
+    )
+    policy_path = tmp_path / "policy.json"
     catalog_path = tmp_path / "nested" / "catalog.yaml"
     pricing_path = tmp_path / "other" / "pricing.json"
 
-    write_files(generated, catalog_path, pricing_path)
-    check_files(generated, catalog_path, pricing_path)
+    write_files(generated, policy_path, catalog_path, pricing_path)
+    check_files(generated, policy_path, catalog_path, pricing_path)
+    assert policy_path.read_bytes() == generated.policy
     assert catalog_path.read_bytes() == generated.catalog
     assert pricing_path.read_bytes() == generated.pricing
 
     catalog_path.write_text("stale", encoding="utf-8")
     pricing_path.unlink()
     with pytest.raises(CatalogSyncError) as error:
-        check_files(generated, catalog_path, pricing_path)
+        check_files(generated, policy_path, catalog_path, pricing_path)
     assert "catalog output is out of date" in str(error.value)
     assert "pricing output is missing" in str(error.value)
 
@@ -588,9 +926,9 @@ def test_output_paths_must_differ(tmp_path: Path) -> None:
     generated = generate([], empty_policy(), today=date(2026, 9, 3))
     output = tmp_path / "same"
     with pytest.raises(CatalogSyncError, match="must differ"):
-        write_files(generated, output, output)
+        write_files(generated, tmp_path / "policy", output, output)
     with pytest.raises(CatalogSyncError, match="must differ"):
-        check_files(generated, output, output)
+        check_files(generated, tmp_path / "policy", output, output)
 
 
 def test_output_paths_must_not_contain_one_another(tmp_path: Path) -> None:
@@ -599,9 +937,9 @@ def test_output_paths_must_not_contain_one_another(tmp_path: Path) -> None:
     pricing = catalog / "pricing"
 
     with pytest.raises(CatalogSyncError, match="must not contain"):
-        write_files(generated, catalog, pricing)
+        write_files(generated, tmp_path / "policy", catalog, pricing)
     with pytest.raises(CatalogSyncError, match="must not contain"):
-        check_files(generated, catalog, pricing)
+        check_files(generated, tmp_path / "policy", catalog, pricing)
 
     assert not catalog.exists()
 
@@ -609,8 +947,8 @@ def test_output_paths_must_not_contain_one_another(tmp_path: Path) -> None:
 def test_generate_rejects_oversized_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sync, "MAX_OUTPUT_BYTES", 100)
 
-    with pytest.raises(CatalogSyncError, match="generated catalog exceeds"):
-        generate([model("acme/model")], empty_policy(), today=date(2026, 9, 3))
+    with pytest.raises(CatalogSyncError, match="generated policy exceeds"):
+        generate([model("acme/model")], selected_policy("acme/model"), today=date(2026, 9, 3))
 
 
 def test_write_rejects_non_regular_existing_outputs(tmp_path: Path) -> None:
@@ -623,26 +961,41 @@ def test_write_rejects_non_regular_existing_outputs(tmp_path: Path) -> None:
     symlink.symlink_to(target)
 
     with pytest.raises(CatalogSyncError, match="regular file"):
-        write_files(generated, directory, tmp_path / "new-pricing")
+        write_files(generated, tmp_path / "policy", directory, tmp_path / "new-pricing")
     with pytest.raises(CatalogSyncError, match="regular file"):
-        write_files(generated, tmp_path / "new-catalog", symlink)
+        write_files(generated, tmp_path / "policy", tmp_path / "new-catalog", symlink)
     with pytest.raises(CatalogSyncError, match="regular file"):
-        check_files(generated, directory, tmp_path / "new-pricing")
+        check_files(generated, tmp_path / "policy", directory, tmp_path / "new-pricing")
     with pytest.raises(CatalogSyncError, match="regular file"):
-        check_files(generated, tmp_path / "new-catalog", symlink)
+        check_files(generated, tmp_path / "policy", tmp_path / "new-catalog", symlink)
 
     assert directory.is_dir()
     assert symlink.is_symlink()
     assert target.read_bytes() == b"target"
 
 
-@pytest.mark.parametrize("pricing_exists", [True, False])
-def test_write_rolls_back_pair_when_second_replace_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pricing_exists: bool
+@pytest.mark.parametrize(
+    ("pricing_exists", "failure", "expected"),
+    [
+        (True, OSError("injected final replacement failure"), CatalogSyncError),
+        (False, OSError("injected final replacement failure"), CatalogSyncError),
+        (True, KeyboardInterrupt("injected final replacement failure"), KeyboardInterrupt),
+    ],
+)
+def test_write_rolls_back_all_files_when_final_replace_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pricing_exists: bool,
+    failure: BaseException,
+    expected: type[BaseException],
 ) -> None:
-    generated = generate([model("acme/model")], empty_policy(), today=date(2026, 9, 3))
+    generated = generate(
+        [model("acme/model")], selected_policy("acme/model"), today=date(2026, 9, 3)
+    )
+    policy_path = tmp_path / "policy.json"
     catalog_path = tmp_path / "catalog.yaml"
     pricing_path = tmp_path / "pricing.json"
+    policy_path.write_bytes(b"old policy")
     catalog_path.write_bytes(b"old catalog")
     if pricing_exists:
         pricing_path.write_bytes(b"old pricing")
@@ -653,14 +1006,15 @@ def test_write_rolls_back_pair_when_second_replace_fails(
         nonlocal failed
         if not failed and ".stage." in source.name and target == pricing_path:
             failed = True
-            raise OSError("injected second replacement failure")
+            raise failure
         return original_replace(source, target)
 
     monkeypatch.setattr(Path, "replace", replace_with_fault)
 
-    with pytest.raises(CatalogSyncError, match="injected second replacement failure"):
-        write_files(generated, catalog_path, pricing_path)
+    with pytest.raises(expected, match="injected final replacement failure"):
+        write_files(generated, policy_path, catalog_path, pricing_path)
 
+    assert policy_path.read_bytes() == b"old policy"
     assert catalog_path.read_bytes() == b"old catalog"
     if pricing_exists:
         assert pricing_path.read_bytes() == b"old pricing"
@@ -670,12 +1024,45 @@ def test_write_rolls_back_pair_when_second_replace_fails(
     assert list(tmp_path.glob(".*.backup.*")) == []
 
 
+def test_write_rolls_back_replace_that_succeeds_before_interruption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    generated = generate([], empty_policy(), today=date(2026, 9, 3))
+    policy_path = tmp_path / "policy.json"
+    catalog_path = tmp_path / "catalog.yaml"
+    pricing_path = tmp_path / "pricing.json"
+    paths = (policy_path, catalog_path, pricing_path)
+    originals = (b"old policy", b"old catalog", b"old pricing")
+    for path, content in zip(paths, originals, strict=True):
+        path.write_bytes(content)
+    original_replace = Path.replace
+
+    def replace_then_interrupt(source: Path, target: Path) -> Path:
+        result = original_replace(source, target)
+        if ".stage." in source.name and target == catalog_path:
+            raise KeyboardInterrupt("interrupted after replacement")
+        return result
+
+    monkeypatch.setattr(Path, "replace", replace_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt, match="interrupted after replacement"):
+        write_files(generated, policy_path, catalog_path, pricing_path)
+
+    assert tuple(path.read_bytes() for path in paths) == originals
+    assert list(tmp_path.glob(".*.stage.*")) == []
+    assert list(tmp_path.glob(".*.backup.*")) == []
+
+
 def test_write_preserves_backup_when_rollback_restore_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    generated = generate([model("acme/model")], empty_policy(), today=date(2026, 9, 3))
+    generated = generate(
+        [model("acme/model")], selected_policy("acme/model"), today=date(2026, 9, 3)
+    )
+    policy_path = tmp_path / "policy.json"
     catalog_path = tmp_path / "catalog.yaml"
     pricing_path = tmp_path / "pricing.json"
+    policy_path.write_bytes(b"old policy")
     catalog_path.write_bytes(b"old catalog")
     pricing_path.write_bytes(b"old pricing")
     original_replace = Path.replace
@@ -683,20 +1070,21 @@ def test_write_preserves_backup_when_rollback_restore_fails(
     def replace_with_fault(source: Path, target: Path) -> Path:
         if ".stage." in source.name and target == pricing_path:
             raise OSError("injected replacement failure")
-        if ".backup." in source.name and target == pricing_path:
+        if ".backup." in source.name and target == catalog_path:
             raise OSError("injected restore failure")
         return original_replace(source, target)
 
     monkeypatch.setattr(Path, "replace", replace_with_fault)
 
     with pytest.raises(CatalogSyncError, match=r"rollback failed.*could not restore"):
-        write_files(generated, catalog_path, pricing_path)
+        write_files(generated, policy_path, catalog_path, pricing_path)
 
-    assert catalog_path.read_bytes() == b"old catalog"
-    assert not pricing_path.exists()
-    backups = list(tmp_path.glob(".pricing.json.backup.*"))
+    assert policy_path.read_bytes() == b"old policy"
+    assert catalog_path.read_bytes() == generated.catalog
+    assert pricing_path.read_bytes() == b"old pricing"
+    backups = list(tmp_path.glob(".catalog.yaml.backup.*"))
     assert len(backups) == 1
-    assert backups[0].read_bytes() == b"old pricing"
+    assert backups[0].read_bytes() == b"old catalog"
     assert list(tmp_path.glob(".*.stage.*")) == []
 
 
