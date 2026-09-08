@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,57 @@ from platform_release.commands import CommandRunner
 from platform_release.compact import section_bounds
 
 DIFF = ("git", "diff", "--no-ext-diff", "--no-textconv", "--binary", "--no-renames")
+
+
+def _push(runner: CommandRunner, repo: m.Repository, head: str, ref: str, base: str) -> None:
+    """Bind a non-force push to the authorized advertisement without replacing hooks."""
+    if (
+        m._checked(runner, ("git", "rev-list", "--parents", "-n", "1", head), cwd=repo.path)
+        != f"{head} {base}"
+    ):
+        raise m.ReleaseError("upload commit must have exactly the authorized PR head as its parent")
+    hooks = Path(
+        m._checked(
+            runner,
+            ("git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"),
+            cwd=repo.path,
+        )
+    )
+    with tempfile.TemporaryDirectory(prefix="platform-release-push-") as directory:
+        scoped = Path(directory)
+        if hooks.is_dir():
+            for hook in hooks.iterdir():
+                if hook.name != "pre-push":
+                    (scoped / hook.name).symlink_to(hook)
+        command = shlex.join(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("push_hook.py")),
+                head,
+                ref,
+                base,
+                str(hooks / "pre-push"),
+            ]
+        )
+        wrapper = scoped / "pre-push"
+        wrapper.write_text(f'#!/bin/sh\nexec {command} "$@"\n')
+        wrapper.chmod(0o700)
+        # The hook checks the advertised old OID; receive-pack locks and compares
+        # that same OID at update time. No lease/force or persistent hook changes.
+        m._checked(
+            runner,
+            (
+                "git",
+                "-c",
+                f"core.hooksPath={scoped}",
+                "push",
+                "--atomic",
+                "--no-follow-tags",
+                "origin",
+                f"{head}:{ref}",
+            ),
+            cwd=repo.path,
+        )
 
 
 def public_check(original: Path, explicit: Path | None) -> Path | None:
@@ -159,18 +212,7 @@ def _upload(
     if m._checked(runner, ("git", "status", "--porcelain"), cwd=repo.path):
         raise m.ReleaseError("notes checkout is no longer clean; inspect it before pushing")
     _gate(runner, repo, args, head, branch)
-    m._checked(
-        runner,
-        (
-            "git",
-            "push",
-            "--atomic",
-            "--no-follow-tags",
-            "origin",
-            f"HEAD:refs/heads/{pr['headRefName']}",
-        ),
-        cwd=repo.path,
-    )
+    _push(runner, repo, head, f"refs/heads/{pr['headRefName']}", base)
 
 
 def offer_upload(

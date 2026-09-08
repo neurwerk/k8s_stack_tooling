@@ -226,7 +226,14 @@ diff against the preview, uses normal commit hooks, and verifies the resulting t
 and single parent. It revalidates the original and editable repositories' origins,
 open PR identity and exact remote branch head before commit and again before push.
 The only remote write is `git push --atomic --no-follow-tags origin
-HEAD:refs/heads/release/vX.Y.Z`, without force, admin overrides or history rewrites.
+COMMIT:refs/heads/release/vX.Y.Z`, pinned to the reviewed single-parent child,
+without force, leases, admin overrides or history rewrites. A temporary push-scoped
+`core.hooksPath` wrapper checks that receive-pack advertises exactly the authorized
+old SHA for that one ref. It rejects deletion, rewind, advance and already-current
+no-op races; receive-pack rejects subsequent ref changes when applying the update.
+The existing executable pre-push hook receives its original arguments and exact stdin,
+and its failure still blocks the push. Other hooks are forwarded through symlinks;
+installed hooks and repository configuration are not edited.
 
 On failure, local files, any staged changes and any commit stay available. A failed
 commit hook prevents pushing; resolve its cause and inspect retained staged changes

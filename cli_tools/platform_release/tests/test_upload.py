@@ -13,10 +13,26 @@ from platform_release import upload as u
 COMMIT = "d" * 40
 TREE = "e" * 40
 CHANGED = ("CHANGELOG.md", f"release/migrations/{TAG}.md")
-PUSH = ("git", "push", "--atomic", "--no-follow-tags", "origin", f"HEAD:refs/heads/release/{TAG}")
+PUSH = (
+    "git",
+    "push",
+    "--atomic",
+    "--no-follow-tags",
+    "origin",
+    f"{COMMIT}:refs/heads/release/{TAG}",
+)
 
 
 class UploadRunner(Fake):
+    @override
+    def run(self, arguments, *, cwd=None):
+        a = tuple(arguments)
+        if a[:2] == ("git", "-c"):
+            assert a[2].startswith("core.hooksPath=")
+            assert (Path(a[2].split("=", 1)[1]) / "pre-push").is_file()
+            a = ("git", *a[3:])
+        return super().run(a, cwd=cwd)
+
     def __init__(self, repo):
         super().__init__()
         self.repo = repo
@@ -32,6 +48,10 @@ class UploadRunner(Fake):
 
     @override
     def respond(self, a):  # noqa: C901 - Explicit stateful command table keeps writes auditable.
+        if a == ("git", "rev-list", "--parents", "-n", "1", COMMIT):
+            return f"{COMMIT} {SHA}"
+        if a == ("git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"):
+            return str(self.repo.path / ".git/hooks")
         if a == ("git", "diff", "--cached", "--name-only"):
             return "\n".join(CHANGED) if self.index else ""
         if a[: len(u.DIFF)] == u.DIFF:
