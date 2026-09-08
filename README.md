@@ -2,13 +2,14 @@
 
 Python runtime utilities and trusted-workstation command-line tools used to
 operate the neurwerk Kubernetes stack. This repository contains one container
-package and four independently locked CLI projects.
+package and five independently locked CLI projects.
 
 ## Projects
 
 | Project | Purpose | Execution environment |
 | --- | --- | --- |
 | `k8s-stack-tooling` | Idempotent Keycloak and OpenSearch initialization commands | Kubernetes Jobs in the tooling container image |
+| [`platform-release`](cli_tools/platform_release/) | Reviews, checks and stages signed Base platform releases through protected workflows | Trusted release custodian workstation |
 | [`package-checker`](cli_tools/package_checker/) | Reports published GHCR versions and active GitHub Actions builds | Developer or operator workstation |
 | [`media-downloader-uploader`](cli_tools/media_downloader_uploader/) | Downloads verified Hugging Face artifacts and publishes immutable PII bundles | Workstation with external storage and explicit cluster access |
 | [`openbao-stack-setup`](cli_tools/openbao_stack_setup/) | Bootstraps, reconciles, verifies, and updates supported OpenBao state | Trusted operator workstation only |
