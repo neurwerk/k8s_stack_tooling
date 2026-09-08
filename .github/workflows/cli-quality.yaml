@@ -18,6 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Platform Release
+            project: cli_tools/platform_release
+            needs_base: false
           - name: K8s Stack Tooling
             project: .
             needs_base: false
