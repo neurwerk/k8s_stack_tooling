@@ -252,6 +252,43 @@ def test_uploaded_final_head_is_reselected_and_recomputed(correction, monkeypatc
     assert canonical.call_args.kwargs == {"refresh": (SHA, OLD)}
 
 
+@pytest.mark.parametrize("already_open", [True, False])
+def test_upload_reselects_original_pr_when_multiple_releases_are_open(
+    correction, monkeypatch, already_open
+):
+    runner, snapshot, editable, args, data, _, _ = correction
+    second = release_pr(number=43, headRefName="release/v1.0.2")
+    prs = [args.selected_pr, second] if already_open else [args.selected_pr]
+    monkeypatch.setattr(
+        m,
+        "_release_prs",
+        lambda runner, repo, state, tag=None: [
+            pr for pr in prs if tag is None or pr["headRefName"] == f"release/{tag}"
+        ],
+    )
+    args.pr = args.tag = None
+    menu = Mock(ask=Mock(return_value=f"{TAG} | PR #42"))
+    args.selected_pr = m._select_check_pr(runner, snapshot, args, menu)
+    assert menu.ask.call_count == int(already_open)
+    uploaded_pr = {**args.selected_pr, "headRefOid": OLD}
+
+    def upload(*a, **kw):
+        runner.heads[editable.path] = OLD
+        prs[:] = [uploaded_pr, second]
+        return True
+
+    monkeypatch.setattr(u, "offer_upload", upload)
+    checkout = Mock(return_value=editable)
+    monkeypatch.setattr(m, "_release_checkout", checkout)
+    canonical = Mock(side_effect=[data, {"config": {}}, data, data])
+    monkeypatch.setattr(n, "_canonical", canonical)
+    assert n.check_updates(runner, snapshot, args, Mock(ask=Mock(return_value="yes"))) == editable
+    assert args.selected_pr == uploaded_pr
+    assert checkout.call_args.kwargs["pr"] == uploaded_pr
+    assert canonical.call_args.kwargs == {"refresh": (SHA, OLD)}
+    assert args.pr is None and args.tag is None
+
+
 def test_canonical_uses_base_ancestor_and_provenance_helpers(monkeypatch, capsys):
     config = {
         "summary": "Keep authored summary",

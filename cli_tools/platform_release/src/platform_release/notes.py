@@ -182,7 +182,8 @@ def check_updates(  # noqa: C901 - Keep the ordered correction and upload gates 
         formatting_checked=True,
     ):
         raise m.ReleaseError("corrections remain local; upload them before checking the release")
-    selected = m._select_check_pr(runner, original, args, None)
+    selection = argparse.Namespace(pr=pr["number"], tag=pr["headRefName"].removeprefix("release/"))
+    selected = m._select_check_pr(runner, original, selection, None)
     uploaded = m._checked(runner, ("git", "rev-parse", "HEAD"), cwd=editable.path)
     if selected["number"] != pr["number"] or selected["headRefOid"] != uploaded:
         raise m.StaleTargetError("PR changed after upload; reselect it for a fresh check")
