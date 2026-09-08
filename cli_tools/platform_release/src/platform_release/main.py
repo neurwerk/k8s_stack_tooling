@@ -98,7 +98,8 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
         help="Authorize origin fetch and isolated worktree creation without a local prompt.",
     )
     commands = parser.add_subparsers(dest="command")
-    for name in ("status", "continue"):
+    commands.add_parser("guide", help="Show the five release steps.")
+    for name in ("status", "continue", "merge"):
         command = commands.add_parser(
             name, help="Inspect a release; continue waits for final publication."
         )
@@ -111,7 +112,7 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
             "--changelog", action="store_true", help="Show the GitHub Release notes."
         )
     check = commands.add_parser(
-        "check", help="Validate an open release PR without remote mutations."
+        "check", help="Check an open release PR and offer confirmed release-file corrections."
     )
     targets = check.add_mutually_exclusive_group()
     targets.add_argument("--tag", help="Select the open release PR for this exact tag.")
@@ -587,9 +588,9 @@ def prepare(
     _checked(runner, command)
     return (
         f"Dispatched Prepare Release PR for {tag}. "
-        "Next: 2. Finish release notes (finish-notes), then 3. Validate release (check). "
+        "Next: 2. Review notes (finish-notes), then 3. Check (check). "
         "Merge the reviewed release PR on GitHub before "
-        "Sign and publish (publish). Use Release status to inspect the PR once available."
+        "5. Publish (publish). Use Release status to inspect the PR once available."
     )
 
 
@@ -720,7 +721,7 @@ def _release_prs(
         "--limit",
         "1000",
         "--json",
-        "number,state,url,headRefName,headRefOid,mergeCommit,author,isCrossRepository,baseRefName",
+        "number,state,url,headRefName,headRefOid,mergeCommit,author,isCrossRepository,baseRefName,isDraft",
     ]
     if tag:
         command.extend(("--head", f"release/{tag}"))
@@ -823,7 +824,8 @@ def _show_prepare_preview(
         f"Source target SHA ({repository.default_branch}): {target}\n"
         f"\n## [Unreleased]\n\n{_unreleased_notes(changelog)}\n\n"
         "This dispatch creates a draft release PR; it does not sign, publish, or deploy.\n"
-        "The workflow uses the default branch at execution time; review generated provenance."
+        f"The workflow uses {repository.default_branch} when it runs; "
+        "review the included changes in the draft."
     )
 
 
@@ -834,7 +836,7 @@ def _show_evidence(runner: CommandRunner, repository: Repository) -> None:
         content = _checked(runner, ("git", "show", f"HEAD:{path}"), cwd=repository.path)
         print(f"\n--- {path} ---\n{content}")
     print(
-        "Review this release's changelog, manifest and migration evidence before proceeding. "
+        "Review this release's notes, release files and upgrade instructions before proceeding. "
         "No cluster or adoption action is authorized."
     )
 
@@ -1177,13 +1179,8 @@ def _render_summary(report: dict[str, Any]) -> str:
     status = report["status"]
     lines = [
         f"{status['repository']} | {status['tag']}",
-        f"HEAD: {status['commit']} ({status['branch'] or 'detached'}; "
-        f"{'clean' if status['clean'] else 'dirty'})",
-        f"Remote {status['default_branch']}: {status['remote_default_commit'] or 'unavailable'}",
-        f"HEAD sync: {status['head_sync']}. {status['sync_note']}",
-        "NEW RELEASES: prepare from a clean linked worktree at current remote "
-        f"{status['default_branch']}. Prepare/publish fetch into an isolated checkout; "
-        "status does not.",
+        f"Local checkout: {status['head_sync']} (not the source of a pending release PR).",
+        "Prepare and Publish use a separate checkout; your local files stay untouched.",
         f"Latest verified published tag: {status['latest_published']}; "
         f"next patch: {status['next_patch']}",
     ]
@@ -1202,6 +1199,14 @@ def _render_summary(report: dict[str, Any]) -> str:
     for pr in report["release_prs"]:
         if pr.get("url"):
             lines.append(f"Release PR: {pr['url']}")
+        state = (
+            "ready for review" if pr.get("state") == "OPEN" else pr.get("state", "unknown").lower()
+        )
+        lines.append(
+            f"PR: {'draft' if pr.get('isDraft') else state}; "
+            f"checks: {pr.get('checks_state', 'unknown')}; "
+            f"commit: {pr.get('headRefOid', 'unknown')}"
+        )
     lines.extend(
         [
             f"GitHub Release: {report['release_state']}",
@@ -1224,13 +1229,13 @@ def _render_summary(report: dict[str, Any]) -> str:
         lines.append(f"{label}: {obj} ({trust})" if obj else f"{label}: missing")
     lines.extend(
         [
-            f"Exact-tag verifier: {report['verifier_status']}",
-            "Correlated publication pipeline: "
+            f"Release verification: {report['verifier_status']}",
+            "Publication verification: "
             + (
                 "verified"
                 if report.get("publication_verified")
-                else "not checked by status; publication existence is separate evidence. "
-                "Use continue for artifact-correlated verification (artifacts may expire)."
+                else "not checked by status. Use Publication progress (continue) to verify "
+                "the completed workflow; older verification records may have expired."
             ),
             f"Next: {report['next_action']}",
             "Views: status --diagnostics (full details), status --changelog, or --json status.",
@@ -1239,14 +1244,27 @@ def _render_summary(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+GUIDE = """Release guide
+1. Prepare: create a release draft.
+2. Review notes: keep or edit the notes and upgrade instructions.
+3. Check: update outdated release files if needed, then run all checks.
+4. Merge: open the release PR on GitHub, mark Ready for review, wait for green checks,
+   resolve required reviews, then merge on GitHub.
+5. Publish: sign and publish the merged release after confirmation.
+
+Nothing merges automatically. Publishing does not deploy to a cluster.
+"""
+
+
 def _interactive_command(prompt: Prompt) -> str:
     """Offer the release lifecycle without defaulting to a mutation."""
     choices = [
         questionary.Separator("Release Steps"),
-        questionary.Choice("1. Prepare release draft", value="prepare"),
-        questionary.Choice("2. Finish release notes", value="finish-notes"),
-        questionary.Choice("3. Validate release", value="check"),
-        questionary.Choice("4. Sign and publish", value="publish"),
+        questionary.Choice("1. Prepare", value="prepare"),
+        questionary.Choice("2. Review notes", value="finish-notes"),
+        questionary.Choice("3. Check", value="check"),
+        questionary.Choice("4. Merge on GitHub", value="merge"),
+        questionary.Choice("5. Publish", value="publish"),
         questionary.Separator("\nInformation"),
         questionary.Choice("Release status", value="status"),
         questionary.Choice("Changelog", value="changelog"),
@@ -1292,10 +1310,10 @@ def _wizard(
         )
         args.summary = prompt.ask("Release summary: ")
         args.confirm = None
-    elif args.command in ("status", "continue"):
+    elif args.command in ("status", "continue", "merge"):
         args.tag = _target_tag(runner, repository, prompt)
     elif args.command == "publish":
-        args.tag = _tag(prompt.ask("Exact reviewed release tag: "))
+        args.tag = _tag(prompt.ask("Reviewed release version (vX.Y.Z): "))
         args.confirm = None
         args.signing_public_key = _default_public_key()
 
@@ -1405,6 +1423,8 @@ def inspect_progress(
         )
     )
     prs = _release_prs(runner, repository, "all", status.tag)
+    for pr in prs:
+        pr["checks_state"] = _pr_checks_state(runner, repository, pr)
     releases = json.loads(
         _checked(
             runner,
@@ -1451,8 +1471,108 @@ def inspect_progress(
         "release_state": release_state,
         "release_url": published[0].get("html_url", "") if published else "",
         "verifier_status": verifier,
-        "next_action": _next_action(release_state, local, final, staged),
+        "next_action": (
+            _pr_next_action(prs)
+            if release_state == "missing" and not any((local, final, staged))
+            else _next_action(release_state, local, final, staged)
+        ),
     }
+
+
+def _pr_checks_state(runner: CommandRunner, repo: Repository, pr: dict[str, Any]) -> str:
+    """Correlate required checks with the observed PR head, failing closed on races."""
+    result = runner.run(
+        (
+            "gh",
+            "pr",
+            "checks",
+            str(pr["number"]),
+            "--repo",
+            repo.slug,
+            "--required",
+            "--json",
+            "name,bucket,link",
+        ),
+        cwd=repo.path,
+    )
+    checks = json.loads(result.stdout) if result.stdout.strip() else []
+    runs = json.loads(
+        _checked(
+            runner,
+            (
+                "gh",
+                "api",
+                f"repos/{repo.slug}/commits/{pr['headRefOid']}/check-runs",
+                "--paginate",
+                "--slurp",
+                "--jq",
+                "[.[].check_runs[]]",
+            ),
+        )
+    )
+    latest = max(
+        (c for c in runs if c.get("name") == "Required CI"), key=lambda c: c["id"], default={}
+    )
+    current = _release_prs(runner, repo, "all", pr["headRefName"].removeprefix("release/"))
+    if not any(
+        p["number"] == pr["number"]
+        and p.get("headRefOid") == pr["headRefOid"]
+        and p.get("state") == pr.get("state")
+        and p.get("isDraft") == pr.get("isDraft")
+        for p in current
+    ):
+        return "unknown (PR changed; refresh status)"
+    if latest.get("head_sha") != pr["headRefOid"]:
+        return "unknown"
+    if any(c.get("bucket") in ("fail", "cancel") for c in checks) or (
+        latest.get("status") == "completed" and latest.get("conclusion") not in ("success", None)
+    ):
+        return "failed"
+    if (
+        result.returncode == 8
+        or any(c.get("bucket") == "pending" for c in checks)
+        or (latest.get("status") != "completed")
+    ):
+        return "pending"
+    if (
+        result.returncode == 0
+        and checks
+        and latest.get("conclusion") == "success"
+        and all(c.get("bucket") in ("pass", "skipping") for c in checks)
+    ):
+        return "passing"
+    return "unknown"
+
+
+def _pr_next_action(prs: list[dict[str, Any]]) -> str:
+    """Give one next action without treating green CI as release-file validation."""
+    opened = [pr for pr in prs if pr.get("state") == "OPEN"]
+    if len(opened) > 1:
+        return "Select a release with --tag before continuing."
+    if opened:
+        pr = opened[0]
+        url = pr.get("url") or f"PR #{pr['number']}"
+        checks = pr.get("checks_state", "unknown")
+        if checks == "failed":
+            return f"3. Check: fix failed checks for {url}; green CI alone does not check notes."
+        if pr.get("isDraft"):
+            return (
+                f"3. Check, then 4. Merge: choose Ready for review at {url}; wait for green checks."
+            )
+        if checks == "pending":
+            return f"4. Merge: wait for green checks at {url}; do not merge yet."
+        if checks == "passing":
+            return (
+                "4. Merge: after 3. Check passes and required reviews are resolved, "
+                f"merge at {url}."
+            )
+        return f"Refresh checks at {url}; their current result could not be verified."
+    merged = [pr for pr in prs if pr.get("state") == "MERGED"]
+    if merged:
+        if len(merged) != 1 or merged[0].get("checks_state") != "passing":
+            return "Resolve or refresh the merged PR checks before 5. Publish."
+        return "5. Publish: the release PR is merged; publishing requires your confirmation."
+    return "1. Prepare: create a release draft."
 
 
 def _release_state(releases: list[dict[str, Any]]) -> str:
@@ -1596,11 +1716,27 @@ def check_release(runner: CommandRunner, repository: Repository, pr: dict[str, A
     ]
     if any(re.search(r"\bTODO\b", text, re.IGNORECASE) for text in evidence):
         raise ReleaseError(
-            "Release documentation is unfinished. Use 2. Finish release notes (finish-notes), "
-            "review and upload the saved draft, then retry 3. Validate release. "
-            "No expensive checks executed; full checks remain required."
+            "Release documentation is unfinished. Use 2. Review notes (finish-notes), "
+            "review and upload the saved draft, then retry 3. Check. "
+            "Full checks remain required."
         )
     _check_pr_head(runner, repository, pr)
+    failures = run_checks(runner, repository)
+    _check_pr_head(runner, repository, pr)
+    _clean_target(runner, repository, target)
+    if failures:
+        raise ReleaseError("; ".join(failures))
+    print(
+        "Manual handoff: review and merge "
+        f"https://github.com/{repository.slug}/pull/{pr['number']} "
+        "with 4. Merge on GitHub: mark Ready for review, wait for green checks, "
+        "and resolve required reviews. Then choose 5. Publish. "
+        "Validation does not merge, sign, publish or deploy."
+    )
+
+
+def run_checks(runner: CommandRunner, repository: Repository) -> list[str]:
+    """Run both canonical checks, retaining every ordinary failure and full private logs."""
     failures = []
     for command in (("make", "check"), ("make", "release-check")):
         print(f"\nRunning {' '.join(command)}", flush=True)
@@ -1615,16 +1751,7 @@ def check_release(runner: CommandRunner, repository: Repository, pr: dict[str, A
                 f"{' '.join(command)} failed (exit {result.returncode})"
                 + (f": {result.stderr.strip()}" if result.stderr.strip() else "")
             )
-    _check_pr_head(runner, repository, pr)
-    _clean_target(runner, repository, target)
-    if failures:
-        raise ReleaseError("; ".join(failures))
-    print(
-        "Manual handoff: review and merge "
-        f"https://github.com/{repository.slug}/pull/{pr['number']} "
-        "after required CI, approvals and review resolution. Then choose 4. Sign and publish. "
-        "Validation does not merge, sign, publish or deploy."
-    )
+    return failures
 
 
 def _select_command(args: argparse.Namespace, prompt: Prompt, isatty: bool | None) -> bool:
@@ -1708,7 +1835,7 @@ def _prepare_default_checkout(
     return _release_checkout(runner, repository, args.worktree_root)
 
 
-def run_cli(
+def run_cli(  # noqa: C901 - Explicit lifecycle dispatch keeps mutation boundaries visible.
     arguments: Sequence[str] | None = None,
     *,
     runner: CommandRunner | None = None,
@@ -1721,6 +1848,11 @@ def run_cli(
     active_runner = runner or SubprocessRunner(verbose=args.verbose)
     active_prompt = prompt or TerminalPrompt()
     try:
+        if args.command == "guide":
+            print(GUIDE)
+            return 0
+        if args.command is None:
+            print(GUIDE)
         while True:
             interactive = _select_command(args, active_prompt, isatty)
             if args.command == "quit":
@@ -1766,13 +1898,18 @@ def _execute(
     sleep: Callable[[float], None],
 ) -> None:
     """Execute one selected action without replaying it on menu return."""
-    if args.command in ("status", "continue"):
+    if args.command in ("status", "continue", "merge"):
         report = (
             inspect_progress(runner, repository, args.tag)
-            if args.command == "status"
+            if args.command in ("status", "merge")
             else continue_release(runner, repository, args.tag, sleep)
         )
         print(_render(report, args.as_json, diagnostics=args.diagnostics, changelog=args.changelog))
+        if args.command == "merge":
+            print(
+                "On the release PR above: Ready for review, wait for green checks, "
+                "resolve required reviews, then merge on GitHub. No merge was performed."
+            )
     elif args.command == "plan":
         print(_render(plan(runner, repository, args.version), args.as_json))
     elif args.command in ("prepare", "publish"):
@@ -1791,6 +1928,9 @@ def _execute(
                 print("Remote tip changed; revalidating before requesting a fresh confirmation.")
                 repository = _release_checkout(runner, repository, args.worktree_root)
     elif args.command == "check":
+        from platform_release.notes import check_updates
+
+        repository = check_updates(runner, repository, args, prompt)
         check_release(runner, repository, args.selected_pr)
         print("Full Base and pre-tag release checks passed.")
     elif args.command == "finish-notes":

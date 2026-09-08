@@ -199,7 +199,9 @@ def _upload(
     # Prepared PRs already track all five files. This also ensures the guard scans
     # all evidence before staging, rather than missing a new untracked document.
     m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *paths), cwd=repo.path)
-    m._checked(runner, ("make", "release-check"), cwd=repo.path, live=True)
+    failures = m.run_checks(runner, repo)
+    if failures:
+        raise m.ReleaseError("; ".join(failures))
     m._checked(runner, (str(guard), "--scan-only"), cwd=repo.path)
     _gate(runner, repo, args, head, branch)
     _unchanged(runner, repo, base, preview, snapshot)
@@ -215,6 +217,55 @@ def _upload(
     _push(runner, repo, head, f"refs/heads/{pr['headRefName']}", base)
 
 
+def _format_for_upload(
+    runner: CommandRunner,
+    repo: m.Repository,
+    args: argparse.Namespace,
+    prompt: m.Prompt,
+    preview: str,
+    head: str,
+    *,
+    confirmed: bool = True,
+) -> str:
+    """Run configured hooks before staging; permit one bounded formatting-fix retry."""
+    pr = args.selected_pr
+    paths = n.evidence_paths(pr["headRefName"].removeprefix("release/"))
+    n._evidence_only(runner, repo, paths)
+    m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *paths), cwd=repo.path)
+    before = n._snapshot(repo, paths)
+    command = ("pre-commit", "run", "--files", *paths)
+    sys.stdout.write("Running formatting and pre-commit checks\n")
+    result = runner.run_live(command, cwd=repo.path)
+    n._evidence_only(runner, repo, paths)
+    _empty_index(runner, repo)
+    after = n._snapshot(repo, paths)
+    changed = [name for name in paths if before[name] != after[name]]
+    if changed and head != pr["headRefOid"]:
+        raise m.ReleaseError("hooks modified a pending commit; preserve it and review manually")
+    if changed:
+        sys.stdout.write("Formatting updated: " + ", ".join(changed) + "\n")
+        preview = _review(runner, repo, pr["headRefOid"])
+        can_prompt = not isinstance(prompt, m.TerminalPrompt) or sys.stdin.isatty()
+        if can_prompt and prompt.ask("Show full file changes? [yes/No]: ") == "yes":
+            sys.stdout.write(preview + "\n")
+        # A fixing hook returns 1. Never retry a failure unless files actually changed.
+        if result.returncode in (0, 1):
+            result = runner.run_live(command, cwd=repo.path)
+        _unchanged(runner, repo, pr["headRefOid"], preview, after)
+        _empty_index(runner, repo)
+    sys.stdout.write(f"{'FAIL' if result.returncode else 'PASS'} formatting and pre-commit\n")
+    if result.returncode:
+        failures = m.run_checks(runner, repo)
+        raise m.ReleaseError("pre-commit failed: " + result.stderr + "; " + "; ".join(failures))
+    if (
+        changed
+        and confirmed
+        and prompt.ask("Upload these formatting corrections too? [yes/No]: ") != "yes"
+    ):
+        raise m.ReleaseError("formatting corrections retained locally; no upload authorized")
+    return preview
+
+
 def offer_upload(
     runner: CommandRunner,
     repo: m.Repository,
@@ -222,7 +273,8 @@ def offer_upload(
     prompt: m.Prompt,
     *,
     compact_renderer: bool | None = None,
-) -> None:
+    formatting_checked: bool = False,
+) -> bool:
     """Offer a default-No upload and report completion only after push succeeds."""
     pr: dict[str, Any] = args.selected_pr
     url = f"https://github.com/{repo.slug}/pull/{pr['number']}"
@@ -249,8 +301,16 @@ def offer_upload(
     body = changelog[start:end].strip()
     sys.stdout.write(f"\n{label}:\n## {tag}\n\n{body}\n")
     if not preview:
-        sys.stdout.write("No changes to upload. Select 3. Validate release for the current PR.\n")
-        return
+        sys.stdout.write("No changes to upload. Select 3. Check for the current PR.\n")
+        return False
+    changed = m._checked(
+        runner,
+        ("git", "diff", "--name-only", "--no-renames", pr["headRefOid"], "--"),
+        cwd=repo.path,
+    )
+    sys.stdout.write("Changed release files:\n" + changed + "\n")
+    if isinstance(prompt, m.TerminalPrompt) and not sys.stdin.isatty():
+        raise m.ReleaseError("corrections remain local; use interactive check to authorize upload")
     question = "Update release PR?"
     accepted = (
         m.questionary.confirm(question, default=False).ask() is True
@@ -258,8 +318,8 @@ def offer_upload(
         else prompt.ask(question + " [yes/No]: ") == "yes"
     )
     if not accepted:
-        sys.stdout.write("Kept locally; rerun Finish release notes to review and upload later.\n")
-        return
+        sys.stdout.write("Kept locally; rerun Review notes to review and upload later.\n")
+        return False
     guard = public_check(args.base_repo, getattr(args, "public_check", None))
     if guard is None:
         sys.stdout.write(
@@ -268,8 +328,10 @@ def offer_upload(
             "to configure .config/confidentiality-guard above the original Base checkout. "
             "Notes remain local; no commit or push attempted.\n"
         )
-        return
+        return False
     try:
+        if not formatting_checked:
+            preview = _format_for_upload(runner, repo, args, prompt, preview, head)
         _upload(runner, repo, args, guard, preview, head)
     except m.ReleaseError as error:
         raise m.ReleaseError(
@@ -280,7 +342,8 @@ def offer_upload(
             "finish-notes without another commit; resolve staged changes or other history manually."
         ) from error
     sys.stdout.write(
-        f"UPDATED release PR: {url}\nNext: 3. Validate release. Full make check and release-check "
+        f"UPDATED release PR: {url}\nNext: 3. Check. Full make check and release-check "
         "remain required on the uploaded PR. Merge manually after CI and review, "
-        "before 4. Sign and publish. No merge, tag or publication was performed.\n"
+        "before 5. Publish. No merge, tag or publication was performed.\n"
     )
+    return True

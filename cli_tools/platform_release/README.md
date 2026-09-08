@@ -2,7 +2,7 @@
 
 Standalone trusted-workstation CLI for Base's existing release workflows. It is
 not included in the tooling image. Requires Python 3.12+, uv, Git, authenticated
-`gh`, OpenSSH, and all tools required by the selected Base checkout's `make check`.
+`gh`, OpenSSH, `pre-commit`, and all tools required by the selected Base checkout's `make check`.
 
 ```bash
 uv sync --frozen --dev
@@ -44,7 +44,12 @@ The latest published tag is verified against its remote signed annotated object.
 No unreleased local VERSION is used for the next-patch default. Read-only status
 and plan require that tag already be available locally; they never fetch it.
 
-Human status is concise: publication state and URL, verified local signed identity,
+Human status shows the release PR URL, draft/ready state, and failed/pending/passing
+required checks correlated with the current PR head and latest `Required CI` run.
+It gives one next action. Green CI alone does not validate the release notes or
+included-change record. The local checkout's behind/ahead state is not the source
+included in an open release PR; full checkout details remain in diagnostics/JSON.
+Status also shows publication state and URL, verified local signed identity,
 remote final/staging matches, and exact-tag verifier status. A published GitHub Release
 is not a claim that the artifact-correlated pipeline has been verified by this inspection.
 Use `continue` for that separate check; expired artifacts can prevent verification of
@@ -65,9 +70,11 @@ after one operation rather than returning to a mutation that could be repeated.
 
 ## Lifecycle
 
-The single interactive menu has two visual sections: **Release Steps** contains
-**1. Prepare release draft** (`prepare`), **2. Finish release notes** (`finish-notes`),
-**3. Validate release** (`check`), and **4. Sign and publish** (`publish`).
+Startup prints a short guide, also available offline with `guide`. The single
+interactive menu has two visual sections: **Release Steps** contains
+**1. Prepare** (`prepare`), **2. Review notes** (`finish-notes`),
+**3. Check** (`check`), **4. Merge on GitHub** (`merge`), and **5. Publish** (`publish`).
+There is a blank separator before **Information**.
 **Information** contains **Release status**
 (`status`), **Changelog** (`changelog`), **Preview next release** (`plan`),
 **Publication progress** (`continue`), and **Diagnostics** (`diagnostics`).
@@ -100,7 +107,7 @@ Release status shows PR links when available from its existing inspection.
    A prepared but unpublished release blocks starting another one. Preparation creates
    a draft PR; it does not sign, publish or deploy. Repository identity and the captured
    source commit are revalidated after confirmation and before dispatch.
-2. **Finish release notes** shows existing release entries once and offers a simple
+2. **Review notes** shows existing release entries once and offers a simple
    multiline main-notes edit, then **Add special notes or upgrade instructions? [y/N]**.
    Optional notes default to None and are omitted. Local drafts are saved in the
    separate editable worktree without another save question. Review the final notes
@@ -109,17 +116,21 @@ Release status shows PR links when available from its existing inspection.
    the reviewed evidence, and pushes to the existing PR branch. You do not need
    to stage, commit or push manually. Choosing No keeps the notes local for later.
    Proceed to step 3 only after the tool reports **UPDATED release PR**.
-3. Use **3. Validate release** (`check`) while the draft PR is open. It discovers
+3. Use **3. Check** (`check`) while the draft PR is open. It discovers
    same-repository `release/vX.Y.Z` heads targeting the default branch, automatically
    selects a single PR, and requires a tag-and-PR-labelled choice when multiple are
    open. `check --tag vX.Y.Z` or `check --pr NUMBER` selects explicitly. No matching
    open PR is an actionable error, never a fallback to the original checkout's VERSION.
-   Incomplete documentation stops early with Finish release notes guidance. When
+   Incomplete documentation blocks with Review notes guidance. When
    ready, both full checks run. After success, follow the printed PR URL, resolve
    reviews, wait for required CI and approvals, and merge manually. This is a
    required handoff, not an automatic step. Then `publish` prepares the exact
    merged checkout at the remote default tip automatically.
-4. `publish`: requires the exact merged same-repository release PR targeting the
+4. **Merge on GitHub** (`merge --tag vX.Y.Z`) shows the actual release PR URL,
+   draft/ready state and current checks. Choose **Ready for review** on GitHub,
+   wait for green checks, resolve required reviews, then merge there. This command
+   only reads status; it never marks ready, approves, bypasses checks or merges.
+5. `publish`: requires the exact merged same-repository release PR targeting the
    default branch, successful actual required checks, and the latest `Required CI`
    check on its exact head. GitHub's branch protections and review policy govern
    merging; the CLI adds no human-review count, distinct-reviewer requirement or
@@ -142,7 +153,7 @@ Release creation, cluster access or client adoption command. Base publication ma
 trigger its separately configured draft adoption workflow; this CLI does not change
 or bypass that configuration.
 
-### Finish Release Notes
+### Review Notes
 
 ```bash
 uv run platform-release --base-repo /path/to/trusted/base finish-notes --pr 42
@@ -218,8 +229,13 @@ uv run platform-release --base-repo /path/to/trusted/base \
 ```
 
 If the guard is missing or not executable, the tool keeps notes local and explains
-how to configure it; no commit or push occurs. After Yes, `make release-check` must
-pass on the local evidence. The guard runs with `--scan-only` before committing,
+how to configure it; no commit or push occurs. After Yes, configured `pre-commit`
+hooks run on the five existing release files before staging. Formatting fixes show
+changed filenames, offer a full diff and require renewed upload consent. A fixing
+hook gets at most one retry; an unchanged failure is not retried. Unrelated changes
+or staged work block without cleanup. Both `make check` and `make release-check`
+must pass on the corrected files. Neither ordinary failure skips the other check.
+The guard runs with `--scan-only` before committing,
 on the staged evidence, and again after commit before push so commit messages are
 also covered. The tool stages only the changed evidence paths, checks the staged
 diff against the preview, uses normal commit hooks, and verifies the resulting tree
@@ -260,8 +276,8 @@ uv run platform-release --base-repo /path/to/trusted/base --allow-local-preparat
   check --tag v1.2.3
 ```
 
-Only `refs/pull/NUMBER/head` is fetched from verified origin using a source-only
-refspec and an empty refmap. No force, pruning, shared tags, branches or remote-tracking
+`refs/pull/NUMBER/head` and the default branch are fetched from verified origin using
+source-only refspecs and an empty refmap. No force, pruning, shared tags, branches or remote-tracking
 refs are updated. Git objects and `FETCH_HEAD` are written. Normal pushes and rewritten
 PR heads are supported by creating a new commit-specific worktree, not by moving an old
 checkout or enforcing default-branch fast-forward rules on a PR. The fetched commit must
@@ -269,13 +285,32 @@ exactly match GitHub's observed SHA. The PR must still be open, same-repository,
 that SHA after fetching, before validation, and after both checks. Any change requires
 fresh selection; an old successful result is never reported as current-PR success.
 
+Check asks Base's existing Git and generation helpers to recompute included changes
+through the single latest shared ancestor of fetched main and the selected PR head.
+It validates the predecessor at that boundary and compares actual config and generated
+file contents, not CI color. Main commits absent from the PR are not listed as included.
+An ambiguous history or missing predecessor blocks automatic correction.
+Outdated files prompt **Update release files in a separate editable checkout?**,
+default No. Only existing `release/config.yaml` and `release/manifest.yaml` are
+regenerated; no Prepare rerun, VERSION change, scaffold replacement or inferred notes.
+Authored summary, changelog, migration instructions and policy inputs are preserved.
+
+Formatting runs in the existing notes-helper editable branch, never in the validation
+snapshot. Check requires it to be clean at the selected PR head; prior notes edits or
+a pending commit block without taking ownership. Use Review notes to finish those
+sessions. Unchanged files require no correction/upload prompt. Corrections use the
+same guarded, default-No upload as notes. Noninteractive Check cannot upload; it
+fails with guidance if corrections are needed. After upload, Check reselects the
+same PR, requires the uploaded commit, recomputes its files and runs full validation
+in a fresh clean snapshot. A moved head never receives a stale success claim.
+
 Check creates/reuses the same clean registered linked-worktree layout described above.
 Dirty original checkouts remain untouched; dirty or occupied validation destinations
 block rather than being cleaned. `VERSION` must match the selected release tag before
 any make command. The header shows version, PR URL, full SHA and worktree, followed only
 by that release's changelog section and evidence paths, not historical notes or a full
 manifest dump. TODOs in the selected changelog, migration or release config stop
-before expensive checks with **2. Finish release notes** guidance. Upload completed
+with **2. Review notes** guidance. Upload completed
 notes and retry. Successful Required CI does not establish completed prose.
 
 Once documentation passes this early screen, the full, unchanged `make check` and
