@@ -7,6 +7,7 @@ import difflib
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +24,18 @@ import json, runpy, sys, tempfile
 from pathlib import Path
 b = runpy.run_path('scripts/platform_release.py')
 config = b['load_yaml'](b['CONFIG_PATH'])
-if len(sys.argv) > 1:
+refresh = len(sys.argv) > 2 and sys.argv[1] == '--refresh'
+if len(sys.argv) > 1 and not refresh:
     config['summary'] = sys.argv[1]
+if refresh:
+    through = b['git']('merge-base', '--all', sys.argv[2], sys.argv[3]).strip()
+    if not b['GIT_COMMIT'].fullmatch(through):
+        raise b['ReleaseError']('cannot determine one shared main commit; inspect history')
+    previous = config['provenance'].get('previousTag')
+    if not previous:
+        raise b['ReleaseError']('automatic included-change updates require a predecessor release')
+    b['validate_previous_tag_at_included_through'](previous, through)
+    config['provenance'] = b['provenance_from_git'](previous, through)
 if config.get('summary') is not None and not isinstance(config['summary'], str):
     raise b['ReleaseError']('release summary must be text or null; fix its config type')
 loader = b['load_yaml']
@@ -54,13 +65,137 @@ print(json.dumps({
 
 
 def _canonical(
-    runner: CommandRunner, repo: m.Repository, summary: str | None = None
+    runner: CommandRunner,
+    repo: m.Repository,
+    summary: str | None = None,
+    *,
+    refresh: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Ask this PR's canonical Base generator for its current contract."""
     command = ["uv", "run", "--frozen", "python", "-c", CANONICAL]
     if summary is not None:
         command.append(summary)
-    return json.loads(m._checked(runner, command, cwd=repo.path))
+    if refresh is not None:
+        command.extend(("--refresh", *refresh))
+    result = runner.run(command, cwd=repo.path)
+    if result.returncode:
+        with tempfile.NamedTemporaryFile(
+            mode="w", prefix="platform-release-files-", suffix=".log", delete=False
+        ) as log:
+            log.write(result.stdout + "\n" + result.stderr)
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        message = detail[-1][-500:] if detail else f"exit {result.returncode}"
+        raise m.ReleaseError(f"Release-file check failed: {message}\nFull details: {log.name}")
+    return json.loads(result.stdout)
+
+
+def check_updates(  # noqa: C901 - Keep the ordered correction and upload gates together.
+    runner: CommandRunner, repo: m.Repository, args: argparse.Namespace, prompt: m.Prompt
+) -> m.Repository:
+    """Detect stale included changes on a snapshot; correct only in a guarded edit branch."""
+    from platform_release.upload import _empty_index, _format_for_upload, _review, offer_upload
+
+    pr = args.selected_pr
+    m._clean_target(runner, repo, pr["headRefOid"])
+    if m._checked(runner, ("git", "show", "HEAD:VERSION"), cwd=repo.path) != (
+        pr["headRefName"].removeprefix("release/v")
+    ):
+        raise m.ReleaseError("selected release does not match PR VERSION; no checks executed")
+    # Source-only fetch: learn main ancestry without touching tags or tracking refs.
+    m._checked(
+        runner,
+        (
+            "git",
+            "fetch",
+            "--no-recurse-submodules",
+            "--write-fetch-head",
+            "--no-prune",
+            "--no-tags",
+            "--refmap=",
+            "origin",
+            f"refs/heads/{repo.default_branch}",
+        ),
+        cwd=repo.path,
+    )
+    main = m._checked(runner, ("git", "rev-parse", "FETCH_HEAD^{commit}"), cwd=repo.path)
+    if not m.SHA_PATTERN.fullmatch(main):
+        raise m.ReleaseError("could not determine the main commit for included changes")
+    m._check_pr_head(runner, repo, pr)
+    data = _canonical(runner, repo, refresh=(main, pr["headRefOid"]))
+    current = _canonical(runner, repo)
+    outdated = (
+        data["config"] != current["config"]
+        or (repo.path / "release/manifest.yaml").read_text() != data["manifest"]
+    )
+    if outdated:
+        sys.stdout.write(
+            "Included changes or generated release files are outdated. Notes stay unchanged.\n"
+        )
+        if isinstance(prompt, m.TerminalPrompt) and not sys.stdin.isatty():
+            raise m.ReleaseError(
+                "run interactive check to review and upload release-file corrections"
+            )
+        if prompt.ask("Update release files in a separate editable checkout? [yes/No]: ") != "yes":
+            raise m.ReleaseError("release files remain outdated; no validation success claimed")
+    original = m._repository(runner, args.base_repo)
+    editable = editable_checkout(runner, original, args.worktree_root, pr)
+    # Check never takes ownership of a prior notes session, even within the allowlist.
+    try:
+        m._clean_target(runner, editable, pr["headRefOid"])
+    except m.ReleaseError as error:
+        raise m.ReleaseError(
+            "Existing notes session has local edits or a pending commit. "
+            "Use 2. Review notes to finish it; Check did not change it."
+        ) from error
+    _empty_index(runner, editable)
+    paths = evidence_paths(pr["headRefName"].removeprefix("release/"))
+    m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *paths), cwd=editable.path)
+    before = _snapshot(editable, paths)
+    fresh = _canonical(runner, editable, refresh=(main, pr["headRefOid"]))
+    m._check_pr_head(runner, editable, pr)
+    m._clean_target(runner, editable, pr["headRefOid"])
+    if _snapshot(editable, paths) != before or fresh != data:
+        raise m.ReleaseError("release files changed during preparation; preserve and review them")
+    updates = {"release/manifest.yaml": data["manifest"]}
+    if data["config"] != current["config"]:
+        updates["release/config.yaml"] = data["config_text"]
+    for name, text in updates.items():
+        if text != before[name]:
+            (editable.path / name).write_text(text)
+    preview = _format_for_upload(
+        runner,
+        editable,
+        args,
+        prompt,
+        _review(runner, editable, pr["headRefOid"]),
+        pr["headRefOid"],
+        confirmed=False,
+    )
+    if not preview:
+        return repo
+    if not offer_upload(
+        runner,
+        editable,
+        args,
+        prompt,
+        compact_renderer=data["compact_renderer"],
+        formatting_checked=True,
+    ):
+        raise m.ReleaseError("corrections remain local; upload them before checking the release")
+    selection = argparse.Namespace(pr=pr["number"], tag=pr["headRefName"].removeprefix("release/"))
+    selected = m._select_check_pr(runner, original, selection, None)
+    uploaded = m._checked(runner, ("git", "rev-parse", "HEAD"), cwd=editable.path)
+    if selected["number"] != pr["number"] or selected["headRefOid"] != uploaded:
+        raise m.StaleTargetError("PR changed after upload; reselect it for a fresh check")
+    args.selected_pr = selected
+    snapshot = m._release_checkout(runner, original, args.worktree_root, pr=selected)
+    final = _canonical(runner, snapshot, refresh=(main, uploaded))
+    if (
+        final["config"] != data["config"]
+        or (snapshot.path / "release/manifest.yaml").read_text() != final["manifest"]
+    ):
+        raise m.ReleaseError("uploaded release files are outdated; no validation success claimed")
+    return snapshot
 
 
 def editable_checkout(

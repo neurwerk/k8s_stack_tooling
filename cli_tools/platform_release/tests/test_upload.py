@@ -9,6 +9,7 @@ from test_release import OLD, SHA, TAG, Fake, release_pr
 from platform_release import main as m
 from platform_release import notes as n
 from platform_release import upload as u
+from platform_release.commands import CommandResult
 
 COMMIT = "d" * 40
 TREE = "e" * 40
@@ -122,6 +123,61 @@ def git_writes(runner):
     ]
 
 
+@pytest.mark.parametrize("problem", [None, "keeps-fixing", "unrelated", "failure", "decline"])
+def test_formatting_fixes_eof_before_upload_without_unbounded_hooks(
+    upload_setup, monkeypatch, capsys, problem
+):
+    runner, repo, args, _ = upload_setup
+    path = repo.path / "CHANGELOG.md"
+    path.write_text(path.read_text() + "\n\n")
+    original = runner.run_live
+    runs = 0
+
+    def hooks(arguments, *, cwd=None):
+        nonlocal runs
+        a = tuple(arguments)
+        if a[0] != "pre-commit":
+            return original(arguments, cwd=cwd)
+        runner.live_calls.append((a, cwd))
+        runs += 1
+        if problem == "failure":
+            return CommandResult(a, 1, "", "formatter failed; see private log")
+        if problem == "unrelated":
+            runner.overrides[("git", "status", "--porcelain=v1", "-z", "--untracked-files=all")] = (
+                " M application.py\0"
+            )
+        if runs == 1 or problem == "keeps-fixing":
+            path.write_text(path.read_text().rstrip() + ("\n" if runs == 1 else "\nchanged\n"))
+            runner.preview = "formatted reviewed diff"
+            return CommandResult(a, 1, "", "end-of-file-fixer modified files")
+        return CommandResult(a, 0, "", "")
+
+    monkeypatch.setattr(runner, "run_live", hooks)
+    prompt = Mock(ask=Mock(side_effect=["yes", "yes", "no" if problem == "decline" else "yes"]))
+    if problem:
+        with pytest.raises(m.ReleaseError):
+            u.offer_upload(runner, repo, args, prompt)
+        assert not git_writes(runner)
+    else:
+        assert u.offer_upload(runner, repo, args, prompt)
+        assert path.read_text().endswith("routing.\n")
+        assert git_writes(runner)[-1] == PUSH
+        assert [a for a, _ in runner.live_calls][-2:] == [
+            ("make", "check"),
+            ("make", "release-check"),
+        ]
+    assert runs <= 2
+    output = capsys.readouterr().out
+    if problem not in ("failure", "unrelated"):
+        assert "Formatting updated: CHANGELOG.md" in output
+        assert "formatted reviewed diff" in output
+    if problem == "failure":
+        assert [a for a, _ in runner.live_calls][-2:] == [
+            ("make", "check"),
+            ("make", "release-check"),
+        ]
+
+
 def test_confirmed_upload_scopes_all_writes_and_reports_success_only_after_push(
     upload_setup, capsys
 ):
@@ -151,7 +207,7 @@ def test_confirmed_upload_scopes_all_writes_and_reports_success_only_after_push(
     assert "Final release notes preview:\n## v1.0.1\n\n- Fix routing.\n" in output
     prompt.ask.assert_called_once_with("Update release PR? [yes/No]: ")
     assert "UPDATED release PR: https://github.com/example/base/pull/42" in output
-    assert "3. Validate release" in output
+    assert "3. Check" in output
     assert (args.base_repo / "user.txt").read_text() == "original user edit"
     assert not any(
         flag in a for a in commands for flag in ("--force", "--amend", "--no-verify", "--admin")
@@ -171,6 +227,7 @@ def test_terminal_confirmation_defaults_no(upload_setup, monkeypatch):
     runner, repo, args, _ = upload_setup
     confirm = Mock(return_value=Mock(ask=Mock(return_value=False)))
     monkeypatch.setattr(m.questionary, "confirm", confirm)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
     u.offer_upload(runner, repo, args, m.TerminalPrompt())
     confirm.assert_called_once_with("Update release PR?", default=False)
     assert not git_writes(runner)

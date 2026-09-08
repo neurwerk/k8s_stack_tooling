@@ -109,6 +109,8 @@ class Fake:
             return ""
         if a[:3] == ("git", "diff", "--no-ext-diff"):
             return "reviewed evidence diff" if "--cached" not in a else ""
+        if a[:3] == ("git", "diff", "--name-only"):
+            return "CHANGELOG.md"
         if a[:2] == ("git", "branch"):
             return "release-custodian"
         if a == ("git", "rev-parse", "HEAD"):
@@ -139,7 +141,7 @@ class Fake:
             return f"{refs[ref]}\t{ref}" if ref in refs else ""
         if a[0] == "uv":
             return "v1.0.0"
-        if a[0] in ("make", "bash"):
+        if a[0] in ("make", "bash", "pre-commit"):
             return "passed"
         if a[0] in ("ssh-add", "ssh-keygen"):
             return f"256 {m.DEFAULT_EXPECTED_SIGNER_FINGERPRINT} operator (ED25519)"
@@ -265,8 +267,8 @@ def test_prepare_exact_workflow_and_confirmation(setup, capsys):
     prompt.ask.side_effect = confirm
     result = m.prepare(runner, repo, prepare_args(), prompt)
     assert "Dispatched" in result
-    assert "2. Finish release notes (finish-notes), then 3. Validate release (check)" in result
-    assert "Sign and publish (publish)" in result
+    assert "2. Review notes (finish-notes), then 3. Check (check)" in result
+    assert "5. Publish (publish)" in result
     command = runner.calls[-1][0]
     assert command[:4] == ("gh", "workflow", "run", "Prepare Release PR")
     assert "preparation_mode=successor" in command
@@ -573,13 +575,14 @@ def test_questionary_menu_labels_sections_and_safe_default(monkeypatch):
         (i, c.title) for i, c in enumerate(choices) if isinstance(c, m.questionary.Separator)
     ] == [
         (0, "Release Steps"),
-        (5, "\nInformation"),
+        (6, "\nInformation"),
     ]
     assert [(c.title, c.value) for c in choices if not isinstance(c, m.questionary.Separator)] == [
-        ("1. Prepare release draft", "prepare"),
-        ("2. Finish release notes", "finish-notes"),
-        ("3. Validate release", "check"),
-        ("4. Sign and publish", "publish"),
+        ("1. Prepare", "prepare"),
+        ("2. Review notes", "finish-notes"),
+        ("3. Check", "check"),
+        ("4. Merge on GitHub", "merge"),
+        ("5. Publish", "publish"),
         ("Release status", "status"),
         ("Changelog", "changelog"),
         ("Preview next release", "plan"),
@@ -594,7 +597,7 @@ def test_text_menu_sections_and_action_ids():
     prompt.ask.return_value = ""
     assert m._interactive_command(prompt) == "status"
     message = prompt.ask.call_args.args[0]
-    assert "Release Steps:\n  1. Prepare release draft (prepare)" in message
+    assert "Release Steps:\n  1. Prepare (prepare)" in message
     assert "\n\nInformation:\n  Release status (status)" in message
     assert "Publication progress (continue)" in message
     assert "Exit (quit)" in message
@@ -1089,9 +1092,9 @@ def test_status_concise_and_explicit_views_preserve_full_report(setup, capsys):
         "GitHub Release: published",
         "signature verified",
         "Remote staging: missing",
-        "Exact-tag verifier: success",
-        "NEW RELEASES",
-        "HEAD sync: equal",
+        "Release verification: success",
+        "Prepare and Publish use a separate checkout",
+        "Local checkout: equal",
         release["html_url"],
         "not checked by status",
         "do not republish",
@@ -1564,6 +1567,11 @@ def test_real_local_git_preserves_tracking_and_primary_files(tmp_path, monkeypat
 
 @pytest.fixture
 def check_setup(setup, monkeypatch):
+    from platform_release import notes
+
+    # This fixture isolates PR-selection and immutable-validation orchestration.
+    # Correction behavior, files and uploads are exercised in test_check_updates.
+    monkeypatch.setattr(notes, "check_updates", lambda runner, repo, args, prompt: repo)
     runner, repo, _ = setup
     prs = [release_pr()]
     original = runner.run

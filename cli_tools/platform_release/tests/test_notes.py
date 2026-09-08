@@ -375,7 +375,7 @@ def test_todo_gate_stops_before_expensive_checks(monkeypatch, tmp_path):
     repo = m.Repository(tmp_path, "example/base", "main")
     monkeypatch.setattr(m, "_release_prs", lambda *a: [release_pr()])
     runner.overrides[("git", "show", f"HEAD:release/migrations/{TAG}.md")] = scaffold()
-    with pytest.raises(m.ReleaseError, match="Finish release notes"):
+    with pytest.raises(m.ReleaseError, match="Review notes"):
         m.check_release(runner, repo, release_pr())
     assert not runner.live_calls
 
