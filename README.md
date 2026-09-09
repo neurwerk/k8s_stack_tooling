@@ -2,7 +2,7 @@
 
 Python runtime utilities and trusted-workstation command-line tools used to
 operate the neurwerk Kubernetes stack. This repository contains one container
-package and five independently locked CLI projects.
+package and six independently locked CLI projects.
 
 ## Projects
 
@@ -14,6 +14,7 @@ package and five independently locked CLI projects.
 | [`media-downloader-uploader`](cli_tools/media_downloader_uploader/) | Downloads verified Hugging Face artifacts and publishes immutable PII bundles | Workstation with external storage and explicit cluster access |
 | [`openbao-stack-setup`](cli_tools/openbao_stack_setup/) | Bootstraps, reconciles, verifies, and updates supported OpenBao state | Trusted operator workstation only |
 | [`openrouter-catalog-sync`](cli_tools/openrouter_catalog_sync/) | Selects reviewed OpenRouter models and generates client Helm values and a complete model cost catalog | Developer or operator workstation |
+| [`keycloak-users`](cli_tools/keycloak_users/) | Guides manual browser-login setup and creates local users with group membership and seven-day onboarding invitations | Authorized operator workstation |
 
 The CLI projects under `cli_tools/` are not bundled into the Kubernetes image.
 Each has its own `pyproject.toml`, `uv.lock`, environment, tests, and README.

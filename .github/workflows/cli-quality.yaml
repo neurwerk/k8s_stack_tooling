@@ -36,6 +36,9 @@ jobs:
           - name: OpenRouter Catalog Sync
             project: cli_tools/openrouter_catalog_sync
             needs_base: false
+          - name: Keycloak Users
+            project: cli_tools/keycloak_users
+            needs_base: false
     defaults:
       run:
         working-directory: ${{ matrix.project }}
