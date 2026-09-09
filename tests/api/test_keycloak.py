@@ -17,10 +17,51 @@ from k8s_stack_tooling.api.keycloak import (
     upsert_client_roles,
     upsert_composite_roles_api,
     upsert_groups_api,
+    upsert_realm_api,
     upsert_realm_role_composites_api,
     upsert_realm_roles_api,
     upsert_user_api,
 )
+
+
+@pytest.mark.parametrize("status", [201, 204])
+@pytest.mark.parametrize(
+    ("login", "email"),
+    [(None, None), ("client-brand", None), (None, "neurwerk"), ("keycloak.v2", "keycloak")],
+)
+def test_upsert_realm_optional_themes(status: int, login: str | None, email: str | None) -> None:
+    environment = {"KC_REALM_DISPLAY_NAME": "Example"}
+    if login is not None:
+        environment["KC_REALM_LOGIN_THEME"] = login
+    if email is not None:
+        environment["KC_REALM_EMAIL_THEME"] = email
+    with (
+        patch.dict("os.environ", environment, clear=True),
+        patch("k8s_stack_tooling.api.keycloak.realm_exists", return_value=status == 204),
+        patch("k8s_stack_tooling.api.keycloak.request", return_value=(status, {})) as request,
+    ):
+        upsert_realm_api("http://keycloak", "token", "realm")
+
+    request.assert_called_once()
+    assert request.call_args.kwargs["method"] == ("PUT" if status == 204 else "POST")
+    body = request.call_args.kwargs["body"]
+    for field, theme in (("loginTheme", login), ("emailTheme", email)):
+        if theme is None:
+            assert field not in body
+        else:
+            assert body[field] == theme
+
+
+@pytest.mark.parametrize("variable", ["KC_REALM_LOGIN_THEME", "KC_REALM_EMAIL_THEME"])
+@pytest.mark.parametrize("theme", ["", " \t", "../theme", "a..b", "a/b", "a\\b", "theme "])
+def test_upsert_realm_rejects_invalid_themes(variable: str, theme: str) -> None:
+    with (
+        patch.dict("os.environ", {"KC_REALM_DISPLAY_NAME": "Example", variable: theme}, clear=True),
+        patch("k8s_stack_tooling.api.keycloak.request") as request,
+        pytest.raises(SystemExit, match="^1$"),
+    ):
+        upsert_realm_api("http://keycloak", "token", "realm")
+    request.assert_not_called()
 
 
 def test_find_group_path_requests_all_subgroups() -> None:

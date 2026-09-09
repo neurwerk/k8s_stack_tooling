@@ -82,6 +82,16 @@ The image runs as a non-root user and has no default entrypoint. Workloads must
 select the required command explicitly. Tagged releases are built and published
 to GHCR by GitHub Actions using the repository-scoped `GITHUB_TOKEN`.
 
+### Keycloak Realm Themes
+
+`upsert-realm` optionally accepts `KC_REALM_LOGIN_THEME` and
+`KC_REALM_EMAIL_THEME`, mapped to the realm's `loginTheme` and `emailTheme`.
+Omitting either variable preserves that selection on existing realms and leaves
+the server default on creation. To reset explicitly, select `keycloak.v2` for
+login and `keycloak` for email. Themes must be installed on the Keycloak server.
+Names must match `[A-Za-z0-9][A-Za-z0-9_.-]*` without `..`; empty values,
+whitespace, and path separators are rejected.
+
 ### Keycloak Action Emails
 
 `send-user-actions-email` waits for both Keycloak's internal health endpoint and
