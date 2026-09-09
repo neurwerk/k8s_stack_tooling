@@ -1496,7 +1496,7 @@ def _pr_checks_state(runner: CommandRunner, repo: Repository, pr: dict[str, Any]
         cwd=repo.path,
     )
     checks = json.loads(result.stdout) if result.stdout.strip() else []
-    runs = json.loads(
+    pages = json.loads(
         _checked(
             runner,
             (
@@ -1505,11 +1505,10 @@ def _pr_checks_state(runner: CommandRunner, repo: Repository, pr: dict[str, Any]
                 f"repos/{repo.slug}/commits/{pr['headRefOid']}/check-runs",
                 "--paginate",
                 "--slurp",
-                "--jq",
-                "[.[].check_runs[]]",
             ),
         )
     )
+    runs = [run for page in pages for run in page["check_runs"]]
     latest = max(
         (c for c in runs if c.get("name") == "Required CI"), key=lambda c: c["id"], default={}
     )

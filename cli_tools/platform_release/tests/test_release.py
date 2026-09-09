@@ -170,16 +170,19 @@ class Fake:
             return "Required CI pass"
         if a[:2] == ("gh", "api"):
             if "check-runs" in a[2]:
+                checks = [
+                    {
+                        "id": 1,
+                        "name": "Required CI",
+                        "head_sha": OLD,
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ]
                 return json.dumps(
-                    [
-                        {
-                            "id": 1,
-                            "name": "Required CI",
-                            "head_sha": OLD,
-                            "status": "completed",
-                            "conclusion": "success",
-                        }
-                    ]
+                    [{"total_count": len(checks), "check_runs": checks}]
+                    if "--slurp" in a
+                    else checks
                 )
             if "git/ref/tags" in a[2]:
                 return OBJECT

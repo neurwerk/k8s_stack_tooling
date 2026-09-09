@@ -92,38 +92,53 @@ def test_current_pr_checks_and_one_next_action(
         f"repos/{repo.slug}/commits/{SHA}/check-runs",
         "--paginate",
         "--slurp",
-        "--jq",
-        "[.[].check_runs[]]",
     )
     runner.overrides[command] = json.dumps(
         [
             {
-                "id": 1,
-                "name": "Required CI",
-                "head_sha": SHA,
-                "status": "completed",
-                "conclusion": "failure",
+                "total_count": 2,
+                "check_runs": [
+                    {
+                        "id": 1,
+                        "name": "Required CI",
+                        "head_sha": SHA,
+                        "status": "completed",
+                        "conclusion": "failure",
+                    }
+                ],
             },
             {
-                "id": 2,
-                "name": "Required CI",
-                "head_sha": SHA,
-                "status": "completed" if conclusion else "in_progress",
-                "conclusion": conclusion,
+                "total_count": 2,
+                "check_runs": [
+                    {
+                        "id": 2,
+                        "name": "Required CI",
+                        "head_sha": SHA,
+                        "status": "completed" if conclusion else "in_progress",
+                        "conclusion": conclusion,
+                    }
+                ],
             },
         ]
     )
     pr["checks_state"] = m._pr_checks_state(runner, repo, pr)
+    assert (command, None) in runner.calls
+    assert not any("--slurp" in args and "--jq" in args for args, _ in runner.calls)
     assert pr["checks_state"] == expected
     assert next_action in m._pr_next_action([pr])
     runner.overrides[command] = json.dumps(
         [
             {
-                "id": 3,
-                "name": "Required CI",
-                "head_sha": OLD,
-                "status": "completed",
-                "conclusion": "success",
+                "total_count": 1,
+                "check_runs": [
+                    {
+                        "id": 3,
+                        "name": "Required CI",
+                        "head_sha": OLD,
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
             },
         ]
     )
