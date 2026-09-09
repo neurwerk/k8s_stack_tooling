@@ -212,6 +212,14 @@ class BrowserSession:
             {"client_id": self.profile.client_id, **data},
         )
 
+    def _browser_logout_guidance(self) -> str:
+        return (
+            "\nIf the browser reused the wrong account, open this logout link in the same "
+            "browser/profile and confirm sign out, then rerun the CLI and sign in as the "
+            "intended operator. Signing out does not grant missing permissions.\n"
+            f"Browser logout: {self.profile.issuer}/protocol/openid-connect/logout"
+        )
+
     def _verify_signed(self, token: object, audience: str, kind: str) -> Json:
         if not isinstance(token, str) or not token:
             raise SafeError(f"Missing signed {kind} token.")
@@ -240,6 +248,7 @@ class BrowserSession:
                     "actual realm-management roles, the roles default client scope and audience "
                     "mapper, and Full Scope Allowed (or restricted scope mappings). Scope "
                     "settings expose existing roles; they do not grant permissions."
+                    + self._browser_logout_guidance()
                 ) from None
             raise SafeError(f"{kind} token required claims could not be verified.") from None
         except (jwt.PyJWTError, KeyError, ValueError, TypeError, AttributeError, OverflowError):
@@ -351,6 +360,7 @@ class BrowserSession:
                 "Supported authorization: Standard realm-management roles; fine-grained-only "
                 "policies are not sufficient for this CLI's preflight.\n"
                 "Result: No admin request attempted by this check."
+                + self._browser_logout_guidance()
             )
 
     def access_token(self) -> str:

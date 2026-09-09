@@ -228,6 +228,16 @@ uv run --frozen keycloak-users send-actions-email --profile example
 
 ## Diagnosis
 
+Browser SSO can reuse a previously authenticated account, including a test user,
+even though each CLI run obtains a fresh token. Missing management-audience and
+management-role errors include a **Browser logout** link derived from the selected
+profile's issuer: `<configured-issuer>/protocol/openid-connect/logout`. If the
+wrong account was reused, open the link in the same browser/profile that the CLI
+launches, confirm sign out, then rerun the CLI and sign in as the intended operator.
+The CLI only prints this link; it does not log you out automatically. The link
+contains no tokens or redirect parameters. Signing out does not restore missing
+grants or fix client-scope configuration.
+
 A read-only operator whose token has `view-realm` but lacks `manage-users` is
 blocked immediately after login, even for doctor, before any Admin API reads.
 The message lists missing roles **in the verified token**. It does not claim the
