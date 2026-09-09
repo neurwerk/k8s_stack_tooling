@@ -396,8 +396,13 @@ def test_read_only_roles_are_available_to_preflight_but_not_admin(realm, roles):
         }
     )
     assert realm.session.management_roles() == frozenset(roles)
-    with pytest.raises(SafeError, match="required realm-management roles"):
+    with pytest.raises(SafeError, match="required realm-management roles") as exc:
         realm.session.access_token()
+    assert "If the browser reused the wrong account" in str(exc.value)
+    assert str(exc.value).endswith(
+        f"Browser logout: {realm.profile.issuer}/protocol/openid-connect/logout"
+    )
+    assert realm.session.tokens["access_token"] not in str(exc.value)
     with pytest.raises(SafeError):
         realm.accounts.connection.raw_get("admin/realms/example/users")
     assert realm.requests == []
@@ -450,7 +455,11 @@ def test_access_requires_signature_algorithm_and_nonce_verified_identity(realm, 
         )
 
 
-def test_missing_management_audience_has_safe_actionable_guidance(realm):
+@pytest.mark.parametrize("prefix", ["", "/auth/"])
+def test_missing_management_audience_has_safe_actionable_guidance(realm, prefix):
+    realm.profile = Profile("alternate", f"https://identity.example{prefix}", "alternate")
+    realm.session.profile = realm.profile
+    realm.session.discovery["jwks_uri"] = realm.profile.issuer + "/certs"
     token = realm.signed_token(aud="account")
     with pytest.raises(SafeError) as exc:
         realm.session.accept_tokens(
@@ -463,9 +472,17 @@ def test_missing_management_audience_has_safe_actionable_guidance(realm):
         "audience mapper",
         "Full Scope Allowed",
         "do not grant",
+        "wrong account",
+        "same browser/profile",
+        f"Browser logout: {realm.profile.issuer}/protocol/openid-connect/logout",
     ):
         assert hint in str(exc.value)
     assert token not in str(exc.value)
+    assert str(exc.value).endswith(
+        f"Browser logout: {realm.profile.issuer}/protocol/openid-connect/logout"
+    )
+    assert realm.requests == []
+    assert realm.session.tokens == {}
 
 
 @pytest.mark.parametrize(
