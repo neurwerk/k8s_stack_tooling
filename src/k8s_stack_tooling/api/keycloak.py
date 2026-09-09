@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -300,6 +301,16 @@ def upsert_realm_api(admin_url: str, token: str, realm: str) -> None:
         "actionTokenGeneratedByAdminLifespan": action_token_lifespan,
         "smtpServer": smtp_server or {},
     }
+    for env_name, field in (
+        ("KC_REALM_LOGIN_THEME", "loginTheme"),
+        ("KC_REALM_EMAIL_THEME", "emailTheme"),
+    ):
+        theme = os.environ.get(env_name)
+        if theme is not None:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", theme) or ".." in theme:
+                log(f"ERROR: {env_name} must be a non-empty, safe theme directory name.")
+                raise SystemExit(1)
+            realm_body[field] = theme
 
     if realm_exists(admin_url, token, realm):
         log(f"Realm '{realm}' already exists — updating token/session settings …")
