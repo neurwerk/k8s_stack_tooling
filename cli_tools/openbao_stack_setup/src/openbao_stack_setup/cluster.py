@@ -153,6 +153,23 @@ class Cluster:
             raise ClusterError("Keycloak Active Directory enabled value must be a boolean")
         return enabled
 
+    def forgejo_enabled(self) -> bool:
+        """Read the opt-in selector without requiring the optional namespace to exist."""
+        values = self._product_values("client-values", "auth-keycloak", "Client")
+        if not isinstance(values, dict):
+            raise ClusterError("Client values contain an invalid Forgejo contract")
+        forgejo = values.get("forgejo", {})
+        if not isinstance(forgejo, dict):
+            raise ClusterError("Client values contain an invalid Forgejo contract")
+        enabled = forgejo.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("Forgejo enabled value must be a boolean")
+        if enabled:
+            hostname = forgejo.get("hostname")
+            if not isinstance(hostname, str) or not hostname.strip():
+                raise ClusterError("Enabled Forgejo requires a nonblank hostname in client-values")
+        return enabled
+
     def _product_values(self, name: str, namespace: str, product: str) -> object:
         """Read one namespace-local product values document."""
         try:

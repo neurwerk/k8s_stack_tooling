@@ -200,6 +200,44 @@ def test_active_directory_requirement(values: str, expected: bool) -> None:
     assert target.active_directory_required() is expected
 
 
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ("{}", False),
+        ("forgejo: {}", False),
+        ("forgejo: {enabled: false}", False),
+        ("forgejo: {enabled: true, hostname: git.example.test}", True),
+    ],
+)
+def test_forgejo_selector_uses_existing_client_values(values: str, expected: bool) -> None:
+    target = cluster()
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": values}
+    )
+    assert target.forgejo_enabled() is expected
+    target.core.read_namespaced_config_map.assert_called_once_with("client-values", "auth-keycloak")
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        "[]",
+        "forgejo: null",
+        "forgejo: false",
+        'forgejo: {enabled: "true"}',
+        "forgejo: {enabled: true}",
+        "forgejo: {enabled: true, hostname: ' '}",
+    ],
+)
+def test_forgejo_selector_rejects_invalid_values(values: str) -> None:
+    target = cluster()
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": values}
+    )
+    with pytest.raises(ClusterError, match="Forgejo"):
+        target.forgejo_enabled()
+
+
 def test_rejects_non_boolean_active_directory_choice() -> None:
     target = cluster()
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(

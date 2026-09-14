@@ -127,6 +127,91 @@ ExternalSecret to that refresh set. Bootstrap then force-reconciles and waits fo
 Kustomization so the application stage is unblocked immediately. The CLI does not read or print
 the materialized Secret values during these checks.
 
+## Optional Forgejo Catalog
+
+Package `0.2.12` adds Forgejo as an opt-in additive catalog at reconciliation schema `4`.
+The state record format stays at `schemaVersion: 1`; recovery-kit schema stays at `4`.
+Existing schema-4 installations are reconciled on every run, so enabling Forgejo does not
+require a global migration or invalidate the existing AgentGateway schema-4 prerequisite.
+An unchanged reconciliation state retains its original `packageVersion`; that field is not
+proof of optional-feature onboarding. The platform must pin the actual reviewed immutable
+tooling commit after merge, not a placeholder or moving branch.
+
+`preflight`, `bootstrap`, `reconcile`, and `status` read `forgejo.enabled` from
+`auth-keycloak/client-values` (`data["values.yaml"]`). The selector defaults to `false`
+when omitted and must be a boolean. Enabled clients also need a nonblank `forgejo.hostname`
+in that same non-secret ConfigMap. No Forgejo namespace or workload must be Ready to detect
+the selection. `status` reports selection, not credential or workload health.
+
+Forgejo is a first-party optional package with mandatory Keycloak authentication,
+`postgres-operations`, and cert-manager, not a selectable alternative authentication or
+database stack. Base owns those dependencies and application readiness.
+
+Only selected clients receive the `forgejo` policy and Kubernetes role, bound to
+`forgejo/forgejo-external-secrets` with audience `openbao`. The policy reads only the
+`secret/data/forgejo/*` and corresponding namespace metadata paths. Routine secret-operator
+permissions and the supported `secret set` providers do not expand.
+
+The generated `forgejo/internal` record contains exactly these initial fields:
+
+| Field | Generation or purpose |
+| --- | --- |
+| `dbPassword` | 32 random bytes encoded as unpadded base64url |
+| `oidcClientSecret` | Independently generated 32-byte base64url secret |
+| `secretKey` | 32 random bytes encoded as 64 hexadecimal characters |
+| `internalToken` | HS256 JWT with an `nbf` claim and an independent random signing key |
+| `oauth2JwtSecret` | Unpadded base64url encoding of exactly 32 random bytes; HS256 |
+| `lfsJwtSecret` | Independently generated unpadded base64url encoding of 32 random bytes |
+| `adminPassword` | Independently generated 32-byte base64url recovery password |
+
+JWT formats follow upstream [Forgejo secret generation](https://codeberg.org/forgejo/forgejo/src/branch/forgejo/modules/generate/generate.go)
+and [Gitea secret generation](https://github.com/go-gitea/gitea/blob/main/modules/generate/generate.go).
+All generated fields persist through the existing compare-and-set, preserve-on-retry flow.
+Existing fields are never rotated or deleted by toggling this selector.
+
+The exact namespace-isolated copies are:
+
+| Canonical source | Destination |
+| --- | --- |
+| `forgejo/internal:dbPassword` | `infra-postgres-operations/internal:forgejoPassword` |
+| `forgejo/internal:oidcClientSecret` | `auth-keycloak/internal:forgejoClientSecret` |
+
+Conflicting copies fail closed; retry does not regenerate the canonical credentials.
+No application key or password is requested from the operator. The chart fixes the recovery
+username to `forgejo-recovery`; there is no `adminUsername` secret field. Unlike the original
+bootstrap administrator passwords, `adminPassword` is not added to terminal delivery or the
+local custody checkpoint. Its durable custody is the protected OpenBao record, delivered only
+to the namespace-local runtime Secret. Human break-glass access requires a separately approved
+secure recovery procedure under the existing recovery-custody controls; these commands do not
+print or export the password, and do not log Secret contents.
+
+Base must provide the following optional resources before runtime convergence can complete:
+
+| Namespace | SecretStore | ExternalSecret / target Secret |
+| --- | --- | --- |
+| `forgejo` | `forgejo-openbao-secret-store` | `forgejo-runtime` / `forgejo-runtime` |
+| `infra-postgres-operations` | Existing `infra-postgres-operations-openbao-secret-store` | `forgejo-postgres-values` / `forgejo-postgres-values` |
+| `auth-keycloak` | Existing `auth-keycloak-openbao-secret-store` | `forgejo-oidc-values` / `forgejo-oidc-values` |
+
+`forgejo-runtime` delivers all seven source fields with unchanged key names. The database
+and OIDC ExternalSecrets consume only their namespace-owned copies. The database Secret
+renders `values.yaml`; the OIDC Secret delivers `oidcClientSecret` directly. Do not create
+shorter replacement names for the stores.
+
+For staged onboarding, first make the non-secret selector and optional secret-sync resources
+available. They may be unready until reconciliation generates credentials and authorizes the
+role; preflight does not require their readiness. Run the approved `reconcile` ceremony before
+expecting the optional application to start. After revoking root, the CLI waits for the
+additional store and refreshes all three ExternalSecrets before forcing the existing
+`postgres-operations` release and reconciling the infrastructure stage. Base's Flux dependencies
+must order Keycloak OIDC provisioning and application startup; the CLI does not force an
+application release before its stage is available.
+
+If resources have not arrived yet, runtime convergence fails visibly after durable catalog
+writes. Apply the missing composition and rerun reconciliation; a schema-4 marker alone does
+not mean consumers converged. Disabled or omitted selection adds no records, copies, roles,
+or runtime targets, and does not revoke previously provisioned credentials or authorization.
+
 ## Recovery Custody
 
 New bootstrap prompts for three distinct custodian names. In separate temporary GnuPG homes,

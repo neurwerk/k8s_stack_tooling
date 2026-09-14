@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
+import json
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -93,7 +97,7 @@ def plan_bootstrap_passwords(client: OpenBaoClient) -> dict[str, str]:
 
 
 def reconcile_internal_credentials(
-    client: OpenBaoClient, bootstrap_passwords: dict[str, str]
+    client: OpenBaoClient, bootstrap_passwords: dict[str, str], *, forgejo_enabled: bool = False
 ) -> InternalResult:
     """Add every missing internal field while preserving all existing values."""
     _validate_bootstrap_passwords(bootstrap_passwords)
@@ -283,6 +287,31 @@ def reconcile_internal_credentials(
         _, count = _upsert(client, path, _random_fields("adminPassword"), fixed)
         _record_change(changed, path, count)
         added += count
+    if forgejo_enabled:
+        forgejo, count = _upsert(
+            client,
+            "forgejo/internal",
+            {
+                **_random_fields(
+                    "dbPassword",
+                    "oidcClientSecret",
+                    "oauth2JwtSecret",
+                    "lfsJwtSecret",
+                    "adminPassword",
+                ),
+                "secretKey": _hex_64,
+                "internalToken": _forgejo_internal_token,
+            },
+        )
+        _record_change(changed, "forgejo/internal", count)
+        added += count
+        for path, field, source in (
+            ("infra-postgres-operations/internal", "forgejoPassword", "dbPassword"),
+            ("auth-keycloak/internal", "forgejoClientSecret", "oidcClientSecret"),
+        ):
+            _, count = _upsert(client, path, {}, {field: _required_text(forgejo, source)})
+            _record_change(changed, path, count)
+            added += count
     return InternalResult(tuple(changed), added)
 
 
@@ -409,6 +438,22 @@ def _random_secret() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _forgejo_internal_token() -> str:
+    """Match Forgejo generate.NewInternalToken's HS256 token and random signing key."""
+    header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    payload = (
+        base64.urlsafe_b64encode(
+            json.dumps({"nbf": int(time.time())}, separators=(",", ":")).encode("ascii")
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    message = f"{header}.{payload}"
+    signature = hmac.digest(_random_secret().encode("ascii"), message.encode("ascii"), "sha256")
+    encoded = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    return f"{message}.{encoded}"
+
+
 def _hex_64() -> str:
     return secrets.token_hex(32)
 
@@ -437,5 +482,5 @@ def _required_text(values: dict[str, JsonValue], name: str) -> str:
 
 
 def _record_change(changed: list[str], path: str, count: int) -> None:
-    if count:
+    if count and path not in changed:
         changed.append(path)
