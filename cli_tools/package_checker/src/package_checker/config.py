@@ -113,6 +113,7 @@ PACKAGES: tuple[PackageConfig, ...] = (
     PackageConfig(
         "k8s-stack-keycloak-api-key-bridge", "neurwerk/k8s_stack_keycloak_api_key_bridge"
     ),
+    PackageConfig("k8s-stack-keycloak-theme", "neurwerk/k8s_stack_keycloak_theme"),
     PackageConfig("addon-dify-ce-builder-api", "neurwerk/addon_dify_ce_builder"),
     PackageConfig("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
     PackageConfig("addon-dify-ce-builder-web", "neurwerk/addon_dify_ce_builder"),
