@@ -427,6 +427,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.seal_exists.return_value = False
     cluster.active_directory_required.return_value = True
+    cluster.forgejo_enabled.return_value = True
     api = MagicMock()
     api.initialized.return_value = False
     api.initialize.return_value = ("root", ("one", "two", "three"))
@@ -493,7 +494,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     api.initialize.assert_called_once_with(("pgp-1", "pgp-2", "pgp-3"))
     write_packages.assert_called_once_with(paths, staged)
     assert update.call_args_list == [call(seal_file, staged), call(seal_file, initialized)]
-    finish.assert_called_once_with(cluster, api, "root", initialized, seal_file, True)
+    finish.assert_called_once_with(cluster, api, "root", initialized, seal_file, True, True)
     cluster.active_directory_required.assert_called_once_with()
 
 
@@ -503,6 +504,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
     cluster = MagicMock()
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
+    cluster.forgejo_enabled.return_value = False
     api = MagicMock()
     api.initialized.return_value = True
     api.create_recovery_root_token.return_value = "temporary"
@@ -518,7 +520,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         patch("openbao_stack_setup.main._decrypt_custodian_packages", return_value=("one", "two")),
     ):
         _bootstrap("ctx", "client", tmp_path)
-    finish.assert_called_once_with(cluster, api, "temporary", existing, recovery_file, False)
+    finish.assert_called_once_with(cluster, api, "temporary", existing, recovery_file, False, False)
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
     cluster.wait_openbao_endpoint.assert_called_once_with()
@@ -531,6 +533,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     cluster = MagicMock()
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
+    cluster.forgejo_enabled.return_value = False
     api = MagicMock()
     api.initialized.return_value = True
     staged = replace(
@@ -556,7 +559,9 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
 
     write_packages.assert_called_once_with(paths, staged)
     update.assert_called_once_with(seal_file, initialized)
-    finish.assert_called_once_with(cluster, api, "initial-root", initialized, seal_file, False)
+    finish.assert_called_once_with(
+        cluster, api, "initial-root", initialized, seal_file, False, False
+    )
 
 
 def test_bootstrap_refreshes_every_declared_external_secret() -> None:
@@ -928,6 +933,7 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
     reconcile.assert_called_once_with(
         root,
         ReconciliationIdentity("client", "cluster", "namespace"),
+        forgejo_enabled=False,
     )
     prompt.assert_not_called()
     seed.assert_not_called()
@@ -1014,10 +1020,14 @@ def test_status_and_recovery_verification(tmp_path: Path) -> None:
         _verify_recovery("ctx", "client", tmp_path, [tmp_path / "one", tmp_path / "two"])
 
 
-def test_reconcile_revokes_root_before_runtime_convergence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("forgejo_enabled", [False, True])
+def test_reconcile_revokes_root_before_runtime_convergence(
+    tmp_path: Path, forgejo_enabled: bool
+) -> None:
     cluster = MagicMock()
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
+    cluster.forgejo_enabled.return_value = forgejo_enabled
     api = MagicMock()
     api.create_recovery_root_token.return_value = "temporary"
     root = MagicMock()
@@ -1043,7 +1053,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(tmp_path: Path) -> No
         patch("openbao_stack_setup.main._revoke_other_root_tokens"),
         patch(
             "openbao_stack_setup.main._converge_runtime",
-            side_effect=lambda _cluster, _active_directory_required: events.append("converge"),
+            side_effect=lambda *_args: events.append("converge"),
         ) as converge,
     ):
         _reconcile("ctx", "client", tmp_path, [Path("one"), Path("two")])
@@ -1051,9 +1061,10 @@ def test_reconcile_revokes_root_before_runtime_convergence(tmp_path: Path) -> No
     reconcile.assert_called_once_with(
         root,
         ReconciliationIdentity("client", "cluster", "namespace"),
+        forgejo_enabled=forgejo_enabled,
     )
     assert events == ["revoke", "converge"]
-    converge.assert_called_once_with(cluster, False)
+    converge.assert_called_once_with(cluster, False, forgejo_enabled)
 
 
 def test_reconcile_requires_complete_bootstrap(tmp_path: Path) -> None:

@@ -102,6 +102,14 @@ INFRA_AGENTGATEWAY_EXTERNAL_SECRET = ExternalSecretTarget(
 CERT_MANAGER_ISSUERS_EXTERNAL_SECRET = ExternalSecretTarget(
     "cert-manager-issuers-values", "infra-cert-manager", "cert-manager-issuers-values"
 )
+FORGEJO_SECRET_STORE = SecretStoreTarget("forgejo-openbao-secret-store", "forgejo")
+FORGEJO_EXTERNAL_SECRETS = (
+    ExternalSecretTarget("forgejo-runtime", "forgejo", "forgejo-runtime"),
+    ExternalSecretTarget(
+        "forgejo-postgres-values", "infra-postgres-operations", "forgejo-postgres-values"
+    ),
+    ExternalSecretTarget("forgejo-oidc-values", "auth-keycloak", "forgejo-oidc-values"),
+)
 
 BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
     ExternalSecretTarget(
@@ -232,7 +240,7 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
-    if namespace not in ROLE_NAMESPACES:
+    if namespace not in (*ROLE_NAMESPACES, "forgejo"):
         raise ValueError("Namespace is not present in the reconciliation catalog")
     return f"""path "secret/data/{namespace}/*" {{
   capabilities = ["read"]

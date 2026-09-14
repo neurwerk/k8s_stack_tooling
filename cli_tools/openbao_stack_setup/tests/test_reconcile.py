@@ -40,7 +40,7 @@ def state_values(
     *,
     applied: int = 4,
     client_name: str = "client",
-    package_version: str = "0.2.11",
+    package_version: str = "0.2.12",
 ) -> dict[str, JsonValue]:
     return {
         "schemaVersion": 1,

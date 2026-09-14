@@ -23,6 +23,7 @@ from openbao_stack_setup.providers import MANAGED_CREDENTIALS
 
 STATE_SCHEMA_VERSION = 1
 CURRENT_RECONCILIATION_VERSION = 4
+# Optional additive catalogs are selected on every run, including at schema 4.
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ def reconcile_openbao(
     client: OpenBaoClient,
     identity: ReconciliationIdentity,
     bootstrap_passwords: dict[str, str] | None = None,
+    *,
+    forgejo_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -67,7 +70,8 @@ def reconcile_openbao(
 
     client.ensure_kubernetes_auth()
     client.configure_kubernetes_auth()
-    for namespace in ROLE_NAMESPACES:
+    namespaces = ROLE_NAMESPACES + (("forgejo",) if forgejo_enabled else ())
+    for namespace in namespaces:
         client.write_policy(namespace, namespace_policy(namespace))
         client.write_kubernetes_role(namespace)
     client.write_policy(
@@ -90,7 +94,7 @@ def reconcile_openbao(
     replicated = _reconcile_replica(client)
     if state.applied_version == 2:
         migrate_schema_2_internal_credentials(client)
-    internal = reconcile_internal_credentials(client, passwords)
+    internal = reconcile_internal_credentials(client, passwords, forgejo_enabled=forgejo_enabled)
 
     if state.applied_version < CURRENT_RECONCILIATION_VERSION:
         client.write_secret(
