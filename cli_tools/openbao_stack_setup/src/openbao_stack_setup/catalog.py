@@ -103,6 +103,10 @@ CERT_MANAGER_ISSUERS_EXTERNAL_SECRET = ExternalSecretTarget(
     "cert-manager-issuers-values", "infra-cert-manager", "cert-manager-issuers-values"
 )
 FORGEJO_SECRET_STORE = SecretStoreTarget("forgejo-openbao-secret-store", "forgejo")
+WIREGUARD_SECRET_STORE = SecretStoreTarget("wireguard-openbao-secret-store", "wireguard")
+WIREGUARD_EXTERNAL_SECRET = ExternalSecretTarget(
+    "wireguard-server-key", "wireguard", "wireguard-server-key"
+)
 FORGEJO_EXTERNAL_SECRETS = (
     ExternalSecretTarget("forgejo-runtime", "forgejo", "forgejo-runtime"),
     ExternalSecretTarget(
@@ -240,7 +244,7 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
-    if namespace not in (*ROLE_NAMESPACES, "forgejo"):
+    if namespace not in (*ROLE_NAMESPACES, "forgejo", "wireguard"):
         raise ValueError("Namespace is not present in the reconciliation catalog")
     return f"""path "secret/data/{namespace}/*" {{
   capabilities = ["read"]

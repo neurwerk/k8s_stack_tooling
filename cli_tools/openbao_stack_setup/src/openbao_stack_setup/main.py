@@ -30,6 +30,8 @@ from openbao_stack_setup.catalog import (
     FORGEJO_EXTERNAL_SECRETS,
     FORGEJO_SECRET_STORE,
     PROVIDER_REFRESH_TARGETS,
+    WIREGUARD_EXTERNAL_SECRET,
+    WIREGUARD_SECRET_STORE,
     HelmReleaseTarget,
 )
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError
@@ -154,6 +156,7 @@ def _preflight(context: str, client: str) -> None:
     smtp_required = cluster.require_bootstrap_prerequisites()
     active_directory_required = cluster.active_directory_required()
     forgejo_enabled = cluster.forgejo_enabled()
+    wireguard_enabled = cluster.wireguard_enabled()
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(
         "Preflight passed for "
@@ -162,6 +165,7 @@ def _preflight(context: str, client: str) -> None:
     print(f"Bootstrap prerequisites verified; SMTP credentials required={smtp_required}")
     print(f"Active Directory credentials required={active_directory_required}")
     print(f"Forgejo generated credential catalog selected={forgejo_enabled}")
+    print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
     print("Verify K3s --secrets-encryption on the control-plane node before bootstrap.")
 
@@ -178,6 +182,7 @@ def _bootstrap(
     cluster.require_bootstrap_prerequisites()
     active_directory_required = cluster.active_directory_required()
     forgejo_enabled = cluster.forgejo_enabled()
+    wireguard_enabled = cluster.wireguard_enabled()
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -238,6 +243,7 @@ def _bootstrap(
                 paths.seal_file,
                 active_directory_required,
                 forgejo_enabled,
+                wireguard_enabled,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -259,6 +265,7 @@ def _bootstrap(
                 paths.seal_file,
                 active_directory_required,
                 forgejo_enabled,
+                wireguard_enabled,
             )
             return
         if kit.checkpoint == "complete":
@@ -274,6 +281,7 @@ def _bootstrap(
             paths.seal_file,
             active_directory_required,
             forgejo_enabled,
+            wireguard_enabled,
         )
 
 
@@ -285,6 +293,7 @@ def _seed_and_finish(
     recovery_file: Path,
     active_directory_required: bool,
     forgejo_enabled: bool = False,
+    wireguard_enabled: bool = False,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -302,6 +311,7 @@ def _seed_and_finish(
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
                 active_directory=active_directory,
                 forgejo_enabled=forgejo_enabled,
+                wireguard_enabled=wireguard_enabled,
             )
             kit = with_checkpoint(kit, "seeded")
             update(recovery_file, kit)
@@ -316,6 +326,7 @@ def _seed_and_finish(
                 root,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
                 forgejo_enabled=forgejo_enabled,
+                wireguard_enabled=wireguard_enabled,
             )
             print(
                 "Reconciled OpenBao catalog "
@@ -328,7 +339,7 @@ def _seed_and_finish(
         _revoke_other_root_tokens(root)
     finally:
         root.revoke_self()
-    _converge_runtime(cluster, active_directory_required, forgejo_enabled)
+    _converge_runtime(cluster, active_directory_required, forgejo_enabled, wireguard_enabled)
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
     print("OpenBao bootstrap completed; no root token was retained.")
@@ -345,6 +356,7 @@ def _reconcile(
     identity = cluster.identity(client)
     active_directory_required = cluster.active_directory_required()
     forgejo_enabled = cluster.forgejo_enabled()
+    wireguard_enabled = cluster.wireguard_enabled()
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
     kit = _bound_kit(paths.seal_file, identity)
@@ -367,6 +379,7 @@ def _reconcile(
                     identity.namespace_uid,
                 ),
                 forgejo_enabled=forgejo_enabled,
+                wireguard_enabled=wireguard_enabled,
             )
             _verify_secret_operator(cluster, unauthenticated)
             _revoke_other_root_tokens(root)
@@ -378,7 +391,7 @@ def _reconcile(
         f"to_version={report.applied_version} "
         f"replicated_records={report.replicated_records}; temporary root token revoked."
     )
-    _converge_runtime(cluster, active_directory_required, forgejo_enabled)
+    _converge_runtime(cluster, active_directory_required, forgejo_enabled, wireguard_enabled)
     print("OpenBao reconciliation completed.")
 
 
@@ -459,12 +472,14 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     cluster = Cluster(context)
     identity = cluster.identity(client)
     forgejo_enabled = cluster.forgejo_enabled()
+    wireguard_enabled = cluster.wireguard_enabled()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
     checkpoint = _bound_kit(paths.seal_file, identity).checkpoint
     with _openbao(cluster) as api:
         initialized = api.initialized()
     print(f"client={client} initialized={initialized} recovery_checkpoint={checkpoint}")
     print(f"Forgejo generated credential catalog selected={forgejo_enabled}")
+    print(f"WireGuard server-key catalog selected={wireguard_enabled}")
 
 
 def _verify_recovery(
@@ -584,13 +599,18 @@ def _refresh_provider(cluster: Cluster, provider: Provider) -> None:
 
 
 def _refresh_bootstrap_external_secrets(
-    cluster: Cluster, active_directory_required: bool, forgejo_enabled: bool = False
+    cluster: Cluster,
+    active_directory_required: bool,
+    forgejo_enabled: bool = False,
+    wireguard_enabled: bool = False,
 ) -> None:
     targets = _BOOTSTRAP_EXTERNAL_SECRETS
     if active_directory_required:
         targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,)
     if forgejo_enabled:
         targets += FORGEJO_EXTERNAL_SECRETS
+    if wireguard_enabled:
+        targets += (WIREGUARD_EXTERNAL_SECRET,)
     total = len(targets)
     for index, target in enumerate(targets, start=1):
         print(f"Refreshing ExternalSecret {target.namespace}/{target.name} ({index}/{total})...")
@@ -598,14 +618,23 @@ def _refresh_bootstrap_external_secrets(
 
 
 def _converge_runtime(
-    cluster: Cluster, active_directory_required: bool, forgejo_enabled: bool = False
+    cluster: Cluster,
+    active_directory_required: bool,
+    forgejo_enabled: bool = False,
+    wireguard_enabled: bool = False,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
     _converge_bootstrap_secret_stores(cluster)
     if forgejo_enabled:
         cluster.ensure_secret_store_ready(FORGEJO_SECRET_STORE.name, FORGEJO_SECRET_STORE.namespace)
-    _refresh_bootstrap_external_secrets(cluster, active_directory_required, forgejo_enabled)
+    if wireguard_enabled:
+        cluster.ensure_secret_store_ready(
+            WIREGUARD_SECRET_STORE.name, WIREGUARD_SECRET_STORE.namespace
+        )
+    _refresh_bootstrap_external_secrets(
+        cluster, active_directory_required, forgejo_enabled, wireguard_enabled
+    )
     print(
         "Reconciling infrastructure releases blocked on generated Secrets; "
         "this usually takes a few minutes. OpenSearch hooks may take 1-2 minutes; "
