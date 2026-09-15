@@ -170,11 +170,30 @@ class Cluster:
                 raise ClusterError("Enabled Forgejo requires a nonblank hostname in client-values")
         return enabled
 
-    def _product_values(self, name: str, namespace: str, product: str) -> object:
+    def wireguard_enabled(self) -> bool:
+        """Read the optional gateway's canonical product values, without reading keys."""
+        values = self._product_values(
+            "wireguard-product-values", "wireguard", "WireGuard", optional=True
+        )
+        if not isinstance(values, dict) or not isinstance(values.get("wireguard", {}), dict):
+            raise ClusterError("WireGuard product values contain an invalid contract")
+        gateway = values.get("wireguard", {})
+        enabled = gateway.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("WireGuard enabled value must be a boolean")
+        if enabled and gateway.get("serverKeySecret") != "wireguard-server-key":
+            raise ClusterError("Selected WireGuard requires serverKeySecret=wireguard-server-key")
+        return enabled
+
+    def _product_values(
+        self, name: str, namespace: str, product: str, *, optional: bool = False
+    ) -> object:
         """Read one namespace-local product values document."""
         try:
             config_map = self.core.read_namespaced_config_map(name, namespace)
         except ApiException as exc:
+            if optional and exc.status == 404:
+                return {}
             raise ClusterError(
                 f"{product} product values are unavailable: HTTP {exc.status}"
             ) from None

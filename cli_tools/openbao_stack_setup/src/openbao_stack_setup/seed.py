@@ -31,6 +31,7 @@ def seed_bootstrap(
     active_directory: dict[str, str] | None = None,
     *,
     forgejo_enabled: bool = False,
+    wireguard_enabled: bool = False,
 ) -> SeedReport:
     """Converge a fresh instance and refuse unexpected external record changes."""
     if set(provider_values) != set(PROVIDERS):
@@ -64,7 +65,11 @@ def seed_bootstrap(
     for path, values in records.items():
         external_changed += _reconcile_exact_record(client, path, values)
     reconciled = reconcile_openbao(
-        client, identity, bootstrap_passwords, forgejo_enabled=forgejo_enabled
+        client,
+        identity,
+        bootstrap_passwords,
+        forgejo_enabled=forgejo_enabled,
+        wireguard_enabled=wireguard_enabled,
     )
     return SeedReport(
         external_changed,

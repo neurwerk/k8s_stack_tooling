@@ -7,6 +7,41 @@ files.
 
 ## Setup
 
+### Optional WireGuard Server Key
+
+Package `0.2.13` adds a selection-gated WireGuard catalog at schema `4`, reusing
+`bootstrap` and `reconcile`; it adds no command, provider or device-enrollment service.
+The selector is `wireguard.enabled` in `wireguard/wireguard-product-values`, key
+`values.yaml`, with `serverKeySecret: wireguard-server-key`. An absent ConfigMap or
+disabled selector adds no WireGuard role, record or consumer refresh; malformed
+values and errors other than HTTP 404 fail closed. There is no second selector in
+shared client values or an inline HelmRelease override.
+
+After separately authorized staging of Base's optional WireGuard namespace,
+`releases/wireguard/secret-sync/` and product ConfigMap, keep the gateway unselected
+or fully stopped with `replicas: 0`. Run the ordinary context/client-confirmed
+`stack-setup reconcile` with two custodian packages (or `bootstrap` on a genuinely
+new installation). This operates the existing full catalog, not just WireGuard;
+its established infrastructure reconciliation side effects still apply.
+
+The tool creates only missing `wireguard/internal:privateKey`, as raw base64 X25519,
+using compare-and-set persistence; it never displays the key, rotates an existing
+key, enrolls a peer or starts the gateway. Invalid existing keys stop reconciliation
+without replacement. The `wireguard` role is bound to `wireguard-external-secrets`
+in namespace `wireguard` with audience `openbao` and namespace-only read access.
+After root revocation it waits for `wireguard-openbao-secret-store` and refreshes
+`wireguard-server-key`; missing selected consumers fail visibly and can be retried.
+The existing secret-operator provider policy does not gain key access.
+
+ESO delivers only `privateKey` to the one namespace-local `wireguard-server-key`
+Secret. Disabled selection preserves previously provisioned keys and roles; it is
+not access revocation. Stop the gateway and remove its peer explicitly. Follow the
+current-list-or-empty recovery procedure, and never restore historical peers with
+the server key. Device private keys are generated manually in the Mac WireGuard
+app and stay there; approval uses only the device public key. After authorized
+gateway startup, `wg show wg0 public-key` inside its container reports only the
+server public key for Mac configuration; never dump its full configuration.
+
 Install `uv`, `kubectl`, and `gpg`, configure the intended Kubernetes context, then install the
 locked development environment:
 

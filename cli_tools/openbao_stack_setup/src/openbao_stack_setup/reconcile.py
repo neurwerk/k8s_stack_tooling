@@ -59,6 +59,7 @@ def reconcile_openbao(
     bootstrap_passwords: dict[str, str] | None = None,
     *,
     forgejo_enabled: bool = False,
+    wireguard_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -71,6 +72,7 @@ def reconcile_openbao(
     client.ensure_kubernetes_auth()
     client.configure_kubernetes_auth()
     namespaces = ROLE_NAMESPACES + (("forgejo",) if forgejo_enabled else ())
+    namespaces += ("wireguard",) if wireguard_enabled else ()
     for namespace in namespaces:
         client.write_policy(namespace, namespace_policy(namespace))
         client.write_kubernetes_role(namespace)
@@ -94,7 +96,9 @@ def reconcile_openbao(
     replicated = _reconcile_replica(client)
     if state.applied_version == 2:
         migrate_schema_2_internal_credentials(client)
-    internal = reconcile_internal_credentials(client, passwords, forgejo_enabled=forgejo_enabled)
+    internal = reconcile_internal_credentials(
+        client, passwords, forgejo_enabled=forgejo_enabled, wireguard_enabled=wireguard_enabled
+    )
 
     if state.applied_version < CURRENT_RECONCILIATION_VERSION:
         client.write_secret(
