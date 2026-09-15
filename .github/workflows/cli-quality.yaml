@@ -18,6 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Maintenance
+            project: cli_tools/maintenance
+            needs_base: false
           - name: Platform Release
             project: cli_tools/platform_release
             needs_base: false
