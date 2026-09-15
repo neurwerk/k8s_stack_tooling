@@ -121,7 +121,8 @@ Release status shows PR links when available from its existing inspection.
    selects a single PR, and requires a tag-and-PR-labelled choice when multiple are
    open. `check --tag vX.Y.Z` or `check --pr NUMBER` selects explicitly. No matching
    open PR is an actionable error, never a fallback to the original checkout's VERSION.
-   Incomplete documentation blocks with Review notes guidance. When
+    Notes, summaries and migration files are optional; no headings are required.
+    Explicit policy declarations must agree with Base's manifest. When
    ready, both full checks run. After success, follow the printed PR URL, resolve
    reviews, wait for required CI and approvals, and merge manually. This is a
    required handoff, not an automatic step. Then `publish` prepares the exact
@@ -172,13 +173,11 @@ local history requires manual review; the tool never infers ownership from a
 commit subject and never resets or amends it.
 Uncommitted changes outside the five evidence files block generation without cleanup.
 
-Base's actual config, schema, inventory generator and migration scaffold supply the
-summary, prerequisite/package context, and exact Support/Recovery declarations.
+Base's config, schema and inventory generator supply the release contract.
 The helper preserves the existing policy, alpha revisions and recovery classification,
 including `supported`, empty alpha revisions and `forward-fix` preparation defaults.
-These are declarations, **not acceptance evidence**. Missing summary prose is prompted;
-otherwise the summary and config formatting are preserved. A null summary is missing,
-not the text "None"; leaving it unanswered saves an explicit TODO. Non-text values
+These are declarations, **not acceptance evidence**. Empty or missing summaries
+stay optional, and absent migration files are not recreated. Non-text summary values
 such as booleans and lists are rejected rather than converted into release prose.
 The manifest is generated
 by Base, not assembled independently by Tooling.

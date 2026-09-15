@@ -120,7 +120,28 @@ def _review(runner: CommandRunner, repo: m.Repository, base: str) -> str:
         ("git", "log", "--oneline", "-10"),
     ):
         m._checked(runner, command, cwd=repo.path)
-    return m._checked(runner, (*DIFF, base, "--"), cwd=repo.path)
+    preview = m._checked(runner, (*DIFF, base, "--"), cwd=repo.path)
+    untracked = m._checked(
+        runner, ("git", "ls-files", "--others", "--exclude-standard", "-z"), cwd=repo.path
+    )
+    if not untracked:
+        return preview
+    new_paths = set(filter(None, untracked.split("\0")))
+    tracked = m._checked(
+        runner, ("git", "diff", "--name-only", "--no-renames", "-z", base, "--"), cwd=repo.path
+    )
+    parts = []
+    for name in sorted(new_paths | set(filter(None, tracked.split("\0")))):
+        command = (
+            (*DIFF, "--no-index", "--", "/dev/null", name)
+            if name in new_paths
+            else (*DIFF, base, "--", name)
+        )
+        result = runner.run(command, cwd=repo.path)
+        if result.returncode not in (0, 1):
+            raise m.ReleaseError("could not preview new release notes")
+        parts.append(result.stdout.strip())
+    return "\n".join(parts)
 
 
 def _unchanged(
@@ -129,10 +150,7 @@ def _unchanged(
     """Do not stage or push evidence changed by a concurrent edit or hook."""
     paths = tuple(snapshot)
     n._evidence_only(runner, repo, paths)
-    if (
-        n._snapshot(repo, paths) != snapshot
-        or m._checked(runner, (*DIFF, base, "--"), cwd=repo.path) != preview
-    ):
+    if n._snapshot(repo, paths) != snapshot or _review(runner, repo, base) != preview:
         raise m.ReleaseError("evidence changed after preview; retain local work and review again")
 
 
@@ -152,6 +170,14 @@ def _commit(
     ).split("\0")
     paths = n.evidence_paths(pr["headRefName"].removeprefix("release/"))
     intended = [path for path in changed if path]
+    intended += list(
+        filter(
+            None,
+            m._checked(
+                runner, ("git", "ls-files", "--others", "--exclude-standard", "-z"), cwd=repo.path
+            ).split("\0"),
+        )
+    )
     if not intended or any(path not in paths for path in intended):
         raise m.ReleaseError("upload must change only the five release evidence files")
     _empty_index(runner, repo)
@@ -196,9 +222,6 @@ def _upload(
     paths = n.evidence_paths(pr["headRefName"].removeprefix("release/"))
     snapshot = n._snapshot(repo, paths)
     branch = f"release-notes/{pr['number']}-{base}"
-    # Prepared PRs already track all five files. This also ensures the guard scans
-    # all evidence before staging, rather than missing a new untracked document.
-    m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *paths), cwd=repo.path)
     failures = m.run_checks(runner, repo)
     if failures:
         raise m.ReleaseError("; ".join(failures))
@@ -231,9 +254,13 @@ def _format_for_upload(
     pr = args.selected_pr
     paths = n.evidence_paths(pr["headRefName"].removeprefix("release/"))
     n._evidence_only(runner, repo, paths)
-    m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *paths), cwd=repo.path)
     before = n._snapshot(repo, paths)
-    command = ("pre-commit", "run", "--files", *paths)
+    command = (
+        "pre-commit",
+        "run",
+        "--files",
+        *(name for name in paths if (repo.path / name).is_file()),
+    )
     sys.stdout.write("Running formatting and pre-commit checks\n")
     result = runner.run_live(command, cwd=repo.path)
     n._evidence_only(runner, repo, paths)
@@ -296,7 +323,7 @@ def offer_upload(
     if getattr(args, "verbose", False):
         sys.stdout.write(f"\nExact changes proposed for the release PR:\n{preview}\n")
     tag = pr["headRefName"].removeprefix("release/")
-    changelog = (repo.path / "CHANGELOG.md").read_text()
+    changelog = n._snapshot(repo, ("CHANGELOG.md",))["CHANGELOG.md"]
     start, end = section_bounds(changelog, tag[1:])
     body = changelog[start:end].strip()
     sys.stdout.write(f"\n{label}:\n## {tag}\n\n{body}\n")

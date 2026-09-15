@@ -316,13 +316,9 @@ def _complete_summary(
         raise m.ReleaseError(
             "release summary must be text or null; fix its config type before continuing"
         )
-    if summary is None or not summary.strip() or TODO.search(summary):
-        answer = prompt.ask(
-            "Release summary: what does this release change? Enter keeps an unfinished TODO: "
-        ).strip()
-        replacement = answer or summary or "TODO: Describe the release changes."
-        if not replacement.strip():
-            replacement = "TODO: Describe the release changes."
+    if isinstance(summary, str) and TODO.search(summary):
+        answer = prompt.ask("Release summary (optional; Enter clears the placeholder): ").strip()
+        replacement = answer
         if replacement != summary:
             return _canonical(runner, repo, replacement)
     return data
@@ -352,7 +348,7 @@ def finish_notes(
     summary = data["config"].get("summary")
     data = _complete_summary(runner, repo, data, prompt)
     migration, changelog = draft_notes(
-        before[paths[-1]] or data["scaffold"],
+        before[paths[-1]],
         before["CHANGELOG.md"],
         data["scaffold"],
         tag[1:],
@@ -365,7 +361,7 @@ def finish_notes(
         "release/manifest.yaml": data["manifest"],
         "release/config.yaml": (
             data["config_text"]
-            if data["config"]["summary"] != summary
+            if data["config"].get("summary") != summary
             else before["release/config.yaml"]
         ),
     }

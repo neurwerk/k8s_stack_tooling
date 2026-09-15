@@ -135,7 +135,7 @@ def section_bounds(changelog: str, version: str) -> tuple[int, int]:
                 start = offset + len(line)
         offset += len(line)
     if start is None:
-        raise m.ReleaseError("dated release changelog section is missing; review manually")
+        return offset, offset
     return start, offset
 
 
@@ -143,18 +143,11 @@ def draft(
     migration: str, changelog: str, scaffold: str, version: str, prompt: m.Prompt
 ) -> tuple[str, str]:
     """Offer conservative conversion and a compact human-authored notes editor."""
-    migration = migration or scaffold
     start, end = section_bounds(changelog, version)
     body = changelog[start:end]
     cleaned_migration = clean(migration, migration=True)
     cleaned_body = clean(body)
     if (cleaned_migration, cleaned_body) != (migration, body):
-        # Keep old Base validation declarations and its mandatory breaking-change section.
-        if "## Breaking Changes\n" not in cleaned_migration:
-            cleaned_migration += (
-                "\n## Breaking Changes\n\n"
-                f"See CHANGELOG.md for v{version} release notes and upgrade instructions.\n"
-            )
         sys.stdout.write(
             "\nGenerated scaffold conversion preview (technical metadata stays internal):\n"
         )
@@ -180,4 +173,6 @@ def draft(
         special = multiline(prompt, "Special notes (optional; blank means None):")
         if special:
             body = body.rstrip() + "\n\n" + special + "\n"
+    if body and start == len(changelog) and start == end:
+        body = f"\n## [{version}]\n\n{body}"
     return migration, changelog[:start] + body + changelog[end:]
