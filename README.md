@@ -2,13 +2,14 @@
 
 Python runtime utilities and trusted-workstation command-line tools used to
 operate the neurwerk Kubernetes stack. This repository contains one container
-package and six independently locked CLI projects.
+package and seven independently locked CLI projects.
 
 ## Projects
 
 | Project | Purpose | Execution environment |
 | --- | --- | --- |
-| `k8s-stack-tooling` | Idempotent Keycloak and OpenSearch initialization commands | Kubernetes Jobs in the tooling container image |
+| `k8s-stack-tooling` | Keycloak/OpenSearch initialization and a maintenance page server | Kubernetes Jobs and on-demand maintenance Deployment |
+| [`maintenance`](cli_tools/maintenance/) | Starts and stops maintenance pages for selected products | Authorized operator workstation |
 | [`platform-release`](cli_tools/platform_release/) | Reviews, checks and stages signed Base platform releases through protected workflows | Trusted release custodian workstation |
 | [`package-checker`](cli_tools/package_checker/) | Reports published GHCR versions and active GitHub Actions builds | Developer or operator workstation |
 | [`media-downloader-uploader`](cli_tools/media_downloader_uploader/) | Downloads verified Hugging Face artifacts and publishes immutable PII bundles | Workstation with external storage and explicit cluster access |
@@ -71,6 +72,7 @@ these commands on `PATH`:
 - `send-user-actions-email`
 - `upsert-composite-roles`
 - `upsert-opensearch-user`
+- `maintenance-server`
 
 Build locally without publishing:
 
@@ -81,6 +83,51 @@ docker build -t k8s-stack-tooling:local .
 The image runs as a non-root user and has no default entrypoint. Workloads must
 select the required command explicitly. Tagged releases are built and published
 to GHCR by GitHub Actions using the repository-scoped `GITHUB_TOKEN`.
+
+### Maintenance Server
+
+Select `maintenance-server` explicitly in the Tooling image to run the on-demand
+WSGI responder on `0.0.0.0:8080`. It does not enable maintenance routing, call
+Kubernetes or Keycloak, authenticate users, or contact upstream services.
+
+| Environment variable | Default | Contract |
+| --- | --- | --- |
+| `MAINTENANCE_COMPANY_NAME` | `neurwerk` | HTML-escaped name, at most 512 characters |
+| `MAINTENANCE_LOGO_PATH` | unset | Absolute mounted `.png` or `.svg` file |
+| `MAINTENANCE_RETRY_AFTER` | `300` | Integer seconds, 0 through 2147483647 |
+
+All ordinary paths and methods return HTML with `503`, `Retry-After`,
+`Cache-Control: no-store`, and `X-Platform-Maintenance: true`. `HEAD` has no body.
+`/_maintenance/healthz` returns `200` and `ok` for process health only, not
+upstream readiness. Exact bundled asset paths under `/_maintenance/assets/`
+return `200` for GET/HEAD; unknown paths still return the maintenance page.
+All responses have no-store, a restrictive CSP, and MIME sniffing protection.
+
+Assets and optional branding are loaded once at startup; restart to update them.
+Unreadable, non-regular, oversized (over 1 MiB), invalid-signature PNG, or unsafe
+SVG logos are omitted in favor of the company name. SVG supports a conservative
+shape/presentation allowlist, not scripts, styles, links, embedded images,
+animation, entities or external references. Relative or non-PNG/SVG configured
+paths fail settings validation. Requests never select filesystem paths.
+
+The fixed Gunicorn configuration uses two synchronous workers, a 15-second
+worker timeout, 15-second graceful shutdown, a 128-connection backlog, a
+4094-byte request line, at most 32 headers of at most 4096 bytes each.
+Request bodies are never read, buffered or drained by the application; the
+synchronous worker closes the connection after responding, including for
+chunked/large uploads. The locked Gunicorn transport drains at most 64 KiB for
+at most two seconds during socket closure, without application processing.
+Malformed or over-limit HTTP is rejected by Gunicorn
+before the page handler. Access logs are disabled; warning/error details are
+suppressed so parser errors cannot log URLs, headers or credentials. No request
+body, query, cookie or token is logged. Proxy access-log policy is separate.
+Gunicorn config files, CLI flags and `GUNICORN_CMD_ARGS` are not loaded.
+
+The page follows the shared Keycloak theme without a Keycloak runtime dependency:
+white logo panel beside indigo content on desktop, one indigo panel with company
+name at widths up to 767px. Inter 400/600 and the Neurwerk wordmark are bundled;
+no client logo is a generic default. See [asset attribution](THIRD_PARTY.md).
+Image versioning, publication and platform adoption are separate release steps.
 
 ### Keycloak Realm Themes
 

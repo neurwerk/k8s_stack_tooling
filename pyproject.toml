@@ -4,16 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.6.1"
-description = "Kubernetes initialization utilities for Keycloak and OpenSearch."
+version = "0.6.2"
+description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY.md", "src/k8s_stack_tooling/maintenance/assets/OFL.txt"]
 requires-python = ">=3.12"
-dependencies = ["requests>=2.31", "kubernetes>=36.0.2"]
+dependencies = [
+    "requests>=2.31",
+    "kubernetes>=36.0.2",
+    "gunicorn>=26.2",
+    "pydantic-settings>=2.10",
+    "defusedxml>=0.7.1",
+]
 
 [project.scripts]
+maintenance-server = "k8s_stack_tooling.maintenance.main:main"
 upsert-realm = "k8s_stack_tooling.keycloak.upsert_realm:main"
 upsert-oidc-client = "k8s_stack_tooling.keycloak.upsert_oidc_client:main"
 upsert-realm-roles = "k8s_stack_tooling.keycloak.upsert_realm_roles:main"

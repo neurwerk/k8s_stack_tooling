@@ -1,0 +1,56 @@
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('Inter-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('Inter-SemiBold.ttf') format('truetype');
+}
+:root {
+  color-scheme: light;
+  --nw-primary: #5563ab;
+  --nw-primary-dark: #2a3c96;
+}
+* { box-sizing: border-box; }
+body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--nw-primary);
+  color: #fff;
+  font: 400 16px/1.65 Inter, Arial, sans-serif;
+}
+.branding {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px clamp(32px, 6vw, 96px);
+  background: #fff;
+  color: var(--nw-primary-dark);
+}
+.brand-name { font-size: 32px; overflow-wrap: anywhere; }
+.company-logo { width: min(100%, 480px); max-height: 65vh; object-fit: contain; }
+main {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: clamp(40px, 8vh, 96px) clamp(32px, 8vw, 128px);
+}
+.content { width: min(100%, 420px); margin-inline: auto; overflow-wrap: anywhere; }
+.wordmark { width: 143px; height: auto; filter: brightness(0) invert(1); margin-bottom: 20px; }
+.company-name { display: none; }
+h1 { font-size: 26px; font-weight: 600; line-height: 1.3; letter-spacing: -0.6px; }
+@media (max-width: 767px) {
+  body { grid-template-columns: minmax(0, 1fr); }
+  .branding { display: none; }
+  main { min-height: 100vh; min-height: 100dvh; padding: 40px 20px 64px; }
+  .company-name { display: block; margin-bottom: 12px; }
+}
