@@ -529,8 +529,6 @@ def _validate_prepare_arguments(args: argparse.Namespace) -> str:
         date.fromisoformat(args.release_date)
     except ValueError as error:
         raise ReleaseError("release date must use YYYY-MM-DD") from error
-    if not args.summary.strip():
-        raise ReleaseError("summary must not be empty")
     return tag
 
 
@@ -815,7 +813,7 @@ def _show_prepare_preview(
     summary: str,
 ) -> None:
     """Show the proposed draft and notes from its exact observed source commit."""
-    changelog = _checked(runner, ("git", "show", f"{target}:CHANGELOG.md"), cwd=repository.path)
+    changelog = _optional_prose(runner, repository, target, "CHANGELOG.md")
     print(
         f"\nPrepare release PR: {repository.slug} | {tag}\n"
         f"Latest verified published predecessor: {previous}\n"
@@ -833,12 +831,24 @@ def _show_evidence(runner: CommandRunner, repository: Repository) -> None:
     """Display committed release evidence for validation and publication."""
     tag = _tag(_checked(runner, ("git", "show", "HEAD:VERSION"), cwd=repository.path))
     for path in ("CHANGELOG.md", "release/manifest.yaml", f"release/migrations/{tag}.md"):
-        content = _checked(runner, ("git", "show", f"HEAD:{path}"), cwd=repository.path)
+        content = (
+            _checked(runner, ("git", "show", f"HEAD:{path}"), cwd=repository.path)
+            if path == "release/manifest.yaml"
+            else _optional_prose(runner, repository, "HEAD", path)
+        )
         print(f"\n--- {path} ---\n{content}")
     print(
         "Review this release's notes, release files and upgrade instructions before proceeding. "
         "No cluster or adoption action is authorized."
     )
+
+
+def _optional_prose(runner: CommandRunner, repository: Repository, ref: str, path: str) -> str:
+    if not _checked(
+        runner, ("git", "ls-tree", "--name-only", ref, "--", path), cwd=repository.path
+    ):
+        return ""
+    return _checked(runner, ("git", "show", f"{ref}:{path}"), cwd=repository.path)
 
 
 def _confirm(
@@ -1706,11 +1716,11 @@ def check_release(runner: CommandRunner, repository: Repository, pr: dict[str, A
         f"Validate {tag} | PR #{pr['number']} | https://github.com/{repository.slug}/pull/{pr['number']}\n"
         f"SHA: {target}\nWorktree: {repository.path}"
     )
-    changelog = _checked(runner, ("git", "show", "HEAD:CHANGELOG.md"), cwd=repository.path)
+    changelog = _optional_prose(runner, repository, "HEAD", "CHANGELOG.md")
     print(f"\nCHANGELOG.md [{version}]\n{_unreleased_notes(changelog, version)}")
     evidence = [
         _unreleased_notes(changelog, version),
-        _checked(runner, ("git", "show", f"HEAD:release/migrations/{tag}.md"), cwd=repository.path),
+        _optional_prose(runner, repository, "HEAD", f"release/migrations/{tag}.md"),
         _checked(runner, ("git", "show", "HEAD:release/config.yaml"), cwd=repository.path),
     ]
     if any(re.search(r"\bTODO\b", text, re.IGNORECASE) for text in evidence):

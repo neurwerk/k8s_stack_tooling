@@ -9,11 +9,41 @@ from test_release import OLD, SHA, TAG, Fake, release_pr
 from platform_release import main as m
 from platform_release import notes as n
 from platform_release import upload as u
-from platform_release.commands import CommandResult
+from platform_release.commands import CommandResult, SubprocessRunner
 
 COMMIT = "d" * 40
 TREE = "e" * 40
 CHANGED = ("CHANGELOG.md", f"release/migrations/{TAG}.md")
+
+
+def test_new_optional_notes_preview_matches_staged_diff(tmp_path):
+    runner = SubprocessRunner()
+    repo = m.Repository(tmp_path, "example/base", "main")
+    m._checked(runner, ("git", "init", "--initial-branch=main"), cwd=tmp_path)
+    (tmp_path / "VERSION").write_text("1.0.0\n")
+    m._checked(runner, ("git", "add", "VERSION"), cwd=tmp_path)
+    m._checked(
+        runner,
+        (
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-m",
+            "baseline",
+        ),
+        cwd=tmp_path,
+    )
+    (tmp_path / "VERSION").write_text("1.0.1\n")
+    (tmp_path / "CHANGELOG.md").write_text("## [1.0.1]\n\nA fix.\n")
+    assert m._optional_prose(runner, repo, "HEAD", "CHANGELOG.md") == ""
+    preview = u._review(runner, repo, "HEAD")
+    m._checked(runner, ("git", "add", "VERSION", "CHANGELOG.md"), cwd=tmp_path)
+    assert preview == m._checked(runner, (*u.DIFF, "--cached", "HEAD", "--"), cwd=tmp_path)
+
+
 PUSH = (
     "git",
     "push",
@@ -71,6 +101,8 @@ class UploadRunner(Fake):
             return f"{self.heads[self.repo.path]} {SHA}"
         if a == ("git", "write-tree") or a == ("git", "rev-parse", "HEAD^{tree}"):
             return self.tree
+        if a == ("git", "ls-files", "--others", "--exclude-standard", "-z"):
+            return ""
         if a[:2] == ("git", "ls-files"):
             return "\n".join(n.evidence_paths(TAG))
         if a[:2] == ("git", "ls-remote") and a[-1] == f"refs/heads/release/{TAG}":

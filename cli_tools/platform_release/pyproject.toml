@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "platform-release"
-version = "0.1.1"
+version = "0.1.2"
 description = "Safely stage and dispatch platform release publication workflows."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]

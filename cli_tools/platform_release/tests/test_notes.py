@@ -88,14 +88,23 @@ def test_explicit_main_edit_and_special_notes():
     assert result == "## [1.0.1]\n- Reviewed fix.\n\nStop writes.\n"
 
 
+def test_absent_notes_stay_absent_and_can_be_added():
+    assert n.draft_notes(
+        "", "", "old required scaffold", "1.0.1", Mock(ask=Mock(return_value=""))
+    ) == ("", "")
+    prompt = Mock(ask=Mock(side_effect=["yes", "A small fix.", ".", ""]))
+    migration, notes = n.draft_notes("", "", "", "1.0.1", prompt)
+    assert migration == ""
+    assert notes == "\n## [1.0.1]\n\nA small fix.\n"
+
+
 def test_cleanup_keeps_raw_code_and_unknown_todos():
     text = "### Compatibility\nn/a\n\n```md\nn/a\n## Recovery\n```\n    n/a\nTODO: review data\n"
     cleaned = c.clean(text)
     assert cleaned == text
     authored = "# Recovery\n## Client Actions\n### Runbook\nPreserve this procedure.\n"
     assert c.clean(authored, migration=True) == authored
-    with pytest.raises(m.ReleaseError, match="section is missing"):
-        c.section_bounds("## [Unreleased]\n", "1.0.1")
+    assert c.section_bounds("## [Unreleased]\n", "1.0.1") == (16, 16)
 
 
 @pytest.mark.parametrize("value", ["NULL", "n/a", "- NULL", "- n/a", "TODO."])
@@ -211,7 +220,7 @@ def test_save_is_previewed_local_only_and_retry_preserves_edits(local_notes, cap
     assert "Keep manual edit." in migration.read_text()
     assert unrelated.read_text() == "untouched"
     assert all(
-        a[0] == "uv" or a[1] in ("status", "branch", "rev-parse", "diff", "log")
+        a[0] == "uv" or a[1] in ("status", "branch", "rev-parse", "diff", "log", "ls-files")
         for a, _ in runner.calls
     )
 
@@ -255,7 +264,7 @@ def test_unrelated_edits_block_generator_without_cleanup(local_notes, status):
     assert (repo.path / "CHANGELOG.md").read_text() == before["CHANGELOG.md"]
 
 
-@pytest.mark.parametrize("summary", ["TODO", None])
+@pytest.mark.parametrize("summary", ["TODO"])
 def test_missing_summary_uses_canonical_render_and_preserves_other_inputs(local_notes, summary):
     runner, repo, args, _, data = local_notes
     data["config"]["summary"] = summary
@@ -270,7 +279,7 @@ def test_missing_summary_uses_canonical_render_and_preserves_other_inputs(local_
     prompt = Mock()
     prompt.ask.side_effect = lambda message: (
         "Reviewed change"
-        if message.startswith("Release summary:")
+        if message.startswith("Release summary")
         else "yes"
         if "Save this diff" in message
         else ""
@@ -280,25 +289,16 @@ def test_missing_summary_uses_canonical_render_and_preserves_other_inputs(local_
 
 
 @pytest.mark.parametrize("summary", [None, "", "   "])
-def test_blank_missing_summary_saves_explicit_todo_not_fake_prose(local_notes, summary, capsys):
-    runner, repo, args, _, data = local_notes
+def test_blank_missing_summary_stays_optional(local_notes, summary, capsys):
+    runner, repo, args, before, data = local_notes
     data["config"]["summary"] = summary
     command = ("uv", "run", "--frozen", "python", "-c", n.CANONICAL)
     runner.overrides[command] = json.dumps(data)
-    replacement = "TODO: Describe the release changes."
-    rendered = {
-        **data,
-        "config": {"summary": replacement},
-        "config_text": f"summary: '{replacement}'\n",
-        "manifest": f"summary: '{replacement}'\n",
-    }
-    runner.overrides[(*command, replacement)] = json.dumps(rendered)
     prompt = Mock()
     prompt.ask.side_effect = lambda message: "yes" if "Save this diff" in message else ""
     n.finish_notes(runner, repo, args, prompt)
-    assert any(call.args[0].startswith("Release summary:") for call in prompt.ask.call_args_list)
-    for name in ("release/config.yaml", "release/manifest.yaml"):
-        assert (repo.path / name).read_text() == f"summary: '{replacement}'\n"
+    assert not any(call.args[0].startswith("Release summary") for call in prompt.ask.call_args_list)
+    assert (repo.path / "release/config.yaml").read_text() == before["release/config.yaml"]
     output = capsys.readouterr().out
     assert '"summary": "None"' not in output and "summary: None" not in output
 

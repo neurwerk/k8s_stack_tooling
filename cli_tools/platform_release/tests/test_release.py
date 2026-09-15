@@ -131,6 +131,10 @@ class Fake:
             return OLD if "v1.0.0" in a[-1] else OBJECT
         if a[:2] == ("git", "show"):
             return "1.0.1" if a[-1] == "HEAD:VERSION" else "Reviewed release evidence"
+        if a[:3] == ("git", "ls-tree", "--name-only"):
+            return a[-1]
+        if a == ("git", "ls-files", "--others", "--exclude-standard", "-z"):
+            return ""
         if a[:2] == ("git", "ls-remote"):
             ref = a[-1]
             refs = {"refs/heads/main": SHA, "refs/tags/v1.0.0": OLD}
