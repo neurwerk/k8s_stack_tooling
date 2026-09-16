@@ -56,6 +56,7 @@ def test_bootstrap_seeds_exact_roles_and_provider_records(tmp_path: Path) -> Non
     )
 
     assert report.external_records_changed == 5
+    assert "frontend-librechat/external" not in session.secrets
     assert report.internal_records_changed == 14
     assert "librechat-code-interpreter" in ROLE_NAMESPACES
     assert {"infra-postgres-auth", "infra-postgres-operations"}.issubset(ROLE_NAMESPACES)
@@ -125,7 +126,8 @@ def test_smtp_update_replaces_the_managed_record(tmp_path: Path) -> None:
 
 
 def test_secret_operator_policy_allows_only_managed_records() -> None:
-    assert set(re.findall(r'^path "([^"]+)"', _secret_operator_policy(), re.MULTILINE)) == {
+    policy = _secret_operator_policy()
+    assert set(re.findall(r'^path "([^"]+)"', policy, re.MULTILINE)) == {
         "secret/data/auth-keycloak/external",
         "secret/metadata/auth-keycloak/external",
         "secret/data/infra-agentgateway/external",
@@ -136,7 +138,18 @@ def test_secret_operator_policy_allows_only_managed_records() -> None:
         "secret/metadata/monitor-kube-prometheus-stack/external",
         "secret/data/stack-setup/providers/smtp",
         "secret/metadata/stack-setup/providers/smtp",
+        "secret/data/frontend-librechat/external",
+        "secret/metadata/frontend-librechat/external",
     }
+    for path, capabilities in re.findall(
+        r'path "([^"]+)" \{\s+capabilities = (\[[^\]]+\])', policy
+    ):
+        if path == "secret/data/frontend-librechat/external":
+            assert capabilities == '["create", "read", "update"]'
+        elif path.startswith("secret/data/"):
+            assert capabilities == '["read", "update"]'
+        else:
+            assert capabilities == '["read"]'
 
 
 def test_active_directory_update_preserves_smtp_siblings(tmp_path: Path) -> None:

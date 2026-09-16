@@ -77,7 +77,7 @@ class ProviderRefreshTarget:
     path: str
     fields: tuple[str, ...]
     external_secret: ExternalSecretTarget
-    helm_release: HelmReleaseTarget
+    helm_releases: tuple[HelmReleaseTarget, ...] = ()
 
 
 AUTH_KEYCLOAK_SMTP_EXTERNAL_SECRET = ExternalSecretTarget(
@@ -213,31 +213,45 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
         "infra-agentgateway/external",
         ("openrouterApiKey", "deepseekApiKey", "braveApiKey"),
         INFRA_AGENTGATEWAY_EXTERNAL_SECRET,
-        HelmReleaseTarget("agentgateway", "infra-agentgateway"),
+        (HelmReleaseTarget("agentgateway", "infra-agentgateway"),),
     ),
     ProviderRefreshTarget(
         "infra-cert-manager/external",
         ("accessKeyId", "secretAccessKey"),
         CERT_MANAGER_ISSUERS_EXTERNAL_SECRET,
-        HelmReleaseTarget("cert-manager-issuers", "infra-cert-manager"),
+        (HelmReleaseTarget("cert-manager-issuers", "infra-cert-manager"),),
     ),
     ProviderRefreshTarget(
         "auth-keycloak/external",
         ("smtpUsername", "smtpPassword"),
         AUTH_KEYCLOAK_SMTP_EXTERNAL_SECRET,
-        HelmReleaseTarget("keycloak", "auth-keycloak"),
+        (HelmReleaseTarget("keycloak", "auth-keycloak"),),
     ),
     ProviderRefreshTarget(
         "monitor-kube-prometheus-stack/external",
         ("smtpUsername", "smtpPassword"),
         MONITOR_KUBE_PROMETHEUS_STACK_SMTP_EXTERNAL_SECRET,
-        HelmReleaseTarget("kube-prometheus-stack", "monitor-kube-prometheus-stack"),
+        (HelmReleaseTarget("kube-prometheus-stack", "monitor-kube-prometheus-stack"),),
     ),
     ProviderRefreshTarget(
         "auth-keycloak/external",
         ACTIVE_DIRECTORY_FIELDS,
         AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,
-        AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,
+        (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,),
+    ),
+    ProviderRefreshTarget(
+        "frontend-librechat/external",
+        ("sttApiKey",),
+        ExternalSecretTarget(
+            "frontend-librechat-stt-secret", "frontend-librechat", "frontend-librechat-stt-secret"
+        ),
+    ),
+    ProviderRefreshTarget(
+        "frontend-librechat/external",
+        ("ttsApiKey",),
+        ExternalSecretTarget(
+            "frontend-librechat-tts-secret", "frontend-librechat", "frontend-librechat-tts-secret"
+        ),
     ),
 )
 
@@ -264,9 +278,14 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
     """Restrict routine provider updates to catalog-approved exact records."""
     blocks = []
     for path in sorted(set(managed_paths)):
+        capabilities = (
+            '["create", "read", "update"]'
+            if path == "frontend-librechat/external"
+            else '["read", "update"]'
+        )
         blocks.append(
             f"""path "secret/data/{path}" {{
-  capabilities = ["read", "update"]
+  capabilities = {capabilities}
 }}
 
 path "secret/metadata/{path}" {{

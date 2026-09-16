@@ -185,6 +185,25 @@ class Cluster:
             raise ClusterError("Selected WireGuard requires serverKeySecret=wireguard-server-key")
         return enabled
 
+    def librechat_speech_credentials_required(self, direction: str) -> bool:
+        """Require both canonical speech selectors before accepting a managed key."""
+        if direction not in ("stt", "tts"):
+            raise ClusterError("Unsupported LibreChat speech direction")
+        values = self._product_values(
+            "librechat-product-values", "frontend-librechat", "LibreChat", optional=True
+        )
+        for key in ("frontendLibrechat", "speech", direction):
+            if not isinstance(values, dict):
+                raise ClusterError("LibreChat product values contain an invalid speech contract")
+            values = values.get(key, {})
+        if not isinstance(values, dict) or not isinstance(values.get("auth", {}), dict):
+            raise ClusterError("LibreChat product values contain an invalid speech contract")
+        enabled = values.get("enabled", False)
+        auth_enabled = values.get("auth", {}).get("enabled", False)
+        if not isinstance(enabled, bool) or not isinstance(auth_enabled, bool):
+            raise ClusterError("LibreChat speech enabled and auth.enabled must be booleans")
+        return enabled and auth_enabled
+
     def _product_values(
         self, name: str, namespace: str, product: str, *, optional: bool = False
     ) -> object:

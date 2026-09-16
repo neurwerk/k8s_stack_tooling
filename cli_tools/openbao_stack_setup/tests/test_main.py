@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from kubernetes.client.exceptions import ApiException
 
-from openbao_stack_setup.cluster import ClusterError, KubernetesApiEndpoint, StackIdentity
+from openbao_stack_setup.cluster import Cluster, ClusterError, KubernetesApiEndpoint, StackIdentity
 from openbao_stack_setup.custody import CustodianKey, CustodyPaths
 from openbao_stack_setup.main import (
     _BOOTSTRAP_EXTERNAL_SECRETS,
@@ -1197,6 +1197,67 @@ def test_active_directory_update_fails_before_prompt_or_openbao_when_disabled() 
     confirm.assert_not_called()
     prompt.assert_not_called()
     openbao.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("direction", "values"),
+    [
+        ("stt", None),
+        ("tts", "{}"),
+        ("stt", "frontendLibrechat: {speech: {stt: {enabled: false, auth: {enabled: true}}}}"),
+        ("tts", "frontendLibrechat: {speech: {tts: {enabled: true, auth: {enabled: false}}}}"),
+        ("stt", "frontendLibrechat: {speech: {stt: {enabled: 'true', auth: {enabled: true}}}}"),
+        ("tts", "frontendLibrechat: {speech: {tts: {enabled: true, auth: {enabled: 1}}}}"),
+        ("stt", "frontendLibrechat: {speech: []}"),
+    ],
+)
+def test_speech_update_rejects_unselected_or_invalid_values_before_secret_interaction(
+    direction: str, values: str | None
+) -> None:
+    cluster = MagicMock()
+    cluster._product_values.side_effect = lambda *args, **kwargs: Cluster._product_values(
+        cluster, *args, **kwargs
+    )
+    cluster.librechat_speech_credentials_required.side_effect = lambda selected: (
+        Cluster.librechat_speech_credentials_required(cluster, selected)
+    )
+    if values is None:
+        cluster.core.read_namespaced_config_map.side_effect = ApiException(status=404)
+    else:
+        cluster.core.read_namespaced_config_map.return_value = SimpleNamespace(
+            data={"values.yaml": values}
+        )
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main._confirm") as confirm,
+        patch("openbao_stack_setup.main._prompt_provider") as prompt,
+        patch("openbao_stack_setup.main._openbao") as openbao,
+        pytest.raises((SetupError, ClusterError), match="LibreChat"),
+    ):
+        _set_provider("ctx", "client", f"librechat-{direction}")
+    cluster.core.read_namespaced_config_map.assert_called_once_with(
+        "librechat-product-values", "frontend-librechat"
+    )
+    confirm.assert_not_called()
+    prompt.assert_not_called()
+    openbao.assert_not_called()
+    cluster.token_request.assert_not_called()
+
+
+@pytest.mark.parametrize("direction", ["stt", "tts"])
+def test_selected_speech_refreshes_only_its_direction(direction: str) -> None:
+    cluster = MagicMock()
+    cluster._product_values.return_value = {
+        "frontendLibrechat": {"speech": {direction: {"enabled": True, "auth": {"enabled": True}}}}
+    }
+    assert Cluster.librechat_speech_credentials_required(cluster, direction) is True
+    _refresh_provider(cluster, MANAGED_CREDENTIALS[f"librechat-{direction}"])
+    target = f"frontend-librechat-{direction}-secret"
+    cluster.force_external_secret_refresh.assert_called_once_with(
+        target, "frontend-librechat", target
+    )
+    cluster.force_reconcile.assert_not_called()
+    cluster.wait_helm_release.assert_not_called()
 
 
 def test_recovery_binding() -> None:

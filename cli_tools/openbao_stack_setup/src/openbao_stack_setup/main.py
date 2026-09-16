@@ -511,6 +511,12 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
     provider = MANAGED_CREDENTIALS[provider_name]
     if provider_name == "active-directory" and not cluster.active_directory_required():
         raise SetupError("Active Directory federation is disabled for the selected client")
+    if provider_name in ("librechat-stt", "librechat-tts") and not (
+        cluster.librechat_speech_credentials_required(provider_name.removeprefix("librechat-"))
+    ):
+        raise SetupError(
+            "LibreChat speech or its authentication is disabled for the selected client"
+        )
     _confirm(context, client, f"Update {provider_name} credentials")
     values = _prompt_provider(provider)
     with _openbao(cluster) as unauthenticated:
@@ -595,7 +601,8 @@ def _refresh_provider(cluster: Cluster, provider: Provider) -> None:
         )
         refreshed.append(target)
     for target in refreshed:
-        _force_helm_release(cluster, target.helm_release)
+        for helm_release in target.helm_releases:
+            _force_helm_release(cluster, helm_release)
 
 
 def _refresh_bootstrap_external_secrets(

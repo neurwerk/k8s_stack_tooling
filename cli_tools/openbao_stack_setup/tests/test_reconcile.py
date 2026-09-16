@@ -40,7 +40,7 @@ def state_values(
     *,
     applied: int = 4,
     client_name: str = "client",
-    package_version: str = "0.2.13",
+    package_version: str = "0.2.14",
 ) -> dict[str, JsonValue]:
     return {
         "schemaVersion": 1,
@@ -59,6 +59,7 @@ def test_reconcile_applies_catalog_and_cluster_bound_state(tmp_path: Path) -> No
     report = reconcile_openbao(client(tmp_path, session), identity(), passwords())
 
     assert report.previous_version == 0
+    assert "frontend-librechat/external" not in session.secrets
     assert report.applied_version == CURRENT_RECONCILIATION_VERSION
     assert report.replicated_records == 2
     assert session.secrets["stack-setup/providers/smtp"].values == {
