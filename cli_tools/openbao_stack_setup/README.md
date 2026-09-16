@@ -92,8 +92,9 @@ uv run stack-setup recovery verify --context <context> --client <client> \
 uv run stack-setup secret set <provider> --context <context> --client <client>
 ```
 
-Supported managed credentials are `openrouter`, `deepseek`, `brave`, `route53`, `smtp`, and
-`active-directory`. The bootstrap command requires nonblank SMTP credentials when the client
+Supported managed credentials are `openrouter`, `deepseek`, `brave`, `route53`, `smtp`,
+`active-directory`, `librechat-stt`, and `librechat-tts`.
+The bootstrap command requires nonblank SMTP credentials when the client
 Keycloak values enable SMTP or monitoring email alerting is not explicitly disabled.
 The same SMTP credential is stored in the Keycloak and monitoring namespace paths. Credential
 update commands refresh the corresponding ExternalSecrets and reconcile the affected HelmReleases
@@ -161,6 +162,39 @@ ExternalSecret to that refresh set. Bootstrap then force-reconciles and waits fo
 `keycloak-active-directory`. Finally, it reconciles and waits for the `infrastructure` Flux
 Kustomization so the application stage is unblocked immediately. The CLI does not read or print
 the materialized Secret values during these checks.
+
+## Optional LibreChat Speech Credentials
+
+Package `0.2.14` adds managed-only speech credentials without bootstrap prompts or
+generated records; reconciliation remains at schema `4`.
+
+```bash
+uv run stack-setup secret set librechat-stt --context <context> --client <client>
+uv run stack-setup secret set librechat-tts --context <context> --client <client>
+```
+
+The canonical selector is `frontend-librechat/librechat-product-values`, key
+`values.yaml`: both `frontendLibrechat.speech.<stt|tts>.enabled` and its
+`auth.enabled` must be boolean `true` for the selected direction. Missing or
+disabled selection rejects the command before confirmation, credential prompts,
+or opening OpenBao; malformed values and non-404 read failures fail closed.
+
+Both providers share `frontend-librechat/external`: STT updates only `sttApiKey`
+and TTS only `ttsApiKey`, preserving sibling fields with compare-and-set writes.
+The command refreshes only the selected `frontend-librechat-<stt|tts>-secret`
+ExternalSecret in `frontend-librechat` and waits for its refresh and matching target
+Secret metadata, without reconciling or waiting for the shared `librechat`
+HelmRelease. Reloader owns the workload rollout, so either key can be provisioned
+first when both directions require authentication. Check final application
+readiness after both keys are provisioned as part of the authorized deployment
+checks. Missing selected consumers fail visibly after the durable credential update.
+
+Existing installations need an authorized full `reconcile` ceremony to install
+the updated operator ACL: only this exact new external record gains `create`
+alongside `read` and `update`; existing record permissions stay unchanged.
+Activation waits for compatible Base chart support and separately authorized
+adoption; installing this tool does not activate speech or create its consumers.
+Disabling selectors does not delete stored credentials or revoke operator access.
 
 ## Optional Forgejo Catalog
 

@@ -43,3 +43,21 @@ def test_active_directory_is_a_managed_credential() -> None:
         "activeDirectoryBindDn",
         "activeDirectoryBindCredential",
     )
+
+
+def test_speech_updates_create_then_preserve_siblings_with_cas(tmp_path: Path) -> None:
+    session = FakeSession()
+    api = client(tmp_path, session)
+    for direction, value in (("stt", "first"), ("tts", "second"), ("stt", "rotated")):
+        name = f"librechat-{direction}"
+        assert name not in PROVIDERS
+        provider = MANAGED_CREDENTIALS[name]
+        assert provider.paths == ("frontend-librechat/external",)
+        assert provider.fields == (f"{direction}ApiKey",)
+        update_provider(api, provider, {f"{direction}ApiKey": value})
+    assert session.secrets["frontend-librechat/external"].values == {
+        "sttApiKey": "rotated",
+        "ttsApiKey": "second",
+    }
+    assert session.secrets["frontend-librechat/external"].version == 3
+    assert len(session.secrets) == 1

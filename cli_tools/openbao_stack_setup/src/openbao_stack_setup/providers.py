@@ -40,6 +40,8 @@ MANAGED_CREDENTIALS: dict[str, Provider] = {
     **PROVIDERS,
     "smtp": SMTP,
     "active-directory": ACTIVE_DIRECTORY,
+    "librechat-stt": Provider("librechat-stt", ("frontend-librechat/external",), ("sttApiKey",)),
+    "librechat-tts": Provider("librechat-tts", ("frontend-librechat/external",), ("ttsApiKey",)),
 }
 
 
