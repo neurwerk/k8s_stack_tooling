@@ -528,8 +528,8 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
     cluster = Cluster(context)
     cluster.identity(client)
     provider = MANAGED_CREDENTIALS[provider_name]
-    if provider_name == "docling-inference" and not cluster.docling_enabled():
-        raise SetupError("Docling is disabled for the selected client")
+    if provider_name == "docling-inference" and cluster.docling_inference_mode() != "remote":
+        raise SetupError("Docling remote inference is not selected for the client")
     if provider_name == "active-directory" and not cluster.active_directory_required():
         raise SetupError("Active Directory federation is disabled for the selected client")
     if provider_name in ("librechat-stt", "librechat-tts") and not (

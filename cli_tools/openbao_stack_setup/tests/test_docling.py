@@ -33,6 +33,7 @@ SELECTED = """docling:
 
 def test_selection_fails_before_confirmation_or_secret_access() -> None:
     target = cluster()
+    cpu = SELECTED.replace("tokenSecretRef: {name: docling-inference, key: token}", "mode: cpu")
     with (
         patch("openbao_stack_setup.main.Cluster", return_value=target),
         patch.object(target, "identity"),
@@ -58,10 +59,19 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
             SELECTED.replace("name: docling-api", "name: other"),
             SELECTED.replace("key: api-key", "key: api-key, extra: value"),
             SELECTED.replace("tokenSecretRef: {name: docling-inference, key: token}", "null"),
+            cpu,
+            cpu.replace("name: docling-api", "name: other"),
+            *[
+                cpu.replace("mode: cpu", f"mode: {mode}")
+                for mode in ("null", "true", "1", "[]", "{}", "other")
+            ],
         ]:
             target.core.read_namespaced_config_map.return_value = SimpleNamespace(
                 data={"values.yaml": text}
             )
+            if text not in ("{}", "docling: {enabled: false}", cpu):
+                with pytest.raises(ClusterError, match="Docling"):
+                    target.docling_enabled()
             with pytest.raises((SetupError, ClusterError), match="Docling"):
                 _set_provider("ctx", "client", "docling-inference")
         for status in (404, 403):
@@ -83,6 +93,23 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
         data={"values.yaml": SELECTED}
     )
     assert target.docling_enabled() is True
+    for text, mode in (
+        (SELECTED, "remote"),
+        (SELECTED.replace("inference:", "inference:\n    mode: remote"), "remote"),
+        (cpu, "cpu"),
+    ):
+        target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+            data={"values.yaml": text}
+        )
+        before = target.core.read_namespaced_config_map.call_count
+        assert target.docling_inference_mode() == mode
+        assert target.core.read_namespaced_config_map.call_count == before + 1
+        assert target.docling_enabled() is True
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": cpu.replace("name: docling-api", "name: other")}
+    )
+    with pytest.raises(ClusterError, match="Docling"):
+        target.docling_enabled()
     assert all(
         c == call("docling-product-values", "docling")
         for c in target.core.read_namespaced_config_map.call_args_list
