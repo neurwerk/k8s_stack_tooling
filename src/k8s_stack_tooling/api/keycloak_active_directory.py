@@ -18,6 +18,54 @@ APPROVED_GROUP_NAME_PATTERN = re.compile(r"^neurwerk-[a-z0-9](?:[a-z0-9.-]*[a-z0
 CONFLICTING_FULL_NAME_MAPPER = "full name"
 FULL_NAME_MAPPER_PROVIDER_ID = "full-name-ldap-mapper"
 LDAP_ENTRY_DN_ATTRIBUTE = "LDAP_ENTRY_DN"
+MAPPING_OWNER_SUBTYPE = "k8s-stack-tooling.group-mapping.v1"
+MAPPING_TRANSITION_SUBTYPE = "k8s-stack-tooling.group-reconciliation-pending.v1"
+MANAGED_PROVIDER_SUBTYPE = "k8s-stack-tooling.active-directory.v1"
+MAPPING_NAME_PREFIX = "approved group: "
+CANONICAL_GROUP_PATHS = frozenset(
+    f"/access/neurwerk-{name}"
+    for name in (
+        "api-key-admins",
+        "dify-admins",
+        "dify-users",
+        "keycloak-admins",
+        "langfuse-admins",
+        "librechat-admins",
+        "librechat-users",
+        "opensearch-admins",
+        "pii-admins",
+        "platform-admins",
+        "studio-users",
+        "llm-all-users",
+        "mcp-all-users",
+        "forgejo-users",
+        "forgejo-admins",
+    )
+)
+
+
+@dataclass(frozen=True)
+class GroupMapping:
+    source_name: str
+    target_parent: str
+
+    def __post_init__(self) -> None:
+        name = self.source_name
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > 64
+            or name != name.strip()
+            or _contains_control_character(name)
+            or any(token in name.lower() for token in ("replace", "placeholder", "changeme"))
+            or "${" in name
+            or "{{" in name
+            or "<" in name
+            or ">" in name
+        ):
+            raise ValueError("mapping sourceName must be a real AD CN of 1-64 characters")
+        if self.target_parent not in CANONICAL_GROUP_PATHS:
+            raise ValueError("mapping targetParent must be an exact canonical /access group path")
 
 
 class ActiveDirectoryError(RuntimeError):
@@ -34,6 +82,8 @@ class ActiveDirectoryConfig:
     bind_dn: str
     bind_credential: str = field(repr=False)
     email_verified: bool = True
+    group_mappings: tuple[GroupMapping, ...] = ()
+    allow_insecure_ldap: bool = False
 
     def __post_init__(self) -> None:
         _validate_config(self)
@@ -50,9 +100,13 @@ def _validate_config(config: ActiveDirectoryConfig) -> None:
         port = None
     if (
         parsed_url is None
-        or parsed_url.scheme != "ldaps"
+        or (parsed_url.scheme, port)
+        not in (
+            {("ldaps", 636), ("ldap", 389)}
+            if config.allow_insecure_ldap is True
+            else {("ldaps", 636)}
+        )
         or not hostname
-        or port != 636
         or parsed_url.username is not None
         or parsed_url.password is not None
         or bool(parsed_url.path)
@@ -61,12 +115,15 @@ def _validate_config(config: ActiveDirectoryConfig) -> None:
         or "?" in config.connection_url
         or "#" in config.connection_url
         or config.connection_url != config.connection_url.strip()
+        or any(character.isspace() for character in config.connection_url)
         or _contains_control_character(config.connection_url)
     ):
         raise ValueError(
-            "connection URL must be an explicit ldaps://host:636 URL without "
-            "credentials, path, query, or fragment"
+            "connection URL must be an explicit ldaps://host:636 URL (or ldap://host:389 "
+            "with allowInsecureLdap true) without credentials, path, query, or fragment"
         )
+    if type(config.allow_insecure_ldap) is not bool:
+        raise ValueError("allowInsecureLdap must be a boolean")
 
     for label, value in (("users DN", config.users_dn), ("groups DN", config.groups_dn)):
         if (
@@ -95,8 +152,14 @@ def _validate_config(config: ActiveDirectoryConfig) -> None:
 
     if config.username_attribute not in {"sAMAccountName", "userPrincipalName"}:
         raise ValueError("username attribute must be sAMAccountName or userPrincipalName")
-    if not config.group_names:
-        raise ValueError("at least one Active Directory group name is required")
+    if bool(config.group_names) == bool(config.group_mappings):
+        raise ValueError("exactly one nonempty groupNames or groupMappings list is required")
+    if len({mapping.source_name.casefold() for mapping in config.group_mappings}) != len(
+        config.group_mappings
+    ) or len({mapping.target_parent for mapping in config.group_mappings}) != len(
+        config.group_mappings
+    ):
+        raise ValueError("mapping sources (case-insensitive) and targets must be unique")
     if len(set(config.group_names)) != len(config.group_names):
         raise ValueError("Active Directory group names must be unique")
     if any(
@@ -144,9 +207,8 @@ def _escape_dn_value(value: str) -> str:
 
 
 def _group_dns(config: ActiveDirectoryConfig) -> tuple[str, ...]:
-    return tuple(
-        f"CN={_escape_dn_value(group_name)},{config.groups_dn}" for group_name in config.group_names
-    )
+    names = tuple(mapping.source_name for mapping in config.group_mappings) or config.group_names
+    return tuple(f"CN={_escape_dn_value(group_name)},{config.groups_dn}" for group_name in names)
 
 
 def _or_filter(attribute: str, values: tuple[str, ...]) -> str:
@@ -263,6 +325,28 @@ def _mapper_representations(
             },
         )
     )
+    if config.group_mappings:
+        legacy = next(mapper for mapper in mappers if mapper["name"] == "approved groups")
+        mappers.remove(legacy)
+        for mapping, source_dn in zip(config.group_mappings, _group_dns(config), strict=True):
+            mappers.append(
+                {
+                    **legacy,
+                    "name": MAPPING_NAME_PREFIX + mapping.target_parent.removeprefix("/access/"),
+                    "subType": MAPPING_OWNER_SUBTYPE,
+                    "config": {
+                        **legacy["config"],
+                        "groups.path": [mapping.target_parent],
+                        "groups.ldap.filter": [
+                            f"(&(cn={_escape_ldap_filter(mapping.source_name)})"
+                            f"(distinguishedName={_escape_ldap_filter(source_dn)}))"
+                        ],
+                        "mapped.group.attributes": [],
+                        # Unlike memberOf's CN lookup, this cannot confuse equal CNs in other OUs.
+                        "user.roles.retrieve.strategy": ["LOAD_GROUPS_BY_MEMBER_ATTRIBUTE"],
+                    },
+                }
+            )
     return tuple(mappers)
 
 
@@ -303,7 +387,7 @@ def _get_components(
     session: requests.Session,
     components_url: str,
     *,
-    name: str,
+    name: str | None,
     parent: str,
     component_type: str,
 ) -> list[dict[str, Any]]:
@@ -312,10 +396,15 @@ def _get_components(
         "GET",
         components_url,
         expected_statuses={200},
-        params={"name": name, "parent": parent, "type": component_type},
+        params={"parent": parent, "type": component_type, **({"name": name} if name else {})},
     )
     if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
         raise ActiveDirectoryError("Keycloak returned invalid component data")
+    if any(
+        item.get("parentId") != parent or item.get("providerType") != component_type
+        for item in payload
+    ):
+        raise ActiveDirectoryError("Keycloak returned components outside the requested scope")
     return payload
 
 
@@ -327,7 +416,7 @@ def _find_managed_component(components: list[dict[str, Any]], name: str) -> dict
 
 
 def _component_needs_update(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
-    for key in ("name", "parentId", "providerId", "providerType"):
+    for key in ("name", "parentId", "providerId", "providerType", "subType"):
         if existing.get(key) != desired.get(key):
             return True
 
@@ -338,7 +427,7 @@ def _component_needs_update(existing: dict[str, Any], desired: dict[str, Any]) -
     for key, value in desired_config.items():
         if key == "bindCredential" and existing_config.get(key) == [MASKED_SECRET]:
             continue
-        if existing_config.get(key) != value:
+        if existing_config.get(key, [] if value == [] else None) != value:
             return True
     return False
 
@@ -379,7 +468,7 @@ def _verify_component_readback(
         raise ActiveDirectoryError(f"Keycloak component {name!r} readback is incomplete")
     if expected_id is not None and actual_id != expected_id:
         raise ActiveDirectoryError(f"Keycloak component {name!r} readback has an unexpected ID")
-    for key in ("name", "parentId", "providerId", "providerType"):
+    for key in ("name", "parentId", "providerId", "providerType", "subType"):
         if actual.get(key) != desired.get(key):
             raise ActiveDirectoryError(
                 f"Keycloak component {name!r} readback did not match desired state"
@@ -389,7 +478,7 @@ def _verify_component_readback(
     if not isinstance(actual_config, dict) or not isinstance(desired_config, dict):
         raise ActiveDirectoryError(f"Keycloak component {name!r} readback is incomplete")
     for key, desired_value in desired_config.items():
-        actual_value = actual_config.get(key)
+        actual_value = actual_config.get(key, [] if desired_value == [] else None)
         if key == "bindCredential" and actual_value == [MASKED_SECRET]:
             continue
         if actual_value != desired_value:
@@ -452,11 +541,16 @@ def _upsert_mapper(
     )
     if existing is None:
         existing = _create_component(session, components_url, desired)
-    elif _component_needs_update(existing, desired):
-        component_id = existing.get("id")
-        if not isinstance(component_id, str) or not component_id:
-            raise ActiveDirectoryError(f"managed mapper {name!r} has no component ID")
-        existing = _update_component(session, components_url, component_id, desired)
+    else:
+        if existing.get("providerId") != desired["providerId"] or existing.get(
+            "subType"
+        ) != desired.get("subType"):
+            raise ActiveDirectoryError(f"unmanaged mapper conflicts with reserved name {name!r}")
+        if _component_needs_update(existing, desired):
+            component_id = existing.get("id")
+            if not isinstance(component_id, str) or not component_id:
+                raise ActiveDirectoryError(f"managed mapper {name!r} has no component ID")
+            existing = _update_component(session, components_url, component_id, desired)
 
     component_id = existing.get("id")
     if not isinstance(component_id, str) or not component_id:
@@ -486,6 +580,8 @@ def _remove_conflicting_full_name_mapper(
         raise ActiveDirectoryError("multiple conflicting full name mappers exist")
     if not conflicting:
         return
+    if conflicting[0].get("subType") is not None:
+        raise ActiveDirectoryError("conflicting full name mapper has an unmanaged subtype")
     mapper_id = conflicting[0].get("id")
     if not isinstance(mapper_id, str) or not mapper_id:
         raise ActiveDirectoryError("conflicting full name mapper has no component ID")
@@ -552,6 +648,7 @@ def _access_group_representations(
     group_names: tuple[str, ...],
     *,
     brief_representation: bool,
+    verify_paths: bool = False,
 ) -> dict[str, dict[str, Any]]:
     realm = quote(realm_name, safe="")
     groups_url = f"{keycloak_url.rstrip('/')}/admin/realms/{realm}/groups"
@@ -568,8 +665,12 @@ def _access_group_representations(
     )
     access_group = _select_exact_group(top_level_groups, "access")
     access_id = access_group["id"]
+    if verify_paths and (
+        access_group.get("path") != "/access" or access_group.get("parentId") is not None
+    ):
+        raise ActiveDirectoryError("Keycloak /access group has an unexpected path or parent")
     children_url = f"{groups_url}/{quote(access_id, safe='')}/children"
-    return {
+    groups = {
         group_name: _get_exact_group(
             session,
             children_url,
@@ -578,6 +679,15 @@ def _access_group_representations(
         )
         for group_name in group_names
     }
+    if verify_paths and (
+        len({access_id, *(group["id"] for group in groups.values())}) != len(groups) + 1
+        or any(
+            group.get("path") != f"/access/{name}" or group.get("parentId") != access_id
+            for name, group in groups.items()
+        )
+    ):
+        raise ActiveDirectoryError("Keycloak canonical group has an unexpected ID, path or parent")
+    return groups
 
 
 def _get_exact_group(
@@ -681,6 +791,132 @@ def _sync_group_mapper(
         raise ActiveDirectoryError("Keycloak Active Directory group sync failed")
 
 
+def _verify_mapping_groups(
+    session: requests.Session,
+    keycloak_url: str,
+    realm_name: str,
+    config: ActiveDirectoryConfig,
+    parent_ids: dict[str, str] | None = None,
+) -> dict[str, str]:
+    parents = _access_group_representations(
+        session,
+        keycloak_url,
+        realm_name,
+        tuple(mapping.target_parent.removeprefix("/access/") for mapping in config.group_mappings),
+        brief_representation=False,
+        verify_paths=True,
+    )
+    actual_ids = {group["path"]: group["id"] for group in parents.values()}
+    if parent_ids is not None:
+        if actual_ids != parent_ids:
+            raise ActiveDirectoryError("Keycloak mapping parents changed during reconciliation")
+        groups_url = f"{keycloak_url.rstrip('/')}/admin/realms/{quote(realm_name, safe='')}/groups"
+        seen_ids = set(parent_ids.values())
+        for mapping in config.group_mappings:
+            parent_id = parent_ids[mapping.target_parent]
+            child = _get_exact_group(
+                session,
+                f"{groups_url}/{quote(parent_id, safe='')}/children",
+                mapping.source_name,
+                brief_representation=False,
+            )
+            child_id = child["id"]
+            actual = _request_json(
+                session,
+                "GET",
+                f"{groups_url}/{quote(child_id, safe='')}",
+                expected_statuses={200},
+            )
+            expected = {
+                "id": child_id,
+                "name": mapping.source_name,
+                "path": f"{mapping.target_parent}/{mapping.source_name}",
+                "parentId": parent_id,
+            }
+            if (
+                child_id in seen_ids
+                or not isinstance(actual, dict)
+                or any(
+                    child.get(key) != value or actual.get(key) != value
+                    for key, value in expected.items()
+                )
+            ):
+                raise ActiveDirectoryError(
+                    "Keycloak mapped child has an unexpected ID, name or path"
+                )
+            seen_ids.add(child_id)
+    return actual_ids
+
+
+def _owned_group_mappers(
+    session: requests.Session,
+    components_url: str,
+    provider_id: str,
+    *,
+    mapping_mode: bool,
+) -> list[dict[str, Any]]:
+    components = _get_components(
+        session,
+        components_url,
+        name=None,
+        parent=provider_id,
+        component_type=LDAP_MAPPER_PROVIDER_TYPE,
+    )
+    owned = []
+    manual = []
+    for component in components:
+        name = component.get("name", "")
+        settings = component.get("config")
+        if not isinstance(name, str) or not isinstance(settings, dict):
+            raise ActiveDirectoryError("Keycloak mapper has invalid identity or configuration")
+        is_mapping = (
+            name.startswith(MAPPING_NAME_PREFIX)
+            or component.get("subType") == MAPPING_OWNER_SUBTYPE
+        )
+        if name == "approved groups" or is_mapping:
+            if (
+                component.get("providerId") != "group-ldap-mapper"
+                or not isinstance(component.get("id"), str)
+                or not component["id"]
+                or settings.get("mode") != ["READ_ONLY"]
+                or (
+                    is_mapping
+                    and (
+                        component.get("subType") != MAPPING_OWNER_SUBTYPE
+                        or "/access/" + name.removeprefix(MAPPING_NAME_PREFIX)
+                        not in CANONICAL_GROUP_PATHS
+                    )
+                )
+                or (
+                    not is_mapping
+                    and (
+                        component.get("subType") is not None
+                        or settings.get("groups.path") != ["/access"]
+                    )
+                )
+            ):
+                raise ActiveDirectoryError(
+                    "reserved group mapper ownership or READ_ONLY mode is invalid"
+                )
+            if any(item["name"] == name for item in owned):
+                raise ActiveDirectoryError("duplicate managed group mappers exist")
+            owned.append(component)
+            mapping_mode |= is_mapping
+        elif component.get("providerId") == "group-ldap-mapper":
+            manual.append(component)
+    if mapping_mode:
+        for component in manual:
+            paths = component["config"].get("groups.path", ["/"])
+            if not isinstance(paths, list) or len(paths) != 1 or not isinstance(paths[0], str):
+                raise ActiveDirectoryError("manual group mapper has an unverifiable groups path")
+            path = "/" + paths[0].strip().strip("/")
+            if path == "/" or path == "/access" or path.startswith("/access/"):
+                raise ActiveDirectoryError(
+                    "manual group mapper overlaps /access; review it before retrying"
+                )
+    return owned
+
+
 def reconcile_active_directory(
     keycloak_url: str,
     realm_name: str,
@@ -708,6 +944,10 @@ def reconcile_active_directory(
         ),
         MANAGED_PROVIDER_NAME,
     )
+    if existing is not None and existing.get("providerId") != "ldap":
+        raise ActiveDirectoryError(
+            "reserved Active Directory provider name belongs to another type"
+        )
     if config is None:
         if existing is None:
             return
@@ -723,16 +963,59 @@ def reconcile_active_directory(
         _update_component(session, components_url, provider_id, disabled)
         return
 
-    _verify_access_groups(session, keycloak_url, realm_name, tuple(sorted(config.group_names)))
+    if existing is not None and existing.get("subType") not in (
+        None,
+        MANAGED_PROVIDER_SUBTYPE,
+        MAPPING_TRANSITION_SUBTYPE,
+    ):
+        raise ActiveDirectoryError("managed Active Directory provider has an unmanaged subtype")
+
+    parent_ids = None
+    if config.group_mappings:
+        parent_ids = _verify_mapping_groups(session, keycloak_url, realm_name, config)
+    else:
+        _verify_access_groups(session, keycloak_url, realm_name, tuple(sorted(config.group_names)))
     _preflight_connection(session, keycloak_url, realm_name, config)
+
+    mapping_transition = bool(config.group_mappings) or (
+        existing is not None and existing.get("subType") == MAPPING_TRANSITION_SUBTYPE
+    )
+    owned_groups = []
+    if existing is not None:
+        if not isinstance(existing.get("id"), str) or not existing["id"]:
+            raise ActiveDirectoryError("managed Active Directory provider has no ID")
+        owned_groups = _owned_group_mappers(
+            session,
+            components_url,
+            existing["id"],
+            mapping_mode=mapping_transition,
+        )
+    mapping_transition |= any(mapper["name"] != "approved groups" for mapper in owned_groups)
 
     desired_provider: dict[str, Any] = {
         "name": MANAGED_PROVIDER_NAME,
         "parentId": realm_id,
         "providerId": "ldap",
         "providerType": USER_STORAGE_PROVIDER_TYPE,
+        "subType": existing.get("subType") if existing is not None else None,
         "config": _provider_config(config),
     }
+    if mapping_transition:
+        # Disabled providers reject imported-user authentication without deleting users.
+        # Admin mapper sync still works in 26.7.2. Never expose a partially replaced grant set.
+        # subType roundtrips; arbitrary config is filtered and null cannot clear a subtype.
+        enabled_provider = {
+            **desired_provider,
+            "subType": MANAGED_PROVIDER_SUBTYPE,
+        }
+        desired_provider = {
+            **desired_provider,
+            "subType": MAPPING_TRANSITION_SUBTYPE,
+            "config": {
+                **desired_provider["config"],
+                "enabled": ["false"],
+            },
+        }
     if existing is None:
         existing = _create_component(session, components_url, desired_provider)
     elif _component_needs_update(existing, desired_provider) or existing.get("config", {}).get(
@@ -749,19 +1032,72 @@ def reconcile_active_directory(
     if not isinstance(provider_id, str) or not provider_id:
         raise ActiveDirectoryError("managed Active Directory provider has no ID")
     _remove_conflicting_full_name_mapper(session, components_url, provider_id)
-    group_mapper_id = ""
-    for mapper in _mapper_representations(provider_id, config):
+    mappers = _mapper_representations(provider_id, config)
+    desired_names = {mapper["name"] for mapper in mappers}
+    for obsolete in owned_groups:
+        if obsolete["name"] in desired_names:
+            continue
+        _request_json(
+            session,
+            "DELETE",
+            f"{components_url}/{quote(obsolete['id'], safe='')}",
+            expected_statuses={204},
+        )
+        if (
+            _find_managed_component(
+                _get_components(
+                    session,
+                    components_url,
+                    name=obsolete["name"],
+                    parent=provider_id,
+                    component_type=LDAP_MAPPER_PROVIDER_TYPE,
+                ),
+                obsolete["name"],
+            )
+            is not None
+        ):
+            raise ActiveDirectoryError("obsolete group mapper deletion was not persisted")
+
+    group_mappers = []
+    for mapper in mappers:
         mapper_id = _upsert_mapper(session, components_url, provider_id, mapper)
-        if mapper["name"] == "approved groups":
-            group_mapper_id = mapper_id
-    if not group_mapper_id:
+        if mapper["providerId"] == "group-ldap-mapper":
+            group_mappers.append((mapper_id, mapper))
+    if not group_mappers:
         raise ActiveDirectoryError("managed Active Directory group mapper is missing")
-    _sync_group_mapper(
-        session,
-        keycloak_url,
-        realm_name,
-        provider_id,
-        group_mapper_id,
-        len(config.group_names),
-    )
-    _verify_access_group_bindings(session, keycloak_url, realm_name, config)
+    for mapper_id, mapper in group_mappers:
+        _sync_group_mapper(
+            session,
+            keycloak_url,
+            realm_name,
+            provider_id,
+            mapper_id,
+            1 if config.group_mappings else len(config.group_names),
+        )
+        if mapping_transition:
+            _verify_component_readback(session, components_url, mapper, expected_id=mapper_id)
+    if config.group_mappings:
+        _verify_mapping_groups(session, keycloak_url, realm_name, config, parent_ids)
+    else:
+        _verify_access_group_bindings(session, keycloak_url, realm_name, config)
+    if mapping_transition:
+        remaining = _owned_group_mappers(
+            session,
+            components_url,
+            provider_id,
+            mapping_mode=True,
+        )
+        if {mapper["id"] for mapper in remaining} != {item[0] for item in group_mappers}:
+            raise ActiveDirectoryError("managed group mapper set changed during reconciliation")
+        try:
+            _update_component(session, components_url, provider_id, enabled_provider)
+        except (ActiveDirectoryError, requests.RequestException):
+            # A PUT can succeed even if its response/readback is lost. Re-close the gate.
+            try:
+                _update_component(session, components_url, provider_id, desired_provider)
+            except (ActiveDirectoryError, requests.RequestException) as exc:
+                raise ActiveDirectoryError(
+                    "provider activation failed and disabling could not be verified; "
+                    "operator review required"
+                ) from exc
+            raise

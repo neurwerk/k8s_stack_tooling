@@ -29,15 +29,34 @@ def test_disabled_environment_needs_no_other_active_directory_values() -> None:
     assert config_from_environment({}) is None
 
 
-def test_enabled_environment_builds_valid_config() -> None:
-    config = config_from_environment(_enabled_environment())
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("insecure", [False, True])
+def test_enabled_environment_builds_valid_config(mapped: bool, insecure: bool) -> None:
+    environment = _enabled_environment()
+    if mapped:
+        environment["KC_ACTIVE_DIRECTORY_GROUP_NAMES"] = "[]"
+        environment["KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS"] = (
+            '[{"sourceName":"CORP_USERS","targetParent":"/access/neurwerk-studio-users"}]'
+        )
+    if insecure:
+        environment["KC_ACTIVE_DIRECTORY_CONNECTION_URL"] = "ldap://corp.example:389"
+        environment["KC_ACTIVE_DIRECTORY_ALLOW_INSECURE_LDAP"] = "true"
+    config = config_from_environment(environment)
 
     assert config is not None
-    assert config.connection_url == "ldaps://directory.example.com:636"
+    assert config.connection_url == environment["KC_ACTIVE_DIRECTORY_CONNECTION_URL"]
+    assert config.allow_insecure_ldap is insecure
     assert config.group_names == (
-        "neurwerk-studio-users",
-        "neurwerk-studio-admins",
+        ()
+        if mapped
+        else (
+            "neurwerk-studio-users",
+            "neurwerk-studio-admins",
+        )
     )
+    if mapped:
+        assert config.group_mappings[0].source_name == "CORP_USERS"
+        assert config.group_mappings[0].target_parent == "/access/neurwerk-studio-users"
     assert config.email_verified is True
     assert "do-not-log-this" not in repr(config)
 
@@ -60,6 +79,29 @@ def test_enabled_environment_accepts_upn_bind_principal() -> None:
         ("KC_ACTIVE_DIRECTORY_GROUP_NAMES", '["ok", 1]', "JSON array"),
         ("KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED", "false", "emailVerified"),
         ("KC_ACTIVE_DIRECTORY_BIND_CREDENTIAL", "", "is required"),
+        ("KC_ACTIVE_DIRECTORY_ALLOW_INSECURE_LDAP", "yes", "must be true or false"),
+        ("KC_ACTIVE_DIRECTORY_CONNECTION_URL", "ldap://corp.example:389", "allowInsecureLdap"),
+        ("KC_ACTIVE_DIRECTORY_CONNECTION_URL", " ldaps://corp.example:636", "connection URL"),
+        ("KC_ACTIVE_DIRECTORY_GROUP_NAMES", "[]", "exactly one"),
+        ("KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS", "invalid", "JSON array"),
+        ("KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS", "null", "JSON array"),
+        ("KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS", '["CORP_USERS"]', "JSON array"),
+        (
+            "KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS",
+            '[{"sourceName":4,"targetParent":"/access"}]',
+            "JSON array",
+        ),
+        ("KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS", '[{"sourceName":"CORP_USERS"}]', "JSON array"),
+        (
+            "KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS",
+            '[{"sourceName":"CORP_USERS","targetParent":"/access/neurwerk-studio-users","extra":true}]',
+            "JSON array",
+        ),
+        (
+            "KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS",
+            '[{"sourceName":"CORP_USERS","targetParent":"/access/neurwerk-studio-users"}]',
+            "exactly one",
+        ),
     ],
 )
 def test_invalid_environment_fails_without_printing_credentials(
