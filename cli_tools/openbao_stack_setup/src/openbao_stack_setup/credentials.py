@@ -103,6 +103,7 @@ def reconcile_internal_credentials(
     *,
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
+    docling_enabled: bool = False,
 ) -> InternalResult:
     """Add every missing internal field while preserving all existing values."""
     _validate_bootstrap_passwords(bootstrap_passwords)
@@ -324,7 +325,24 @@ def reconcile_internal_credentials(
         _validate_wireguard_private_key(_required_text(gateway, "privateKey"))
         _record_change(changed, "wireguard/internal", count)
         added += count
+    if docling_enabled:
+        docling, count = _upsert(client, "docling/internal", _random_fields("apiKey"))
+        api_key = _docling_api_key(docling)
+        _record_change(changed, "docling/internal", count)
+        added += count
+        path = "monitor-agentgateway-extproc/internal"
+        _, count = _upsert(client, path, {}, {"doclingApiKey": api_key})
+        _record_change(changed, path, count)
+        added += count
     return InternalResult(tuple(changed), added)
+
+
+def _docling_api_key(values: dict[str, JsonValue]) -> str:
+    """Validate the stored service key without changing it."""
+    value = _required_text(values, "apiKey")
+    if not value.strip() or "\r" in value or "\n" in value:
+        raise OpenBaoError("Docling API key is invalid; refusing to replace it")
+    return value
 
 
 def _wireguard_private_key() -> str:

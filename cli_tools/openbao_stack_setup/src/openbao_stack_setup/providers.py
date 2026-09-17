@@ -40,6 +40,7 @@ MANAGED_CREDENTIALS: dict[str, Provider] = {
     **PROVIDERS,
     "smtp": SMTP,
     "active-directory": ACTIVE_DIRECTORY,
+    "docling-inference": Provider("docling-inference", ("docling/external",), ("inferenceToken",)),
     "librechat-stt": Provider("librechat-stt", ("frontend-librechat/external",), ("sttApiKey",)),
     "librechat-tts": Provider("librechat-tts", ("frontend-librechat/external",), ("ttsApiKey",)),
 }
@@ -49,6 +50,10 @@ def update_provider(client: OpenBaoClient, provider: Provider, values: dict[str,
     """CAS-update all credential records while preserving sibling values."""
     if set(values) != set(provider.fields) or any(not value.strip() for value in values.values()):
         raise OpenBaoError("Provider credentials are incomplete")
+    if provider.name == "docling-inference" and any(
+        "\r" in value or "\n" in value for value in values.values()
+    ):
+        raise OpenBaoError("Docling inference token must not contain CR or LF")
     for path in provider.paths:
         current = client.read_secret(path)
         merged: dict[str, JsonValue] = dict(current.values) if current else {}

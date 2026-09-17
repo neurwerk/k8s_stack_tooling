@@ -32,6 +32,7 @@ def seed_bootstrap(
     *,
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
+    docling_enabled: bool = False,
 ) -> SeedReport:
     """Converge a fresh instance and refuse unexpected external record changes."""
     if set(provider_values) != set(PROVIDERS):
@@ -70,6 +71,7 @@ def seed_bootstrap(
         bootstrap_passwords,
         forgejo_enabled=forgejo_enabled,
         wireguard_enabled=wireguard_enabled,
+        docling_enabled=docling_enabled,
     )
     return SeedReport(
         external_changed,
