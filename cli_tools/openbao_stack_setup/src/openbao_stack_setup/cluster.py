@@ -185,6 +185,25 @@ class Cluster:
             raise ClusterError("Selected WireGuard requires serverKeySecret=wireguard-server-key")
         return enabled
 
+    def docling_enabled(self) -> bool:
+        """Validate the optional Docling selector and its exact managed Secret references."""
+        values = self._product_values("docling-product-values", "docling", "Docling", optional=True)
+        if not isinstance(values, dict) or not isinstance(values.get("docling", {}), dict):
+            raise ClusterError("Docling product values contain an invalid contract")
+        docling = values.get("docling", {})
+        enabled = docling.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("Docling enabled value must be a boolean")
+        if enabled:
+            inference = docling.get("inference", {})
+            if (
+                docling.get("apiKeySecretRef") != {"name": "docling-api", "key": "api-key"}
+                or not isinstance(inference, dict)
+                or inference.get("tokenSecretRef") != {"name": "docling-inference", "key": "token"}
+            ):
+                raise ClusterError("Selected Docling requires the exact managed Secret references")
+        return enabled
+
     def librechat_speech_credentials_required(self, direction: str) -> bool:
         """Require both canonical speech selectors before accepting a managed key."""
         if direction not in ("stt", "tts"):

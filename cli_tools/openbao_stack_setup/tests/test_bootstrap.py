@@ -140,11 +140,13 @@ def test_secret_operator_policy_allows_only_managed_records() -> None:
         "secret/metadata/stack-setup/providers/smtp",
         "secret/data/frontend-librechat/external",
         "secret/metadata/frontend-librechat/external",
+        "secret/data/docling/external",
+        "secret/metadata/docling/external",
     }
     for path, capabilities in re.findall(
         r'path "([^"]+)" \{\s+capabilities = (\[[^\]]+\])', policy
     ):
-        if path == "secret/data/frontend-librechat/external":
+        if path in ("secret/data/frontend-librechat/external", "secret/data/docling/external"):
             assert capabilities == '["create", "read", "update"]'
         elif path.startswith("secret/data/"):
             assert capabilities == '["read", "update"]'

@@ -103,6 +103,19 @@ CERT_MANAGER_ISSUERS_EXTERNAL_SECRET = ExternalSecretTarget(
     "cert-manager-issuers-values", "infra-cert-manager", "cert-manager-issuers-values"
 )
 FORGEJO_SECRET_STORE = SecretStoreTarget("forgejo-openbao-secret-store", "forgejo")
+DOCLING_NAMESPACES = ("docling", "monitor-agentgateway-extproc")
+DOCLING_SECRET_STORES = tuple(
+    SecretStoreTarget(f"{namespace}-openbao-secret-store", namespace)
+    for namespace in DOCLING_NAMESPACES
+)
+DOCLING_EXTERNAL_SECRETS = (
+    ExternalSecretTarget("docling-api", "docling", "docling-api"),
+    ExternalSecretTarget(
+        "monitor-agentgateway-extproc-docling-secret",
+        "monitor-agentgateway-extproc",
+        "monitor-agentgateway-extproc-docling-secret",
+    ),
+)
 WIREGUARD_SECRET_STORE = SecretStoreTarget("wireguard-openbao-secret-store", "wireguard")
 WIREGUARD_EXTERNAL_SECRET = ExternalSecretTarget(
     "wireguard-server-key", "wireguard", "wireguard-server-key"
@@ -210,6 +223,11 @@ BOOTSTRAP_HELM_RELEASES: tuple[HelmReleaseTarget, ...] = (
 
 PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
     ProviderRefreshTarget(
+        "docling/external",
+        ("inferenceToken",),
+        ExternalSecretTarget("docling-inference", "docling", "docling-inference"),
+    ),
+    ProviderRefreshTarget(
         "infra-agentgateway/external",
         ("openrouterApiKey", "deepseekApiKey", "braveApiKey"),
         INFRA_AGENTGATEWAY_EXTERNAL_SECRET,
@@ -258,7 +276,7 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
-    if namespace not in (*ROLE_NAMESPACES, "forgejo", "wireguard"):
+    if namespace not in (*ROLE_NAMESPACES, "forgejo", "wireguard", *DOCLING_NAMESPACES):
         raise ValueError("Namespace is not present in the reconciliation catalog")
     return f"""path "secret/data/{namespace}/*" {{
   capabilities = ["read"]
@@ -280,7 +298,7 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
     for path in sorted(set(managed_paths)):
         capabilities = (
             '["create", "read", "update"]'
-            if path == "frontend-librechat/external"
+            if path in ("frontend-librechat/external", "docling/external")
             else '["read", "update"]'
         )
         blocks.append(

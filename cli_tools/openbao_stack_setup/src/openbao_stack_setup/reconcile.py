@@ -7,6 +7,7 @@ from importlib.metadata import version as distribution_version
 
 from openbao_stack_setup.catalog import (
     ACTIVE_DIRECTORY_FIELDS,
+    DOCLING_NAMESPACES,
     RECONCILIATION_STATE_PATH,
     ROLE_NAMESPACES,
     SMTP_REPLICA,
@@ -60,6 +61,7 @@ def reconcile_openbao(
     *,
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
+    docling_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -73,6 +75,7 @@ def reconcile_openbao(
     client.configure_kubernetes_auth()
     namespaces = ROLE_NAMESPACES + (("forgejo",) if forgejo_enabled else ())
     namespaces += ("wireguard",) if wireguard_enabled else ()
+    namespaces += DOCLING_NAMESPACES if docling_enabled else ()
     for namespace in namespaces:
         client.write_policy(namespace, namespace_policy(namespace))
         client.write_kubernetes_role(namespace)
@@ -97,7 +100,11 @@ def reconcile_openbao(
     if state.applied_version == 2:
         migrate_schema_2_internal_credentials(client)
     internal = reconcile_internal_credentials(
-        client, passwords, forgejo_enabled=forgejo_enabled, wireguard_enabled=wireguard_enabled
+        client,
+        passwords,
+        forgejo_enabled=forgejo_enabled,
+        wireguard_enabled=wireguard_enabled,
+        docling_enabled=docling_enabled,
     )
 
     if state.applied_version < CURRENT_RECONCILIATION_VERSION:

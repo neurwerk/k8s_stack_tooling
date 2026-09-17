@@ -93,7 +93,7 @@ uv run stack-setup secret set <provider> --context <context> --client <client>
 ```
 
 Supported managed credentials are `openrouter`, `deepseek`, `brave`, `route53`, `smtp`,
-`active-directory`, `librechat-stt`, and `librechat-tts`.
+`active-directory`, `librechat-stt`, `librechat-tts`, and `docling-inference`.
 The bootstrap command requires nonblank SMTP credentials when the client
 Keycloak values enable SMTP or monitoring email alerting is not explicitly disabled.
 The same SMTP credential is stored in the Keycloak and monitoring namespace paths. Credential
@@ -195,6 +195,43 @@ alongside `read` and `update`; existing record permissions stay unchanged.
 Activation waits for compatible Base chart support and separately authorized
 adoption; installing this tool does not activate speech or create its consumers.
 Disabling selectors does not delete stored credentials or revoke operator access.
+
+## Optional Docling Credentials
+
+Package `0.2.15` adds Docling at unchanged schema `4`. Selection comes only from
+`docling/docling-product-values`, key `values.yaml`: `docling.enabled` must be
+boolean `true`, with `apiKeySecretRef: {name: docling-api, key: api-key}` and
+`inference.tokenSecretRef: {name: docling-inference, key: token}` under `docling`.
+Missing/disabled selection adds no internal records, roles or consumer refreshes;
+malformed values and non-404 read errors stop before confirmation or secret access.
+Disabling selection does not remove existing credentials or roles.
+
+Stage compatible namespace and secret-sync resources first. Ordinary `bootstrap`
+or authorized full `reconcile` generates only a missing `docling/internal:apiKey`
+(32 random bytes, base64url) and copies it exactly to
+`monitor-agentgateway-extproc/internal:doclingApiKey`. Retries preserve values and
+siblings; conflicting copies fail without rotation. Selected namespace roles use
+`<namespace>-external-secrets` ServiceAccounts and namespace-only read policies.
+After root revocation, the tool waits for both `<namespace>-openbao-secret-store`
+stores and refreshes `docling/docling-api` and
+`monitor-agentgateway-extproc/monitor-agentgateway-extproc-docling-secret`, each
+with the same target Secret name. Normal infrastructure convergence still applies;
+no Docling application release or inference token is awaited.
+
+Then supply the external inference token through a hidden prompt:
+
+```bash
+uv run stack-setup secret set docling-inference --context <context> --client <client>
+```
+
+The command validates selection first, rejects CR/LF in `inferenceToken`, and
+CAS-updates only `docling/external:inferenceToken`, preserving siblings. The updated
+secret-operator policy allows creation of this exact external record, never either
+internal record; existing installations need the authorized reconciliation first.
+Only `docling/docling-inference` is refreshed, checking readiness and target Secret
+metadata without forcing or waiting for application HelmReleases. Bootstrap never
+prompts for this token. Reloader owns rollout; check application health after
+provisioning during the separately authorized deployment.
 
 ## Optional Forgejo Catalog
 
