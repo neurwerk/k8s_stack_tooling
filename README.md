@@ -159,34 +159,68 @@ user-storage provider in Keycloak. It uses the common `KC_INTERNAL_URL`,
 plus this provider-specific contract:
 
 - `KC_ACTIVE_DIRECTORY_ENABLED`: `true` or `false`; defaults to `false`.
-- `KC_ACTIVE_DIRECTORY_CONNECTION_URL`: exactly an LDAPS endpoint of the form
-  `ldaps://host:636`. Credentials, other ports, paths, queries, and fragments
-  are rejected.
+- `KC_ACTIVE_DIRECTORY_CONNECTION_URL`: `ldaps://host:636` with certificate
+  verification, or `ldap://host:389` only with
+  `KC_ACTIVE_DIRECTORY_ALLOW_INSECURE_LDAP=true` (default: `false`). Plain LDAP
+  exposes passwords and directory data on the network. There is no StartTLS or
+  automatic downgrade. Credentials, other ports, paths, queries, and fragments
+  in the URL are rejected.
 - `KC_ACTIVE_DIRECTORY_USERS_DN`: the Active Directory users search DN.
 - `KC_ACTIVE_DIRECTORY_GROUPS_DN`: the Active Directory groups search DN.
 - `KC_ACTIVE_DIRECTORY_USERNAME_ATTRIBUTE`: `sAMAccountName` or
   `userPrincipalName`.
 - `KC_ACTIVE_DIRECTORY_GROUP_NAMES`: a non-empty JSON array of unique approved
-  group names. Names must be lowercase, start with `neurwerk-`, match
+  group names (legacy mode). Names must be lowercase, start with `neurwerk-`, match
   `^neurwerk-[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$`, and contain at most 64
   characters.
+- `KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS`: a JSON array such as
+  `[{"sourceName":"CORP_USERS","targetParent":"/access/neurwerk-studio-users"}]`.
+  Set exactly one of the two group lists nonempty; omit the other or use `[]`.
+  Sources are AD CNs of 1-64 characters, including uppercase and underscores,
+  without control characters, placeholders, or outer whitespace. LDAP filters
+  and DNs are escaped separately. Sources must be unique ignoring case, and
+  targets must be unique exact existing canonical `/access` group paths (the 13
+  standard groups, plus the two Forgejo groups only when present).
 - `KC_ACTIVE_DIRECTORY_BIND_DN`: either a DN-like bind principal containing `=`
   or a whitespace-free UPN-like principal containing one `@`. Control
   characters are rejected.
 - `KC_ACTIVE_DIRECTORY_BIND_CREDENTIAL`: the bind credential.
 - `KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED`: must be `true`.
 
-Disabled mode reads no bind variables. Enabled reconciliation tests the LDAPS
+Disabled mode reads no bind variables. Enabled reconciliation tests the LDAP(S)
 connection and bind, requires every corresponding `/access/<group>` path,
 reconciles the managed provider and mappers, verifies every mutation by
-readback, and synchronizes the approved group mapper. The provider is
+readback, and synchronizes the approved group mappers. The provider is
 read-only, uses `NO_CACHE`, disables scheduled full and changed-user sync, and
 uses the standard Microsoft Active Directory account-control mapper. Group
-sync must process every approved group, and each resulting non-brief group
+sync must process every approved group. In legacy mode, each non-brief group
 representation must expose one case-insensitively exact expected Active
 Directory DN in `attributes.LDAP_ENTRY_DN`. Missing or ambiguous LDAP metadata
 fails reconciliation. Bind credentials remain write-only; Keycloak's
 `**********` component-secret readback is accepted only for `bindCredential`.
+
+Mapping mode uses one built-in `READ_ONLY` mapper per source, with direct `member`
+lookup and exact CN and distinguished-name filters. Eligibility uses direct
+`memberOf` against `CN=<escaped sourceName>,<groupsDn>`; nested AD memberships
+do not grant access. Each source becomes a child of its canonical target and
+inherits that parent's existing roles. Keycloak 26.7.2 binds these groups by
+parent and name, not `LDAP_ID` or `LDAP_ENTRY_DN`. Verification checks sync counts,
+mapper settings, and the real parent/child IDs, names, and paths. A missing
+source fails sync. No plugin, role rewrite, or local membership copy is used.
+
+During mapping reconciliation and transitions to/from legacy mode, the provider
+is temporarily disabled until every check succeeds. Failures after this point
+leave it disabled for a safe retry; preflight failures leave the old state intact.
+Ownership and pending/ready states use reserved native component `subType` values,
+not custom config keys. Unrelated subtypes are rejected rather than overwritten.
+An uncertain final activation triggers a best-effort disable and reports if it
+cannot be verified. Run only one reconciler for a realm at a time. Cleanup
+retires only reserved, owned group mappers under this provider, never groups,
+manual components, roles, or memberships. An overlapping manual `/access` mapper
+or a legacy mapper changed to `IMPORT` must be reviewed before retrying.
+Removing a mapping removes its dynamic grants on reevaluation, but retained
+groups, local memberships, already-issued tokens, and application sessions are
+not revoked. Keep an independent local break-glass administrator available.
 
 ## Local CLI Configuration
 

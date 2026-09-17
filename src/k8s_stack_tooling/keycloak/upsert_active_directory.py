@@ -5,11 +5,13 @@ The Helm Job contract uses the common ``KC_INTERNAL_URL``, ``KC_HEALTH_PORT``,
 provider-specific contract is:
 
 - ``KC_ACTIVE_DIRECTORY_ENABLED``: ``true`` or ``false``; defaults to ``false``.
-- ``KC_ACTIVE_DIRECTORY_CONNECTION_URL``: an explicit ``ldaps://host:636`` URL.
+- ``KC_ACTIVE_DIRECTORY_CONNECTION_URL``: ``ldaps://host:636``, or ``ldap://host:389``
+  only with ``KC_ACTIVE_DIRECTORY_ALLOW_INSECURE_LDAP=true`` (default: false).
 - ``KC_ACTIVE_DIRECTORY_USERS_DN`` and ``KC_ACTIVE_DIRECTORY_GROUPS_DN``.
 - ``KC_ACTIVE_DIRECTORY_USERNAME_ATTRIBUTE``: ``sAMAccountName`` or
   ``userPrincipalName``.
-- ``KC_ACTIVE_DIRECTORY_GROUP_NAMES``: a non-empty JSON array of access-group names.
+- Exactly one nonempty JSON array: ``KC_ACTIVE_DIRECTORY_GROUP_NAMES`` (legacy)
+  or ``KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS`` with ``sourceName`` / ``targetParent`` objects.
 - ``KC_ACTIVE_DIRECTORY_BIND_DN``: an AD bind DN or UPN principal, plus
   ``KC_ACTIVE_DIRECTORY_BIND_CREDENTIAL``.
 - ``KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED``: required to be ``true``.
@@ -32,6 +34,7 @@ from k8s_stack_tooling.api.keycloak import get_admin_token
 from k8s_stack_tooling.api.keycloak_active_directory import (
     ActiveDirectoryConfig,
     ActiveDirectoryError,
+    GroupMapping,
     reconcile_active_directory,
 )
 
@@ -83,7 +86,7 @@ def config_from_environment(
         _required(environment, f"{ENV_PREFIX}EMAIL_VERIFIED"),
         f"{ENV_PREFIX}EMAIL_VERIFIED",
     )
-    raw_groups = _required(environment, f"{ENV_PREFIX}GROUP_NAMES")
+    raw_groups = environment.get(f"{ENV_PREFIX}GROUP_NAMES", "[]")
     try:
         parsed_groups = json.loads(raw_groups)
     except json.JSONDecodeError:
@@ -94,12 +97,32 @@ def config_from_environment(
         _die(f"{ENV_PREFIX}GROUP_NAMES must be a JSON array of strings")
 
     try:
+        parsed_mappings = json.loads(environment.get(f"{ENV_PREFIX}GROUP_MAPPINGS", "[]"))
+    except json.JSONDecodeError:
+        _die(f"{ENV_PREFIX}GROUP_MAPPINGS must be a JSON array of sourceName/targetParent objects")
+    if not isinstance(parsed_mappings, list) or not all(
+        isinstance(mapping, dict)
+        and set(mapping) == {"sourceName", "targetParent"}
+        and all(isinstance(value, str) for value in mapping.values())
+        for mapping in parsed_mappings
+    ):
+        _die(f"{ENV_PREFIX}GROUP_MAPPINGS must be a JSON array of sourceName/targetParent objects")
+
+    try:
         return ActiveDirectoryConfig(
-            connection_url=_required(environment, f"{ENV_PREFIX}CONNECTION_URL"),
+            connection_url=environment.get(f"{ENV_PREFIX}CONNECTION_URL", ""),
             users_dn=_required(environment, f"{ENV_PREFIX}USERS_DN"),
             groups_dn=_required(environment, f"{ENV_PREFIX}GROUPS_DN"),
             username_attribute=_required(environment, f"{ENV_PREFIX}USERNAME_ATTRIBUTE"),
             group_names=tuple(parsed_groups),
+            group_mappings=tuple(
+                GroupMapping(mapping["sourceName"], mapping["targetParent"])
+                for mapping in parsed_mappings
+            ),
+            allow_insecure_ldap=_parse_bool(
+                environment.get(f"{ENV_PREFIX}ALLOW_INSECURE_LDAP", "false"),
+                f"{ENV_PREFIX}ALLOW_INSECURE_LDAP",
+            ),
             bind_dn=_required(environment, f"{ENV_PREFIX}BIND_DN"),
             bind_credential=_required_secret(environment, f"{ENV_PREFIX}BIND_CREDENTIAL"),
             email_verified=email_verified,

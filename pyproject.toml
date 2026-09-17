@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.6.2"
+version = "0.7.0"
 description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
