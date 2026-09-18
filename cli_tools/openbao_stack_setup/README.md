@@ -198,20 +198,23 @@ Disabling selectors does not delete stored credentials or revoke operator access
 
 ## Optional Docling Credentials
 
-Package `0.2.16` supports Docling CPU and remote modes at unchanged schema `4`.
+Docling supports `internal-standard` and `private-vlm` modes at unchanged schema `4`.
 Selection comes only from
 `docling/docling-product-values`, key `values.yaml`: `docling.enabled` must be
 boolean `true`, with `apiKeySecretRef: {name: docling-api, key: api-key}` under `docling`.
-Set `docling.inference.mode: cpu` for CPU inference, which needs no inference token.
-Omitted mode defaults to `remote`, which still requires
+Set `docling.inference.mode: internal-standard` for in-Pod CPU extraction, which needs no inference token.
+Set `docling.inference.mode: private-vlm` for the private vision-model endpoint, which requires
 `inference.tokenSecretRef: {name: docling-inference, key: token}` under `docling`.
+The legacy aliases `cpu` and `remote` remain supported during transition and normalize
+to `internal-standard` and `private-vlm`, respectively. Omitted mode still selects
+private inference (`private-vlm`), preserving the previous default.
 Missing/disabled selection adds no internal records, roles or consumer refreshes;
 malformed values and non-404 read errors stop before confirmation or secret access.
 Disabling selection or switching modes retains existing credentials and roles without key rotation.
 
 Stage compatible namespace and secret-sync resources first: use
-`releases/docling/secret-sync/internal` for CPU (two stores and two API-key consumers),
-or the unchanged `releases/docling/secret-sync` for remote (three consumers).
+`releases/docling/secret-sync/internal` for `internal-standard` (two stores and two API-key consumers),
+or the unchanged `releases/docling/secret-sync` for `private-vlm` (three consumers).
 Ordinary `bootstrap` or authorized full `reconcile` generates only a missing `docling/internal:apiKey`
 (32 random bytes, base64url) and copies it exactly to
 `monitor-agentgateway-extproc/internal:doclingApiKey`. Retries preserve values and
@@ -223,13 +226,13 @@ stores and refreshes `docling/docling-api` and
 with the same target Secret name. Normal infrastructure convergence still applies;
 no Docling application release or inference token is awaited.
 
-For remote mode only, supply the external inference token through a hidden prompt:
+For `private-vlm` mode only (including alias `remote`), supply the external inference token through a hidden prompt:
 
 ```bash
 uv run stack-setup secret set docling-inference --context <context> --client <client>
 ```
 
-The command rejects CPU or disabled selection before confirmation, prompts or OpenBao access,
+The command rejects `internal-standard` (including alias `cpu`) or disabled selection before confirmation, prompts or OpenBao access,
 rejects CR/LF in `inferenceToken`, and
 CAS-updates only `docling/external:inferenceToken`, preserving siblings. The updated
 secret-operator policy allows creation of this exact external record, never either

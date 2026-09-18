@@ -94,9 +94,9 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
     )
     assert target.docling_enabled() is True
     for text, mode in (
-        (SELECTED, "remote"),
-        (SELECTED.replace("inference:", "inference:\n    mode: remote"), "remote"),
-        (cpu, "cpu"),
+        (SELECTED, "private-vlm"),
+        (SELECTED.replace("inference:", "inference:\n    mode: remote"), "private-vlm"),
+        (cpu, "internal-standard"),
     ):
         target.core.read_namespaced_config_map.return_value = SimpleNamespace(
             data={"values.yaml": text}
@@ -114,6 +114,62 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
         c == call("docling-product-values", "docling")
         for c in target.core.read_namespaced_config_map.call_args_list
     )
+
+
+@pytest.mark.parametrize("mode", [None, "private-vlm", "remote", "internal-standard", "cpu"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_mode_aliases_and_provider_gate(mode: str | None, enabled: bool) -> None:
+    target = cluster()
+    text = SELECTED if enabled else "docling:\n  enabled: false\n  inference: {}\n"
+    if mode is not None:
+        text = text.replace("inference:", f"inference:\n    mode: {mode}").replace(" {}", "")
+    internal = mode in ("internal-standard", "cpu")
+    if internal:
+        text = text.replace("    tokenSecretRef: {name: docling-inference, key: token}\n", "")
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": text}
+    )
+    expected = "internal-standard" if internal else "private-vlm"
+    assert target.docling_inference_mode() == (expected if enabled else None)
+    assert target.docling_enabled() is enabled
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=target),
+        patch.object(target, "identity"),
+        patch(
+            "openbao_stack_setup.main._confirm", side_effect=SetupError("confirmation reached")
+        ) as confirm,
+        patch("openbao_stack_setup.main._prompt_provider") as prompt,
+        patch("openbao_stack_setup.main._openbao") as openbao,
+    ):
+        allowed = enabled and not internal
+        with pytest.raises(SetupError, match="confirmation reached" if allowed else "private-vlm"):
+            _set_provider("ctx", "client", "docling-inference")
+        assert confirm.call_count == int(allowed)
+        prompt.assert_not_called()
+        openbao.assert_not_called()
+        target.core.create_namespaced_service_account_token.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["private-vlm", "remote"])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "{}",
+        "{name: other, key: token}",
+        "{name: docling-inference, key: other}",
+        "{name: docling-inference, key: token, extra: value}",
+    ],
+)
+def test_private_inference_requires_exact_token_reference(mode: str, reference: str) -> None:
+    target = cluster()
+    text = SELECTED.replace("inference:", f"inference:\n    mode: {mode}").replace(
+        "{name: docling-inference, key: token}", reference
+    )
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": text}
+    )
+    with pytest.raises(ClusterError, match="exact managed Secret references"):
+        target.docling_inference_mode()
 
 
 def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> None:

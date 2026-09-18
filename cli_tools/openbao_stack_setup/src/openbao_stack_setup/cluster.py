@@ -190,7 +190,7 @@ class Cluster:
         return self.docling_inference_mode() is not None
 
     def docling_inference_mode(self) -> str | None:
-        """Validate the optional Docling selector and its exact managed Secret references."""
+        """Validate managed Secret references and return the canonical mode, or None if disabled."""
         values = self._product_values("docling-product-values", "docling", "Docling", optional=True)
         if not isinstance(values, dict) or not isinstance(values.get("docling", {}), dict):
             raise ClusterError("Docling product values contain an invalid contract")
@@ -201,13 +201,23 @@ class Cluster:
         inference = docling.get("inference", {})
         if not isinstance(inference, dict):
             raise ClusterError("Docling inference must be a mapping")
-        mode = inference.get("mode", "remote")
-        if not isinstance(mode, str) or mode not in ("cpu", "remote"):
-            raise ClusterError("Docling inference mode must be cpu or remote")
+        mode = inference.get("mode", "private-vlm")
+        modes = {
+            "internal-standard": "internal-standard",
+            "private-vlm": "private-vlm",
+            "cpu": "internal-standard",
+            "remote": "private-vlm",
+        }
+        if not isinstance(mode, str) or mode not in modes:
+            raise ClusterError(
+                "Docling inference mode must be internal-standard or private-vlm "
+                "(legacy aliases: cpu or remote)"
+            )
+        mode = modes[mode]
         if enabled and (
             docling.get("apiKeySecretRef") != {"name": "docling-api", "key": "api-key"}
             or (
-                mode == "remote"
+                mode == "private-vlm"
                 and inference.get("tokenSecretRef") != {"name": "docling-inference", "key": "token"}
             )
         ):
