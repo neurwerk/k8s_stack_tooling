@@ -215,8 +215,8 @@ question. Git status, staged/unstaged diffs and recent history are still inspect
 internally; `--verbose` exposes inspection details instead of dumping them repeatedly
 in normal output. Review public text for private identifiers and unsupported claims.
 A pre-existing staged index blocks upload
-without including or unstaging that work. All five prepared evidence files must
-already be tracked; untracked or unrelated implementation changes cannot be uploaded.
+without including or unstaging that work. New optional prose can be uploaded after
+review; unrelated implementation changes cannot be uploaded.
 
 The tool discovers the trusted workstation executable
 `.config/confidentiality-guard/public-pr-check` in the original Base checkout's
@@ -302,6 +302,8 @@ same guarded, default-No upload as notes. Noninteractive Check cannot upload; it
 fails with guidance if corrections are needed. After upload, Check reselects the
 same PR, requires the uploaded commit, recomputes its files and runs full validation
 in a fresh clean snapshot. A moved head never receives a stale success claim.
+Absent `CHANGELOG.md` or migration files stay absent. `VERSION`, config and manifest
+must remain tracked, as must any prose files present during Check.
 
 Check creates/reuses the same clean registered linked-worktree layout described above.
 Dirty original checkouts remain untouched; dirty or occupied validation destinations
