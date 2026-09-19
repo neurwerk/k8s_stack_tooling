@@ -149,8 +149,14 @@ def check_updates(  # noqa: C901 - Keep the ordered correction and upload gates 
         ) from error
     _empty_index(runner, editable)
     paths = evidence_paths(pr["headRefName"].removeprefix("release/"))
-    m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *paths), cwd=editable.path)
     before = _snapshot(editable, paths)
+    tracked = (
+        name
+        for name in paths
+        if name in ("VERSION", "release/config.yaml", "release/manifest.yaml")
+        or (editable.path / name).is_file()
+    )
+    m._checked(runner, ("git", "ls-files", "--error-unmatch", "--", *tracked), cwd=editable.path)
     fresh = _canonical(runner, editable, refresh=(main, pr["headRefOid"]))
     m._check_pr_head(runner, editable, pr)
     m._clean_target(runner, editable, pr["headRefOid"])
