@@ -41,11 +41,15 @@ def test_enabled_environment_builds_valid_config(mapped: bool, insecure: bool) -
     if insecure:
         environment["KC_ACTIVE_DIRECTORY_CONNECTION_URL"] = "ldap://corp.example:389"
         environment["KC_ACTIVE_DIRECTORY_ALLOW_INSECURE_LDAP"] = "true"
+        environment["KC_ACTIVE_DIRECTORY_CONNECTION_TIMEOUT_MS"] = "2000"
+        environment["KC_ACTIVE_DIRECTORY_READ_TIMEOUT_MS"] = "3000"
     config = config_from_environment(environment)
 
     assert config is not None
     assert config.connection_url == environment["KC_ACTIVE_DIRECTORY_CONNECTION_URL"]
     assert config.allow_insecure_ldap is insecure
+    assert config.connection_timeout_ms == (2000 if insecure else 5000)
+    assert config.read_timeout_ms == (3000 if insecure else 10000)
     assert config.group_names == (
         ()
         if mapped

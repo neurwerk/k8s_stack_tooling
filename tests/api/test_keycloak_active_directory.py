@@ -365,16 +365,19 @@ def test_preflight_uses_keycloak_26_ldap_test_actions() -> None:
         _config(),
     )
 
-    calls = session.request.call_args_list
-    assert [item.kwargs["json"]["action"] for item in calls] == [
-        "testConnection",
-        "testAuthentication",
+    assert [item.kwargs["json"] for item in session.request.call_args_list] == [
+        {
+            "action": action,
+            "connectionUrl": "ldaps://directory.example.com:636",
+            "bindDn": "CN=Keycloak,OU=Service Accounts,DC=example,DC=com",
+            "bindCredential": "do-not-log-this",
+            "authType": "simple",
+            "startTls": "false",
+            "useTruststoreSpi": "ldapsOnly",
+            "connectionTimeout": "5000",
+        }
+        for action in ("testConnection", "testAuthentication")
     ]
-    assert all(item.kwargs["json"]["bindCredential"] == "do-not-log-this" for item in calls)
-    assert all(
-        item.args[1] == "https://keycloak.example.com/admin/realms/platform/testLDAPConnection"
-        for item in calls
-    )
 
 
 def test_access_group_verification_reads_existing_group_hierarchy() -> None:
@@ -911,7 +914,8 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(failure: 
         "ldap": set(
             """
             allowKerberosAuthentication authType batchSizeForSync bindCredential bindDn cachePolicy
-            changedSyncPeriod connectionPooling connectionUrl customUserSearchFilter debug editMode
+            changedSyncPeriod connectionPooling connectionUrl connectionTimeout readTimeout
+            customUserSearchFilter debug editMode
             enabled fullSyncPeriod importEnabled pagination priority rdnLDAPAttribute searchScope
             startTls syncRegistrations trustEmail useKerberosForPasswordAuthentication
             useTruststoreSpi userObjectClasses usernameLDAPAttribute usersDn uuidLDAPAttribute

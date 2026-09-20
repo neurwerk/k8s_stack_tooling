@@ -15,6 +15,8 @@ provider-specific contract is:
 - ``KC_ACTIVE_DIRECTORY_BIND_DN``: an AD bind DN or UPN principal, plus
   ``KC_ACTIVE_DIRECTORY_BIND_CREDENTIAL``.
 - ``KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED``: required to be ``true``.
+- ``KC_ACTIVE_DIRECTORY_CONNECTION_TIMEOUT_MS`` / ``KC_ACTIVE_DIRECTORY_READ_TIMEOUT_MS``:
+  1-10000 milliseconds; defaults 5000 / 10000, within the 30-second Admin API deadline.
 
 Only ``KC_ACTIVE_DIRECTORY_ENABLED`` is read in disabled mode, so no bind
 credential needs to be materialized when federation is disabled.
@@ -126,6 +128,10 @@ def config_from_environment(
             bind_dn=_required(environment, f"{ENV_PREFIX}BIND_DN"),
             bind_credential=_required_secret(environment, f"{ENV_PREFIX}BIND_CREDENTIAL"),
             email_verified=email_verified,
+            connection_timeout_ms=int(
+                environment.get(f"{ENV_PREFIX}CONNECTION_TIMEOUT_MS", "5000")
+            ),
+            read_timeout_ms=int(environment.get(f"{ENV_PREFIX}READ_TIMEOUT_MS", "10000")),
         )
     except ValueError as exc:
         _die(str(exc))

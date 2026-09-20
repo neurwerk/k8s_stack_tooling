@@ -84,6 +84,8 @@ class ActiveDirectoryConfig:
     email_verified: bool = True
     group_mappings: tuple[GroupMapping, ...] = ()
     allow_insecure_ldap: bool = False
+    connection_timeout_ms: int = 5000
+    read_timeout_ms: int = 10000
 
     def __post_init__(self) -> None:
         _validate_config(self)
@@ -124,6 +126,12 @@ def _validate_config(config: ActiveDirectoryConfig) -> None:
         )
     if type(config.allow_insecure_ldap) is not bool:
         raise ValueError("allowInsecureLdap must be a boolean")
+    for name, value in (
+        ("connection timeout", config.connection_timeout_ms),
+        ("read timeout", config.read_timeout_ms),
+    ):
+        if type(value) is not int or not 1 <= value <= 10000:
+            raise ValueError(f"{name} must be an integer from 1 to 10000 milliseconds")
 
     for label, value in (("users DN", config.users_dn), ("groups DN", config.groups_dn)):
         if (
@@ -227,6 +235,8 @@ def _provider_config(config: ActiveDirectoryConfig) -> dict[str, list[str]]:
         "changedSyncPeriod": ["-1"],
         "connectionPooling": ["true"],
         "connectionUrl": [config.connection_url],
+        "connectionTimeout": [str(config.connection_timeout_ms)],
+        "readTimeout": [str(config.read_timeout_ms)],
         "customUserSearchFilter": [_or_filter("memberOf", _group_dns(config))],
         "debug": ["false"],
         "editMode": ["READ_ONLY"],
@@ -615,14 +625,22 @@ def _preflight_connection(
     endpoint = (
         f"{keycloak_url.rstrip('/')}/admin/realms/{quote(realm_name, safe='')}/testLDAPConnection"
     )
-    provider = {key: value[0] for key, value in _provider_config(config).items()}
+    connection = {
+        "connectionUrl": config.connection_url,
+        "bindDn": config.bind_dn,
+        "bindCredential": config.bind_credential,
+        "authType": "simple",
+        "startTls": "false",
+        "useTruststoreSpi": "ldapsOnly",
+        "connectionTimeout": str(config.connection_timeout_ms),
+    }
     for action in ("testConnection", "testAuthentication"):
         _request_json(
             session,
             "POST",
             endpoint,
             expected_statuses={204},
-            json={"action": action, **provider},
+            json={"action": action, **connection},
         )
 
 
