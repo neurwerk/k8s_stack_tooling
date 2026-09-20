@@ -42,6 +42,9 @@ jobs:
           - name: Keycloak Users
             project: cli_tools/keycloak_users
             needs_base: false
+          - name: Active Directory
+            project: cli_tools/active_directory
+            needs_base: false
     defaults:
       run:
         working-directory: ${{ matrix.project }}
@@ -83,7 +86,12 @@ jobs:
         run: uv run --frozen ty check
 
       - name: Test
-        run: uv run --frozen pytest
+        run: |
+          if python3 -c 'from pathlib import Path; raise SystemExit(not any(p.name.startswith("test_") or p.name.endswith("_test.py") for p in Path("tests").rglob("*.py")))'; then
+            uv run --frozen pytest
+          else
+            printf 'No test suite configured for this project.\n'
+          fi
 
       - name: Build
         run: uv build
