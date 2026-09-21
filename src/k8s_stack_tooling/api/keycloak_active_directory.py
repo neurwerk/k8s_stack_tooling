@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -7,6 +8,8 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 MANAGED_PROVIDER_NAME = "microsoft-active-directory"
 USER_STORAGE_PROVIDER_TYPE = "org.keycloak.storage.UserStorageProvider"
@@ -783,7 +786,9 @@ def _sync_group_mapper(
     provider_id: str,
     mapper_id: str,
     approved_group_count: int,
-) -> None:
+    *,
+    allow_missing: bool = False,
+) -> bool:
     endpoint = (
         f"{keycloak_url.rstrip('/')}/admin/realms/{quote(realm_name, safe='')}"
         f"/user-storage/{quote(provider_id, safe='')}/mappers/"
@@ -801,12 +806,14 @@ def _sync_group_mapper(
         type(result.get(field)) is not int or result[field] < 0 for field in count_fields
     ):
         raise ActiveDirectoryError("Keycloak returned invalid group sync data")
-    if (
-        result["failed"] != 0
-        or result["removed"] != 0
-        or result["added"] + result["updated"] != approved_group_count
-    ):
+    if result["failed"] != 0 or result["removed"] != 0:
         raise ActiveDirectoryError("Keycloak Active Directory group sync failed")
+    processed = result["added"] + result["updated"]
+    if allow_missing and approved_group_count == 1 and processed == 0:
+        return False
+    if processed != approved_group_count:
+        raise ActiveDirectoryError("Keycloak Active Directory group sync failed")
+    return True
 
 
 def _verify_mapping_groups(
@@ -815,6 +822,7 @@ def _verify_mapping_groups(
     realm_name: str,
     config: ActiveDirectoryConfig,
     parent_ids: dict[str, str] | None = None,
+    synchronized_sources: set[str] | None = None,
 ) -> dict[str, str]:
     parents = _access_group_representations(
         session,
@@ -831,6 +839,8 @@ def _verify_mapping_groups(
         groups_url = f"{keycloak_url.rstrip('/')}/admin/realms/{quote(realm_name, safe='')}/groups"
         seen_ids = set(parent_ids.values())
         for mapping in config.group_mappings:
+            if synchronized_sources is not None and mapping.source_name not in synchronized_sources:
+                continue
             parent_id = parent_ids[mapping.target_parent]
             child = _get_exact_group(
                 session,
@@ -1083,19 +1093,39 @@ def reconcile_active_directory(
             group_mappers.append((mapper_id, mapper))
     if not group_mappers:
         raise ActiveDirectoryError("managed Active Directory group mapper is missing")
+    mappings_by_name = {
+        MAPPING_NAME_PREFIX + mapping.target_parent.removeprefix("/access/"): mapping
+        for mapping in config.group_mappings
+    }
+    synchronized_sources: set[str] = set()
     for mapper_id, mapper in group_mappers:
-        _sync_group_mapper(
+        synchronized = _sync_group_mapper(
             session,
             keycloak_url,
             realm_name,
             provider_id,
             mapper_id,
             1 if config.group_mappings else len(config.group_names),
+            allow_missing=bool(config.group_mappings),
         )
         if mapping_transition:
             _verify_component_readback(session, components_url, mapper, expected_id=mapper_id)
+        if config.group_mappings:
+            mapping = mappings_by_name[mapper["name"]]
+            if synchronized:
+                synchronized_sources.add(mapping.source_name)
+            else:
+                logger.warning(
+                    "Active Directory group %r was not found at CN=%s,%s; "
+                    "leaving its mapping configured for later discovery",
+                    mapping.source_name,
+                    _escape_dn_value(mapping.source_name),
+                    config.groups_dn,
+                )
     if config.group_mappings:
-        _verify_mapping_groups(session, keycloak_url, realm_name, config, parent_ids)
+        _verify_mapping_groups(
+            session, keycloak_url, realm_name, config, parent_ids, synchronized_sources
+        )
     else:
         _verify_access_group_bindings(session, keycloak_url, realm_name, config)
     if mapping_transition:

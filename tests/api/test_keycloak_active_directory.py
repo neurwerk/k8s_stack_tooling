@@ -793,6 +793,7 @@ def test_enabled_reconciliation_updates_masked_secret_and_syncs_groups(
         "provider-id",
         "group-mapper-id",
         2,
+        allow_missing=False,
     )
     verify_access_group_bindings.assert_called_once_with(
         session,
@@ -809,6 +810,8 @@ def test_enabled_reconciliation_updates_masked_secret_and_syncs_groups(
         "fresh",
         "disabled",
         "missing-source",
+        "partial-source",
+        "disappearing-source",
         "sync-count",
         "sync-failed",
         "child-parent",
@@ -837,7 +840,9 @@ def test_enabled_reconciliation_updates_masked_secret_and_syncs_groups(
         "legacy-import",
     ],
 )
-def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(failure: str) -> None:
+def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
+    failure: str, caplog: pytest.LogCaptureFixture
+) -> None:
     legacy = _config(group_names=("neurwerk-studio-users", "neurwerk-librechat-users"))
     config = _config(
         group_names=(),
@@ -1078,6 +1083,11 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(failure: 
                 for item in config.group_mappings
                 if [item.target_parent] == settings["groups.path"]
             )
+            if failure == "missing-source" or (
+                failure == "partial-source" and mapping.source_name == "CORP_CHAT"
+            ):
+                synced = True
+                return FakeResponse(200, {"added": 0, "updated": 0, "removed": 0, "failed": 0})
             child_id = f"child-{mapping.source_name}"
             groups[child_id] = {
                 "id": child_id,
@@ -1093,7 +1103,7 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(failure: 
             return FakeResponse(
                 200,
                 {
-                    "added": 0 if failure == "missing-source" else 1,
+                    "added": 1,
                     "updated": 1 if failure == "sync-count" else 0,
                     "removed": 0,
                     "failed": 1 if failure == "sync-failed" else 0,
@@ -1118,7 +1128,14 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(failure: 
 
     session = MagicMock(spec=requests.Session)
     session.request.side_effect = request
-    if failure not in {"none", "fresh", "disabled"}:
+    if failure not in {
+        "none",
+        "fresh",
+        "disabled",
+        "missing-source",
+        "partial-source",
+        "disappearing-source",
+    }:
         with pytest.raises(ActiveDirectoryError):
             reconcile_active_directory("https://corp.example", "platform", session, config)
         preflight_failure = failure in {
@@ -1154,10 +1171,50 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(failure: 
     assert provider["config"]["enabled"] == ["true"]
     assert provider["subType"] == MANAGED_PROVIDER_SUBTYPE
     assert "approved groups" not in components
-    assert groups["child-CORP_USERS"].get("attributes") is None
     first_ids = {name: item["id"] for name, item in components.items()}
+    if failure in {"missing-source", "partial-source"}:
+        missing = {"CORP_USERS", "CORP_CHAT"} if failure == "missing-source" else {"CORP_CHAT"}
+        for source in missing:
+            assert f"child-{source}" not in groups
+            assert f"Active Directory group {source!r} was not found" in caplog.text
+        if failure == "partial-source":
+            assert "child-CORP_USERS" in groups
+            assert "group 'CORP_USERS' was not found" not in caplog.text
+        assert len(caplog.records) == len(missing)
+        assert config.bind_credential not in caplog.text
+        assert config.bind_dn not in caplog.text
+        assert (
+            provider["config"]["customUserSearchFilter"]
+            == _provider_config(config)["customUserSearchFilter"]
+        )
+        # Creating the source groups later must converge without replacing the mappers.
+        failure = "none"
+        caplog.clear()
     reconcile_active_directory("https://corp.example", "platform", session, config)
     assert {name: item["id"] for name, item in components.items()} == first_ids
+    assert "child-CORP_CHAT" in groups
+    assert groups["child-CORP_USERS"].get("attributes") is None
+    assert not caplog.records
+    if failure == "disappearing-source":
+        before = deepcopy(groups)
+        failure = "missing-source"
+        reconcile_active_directory("https://corp.example", "platform", session, config)
+        assert provider["config"]["enabled"] == ["true"]
+        assert provider["config"]["cachePolicy"] == ["NO_CACHE"]
+        assert (
+            provider["config"]["customUserSearchFilter"]
+            == _provider_config(config)["customUserSearchFilter"]
+        )
+        # READ_ONLY mappers query current LDAP membership; do not copy or delete local grants.
+        assert groups == before
+        for item in components.values():
+            if item.get("subType") == MAPPING_OWNER_SUBTYPE:
+                assert item["config"]["mode"] == ["READ_ONLY"]
+                assert item["config"]["user.roles.retrieve.strategy"] == [
+                    "LOAD_GROUPS_BY_MEMBER_ATTRIBUTE"
+                ]
+        assert len(caplog.records) == 2
+        failure = "none"
     config = _config(
         group_names=(),
         group_mappings=(GroupMapping("CORP_EDITORS", "/access/neurwerk-studio-users"),),
@@ -1219,10 +1276,13 @@ def test_group_sync_rejects_failed_entries() -> None:
     )
 
 
-def test_group_sync_requires_every_approved_group_to_be_processed() -> None:
+@pytest.mark.parametrize("expected,processed", [(2, 1), (1, 0)])
+def test_group_sync_requires_every_approved_group_to_be_processed(
+    expected: int, processed: int
+) -> None:
     session = MagicMock(spec=requests.Session)
     session.request.return_value = FakeResponse(
-        200, {"added": 0, "updated": 1, "removed": 0, "failed": 0}
+        200, {"added": 0, "updated": processed, "removed": 0, "failed": 0}
     )
 
     with pytest.raises(ActiveDirectoryError, match="group sync failed"):
@@ -1232,8 +1292,46 @@ def test_group_sync_requires_every_approved_group_to_be_processed() -> None:
             "platform",
             "provider-id",
             "mapper-id",
-            2,
+            expected,
         )
+
+
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        ({"added": 0, "updated": 0, "removed": 0, "failed": 0}, False),
+        ({"added": 1, "updated": 0, "removed": 0, "failed": 0}, True),
+        ({"added": 0, "updated": 1, "removed": 0, "failed": 0}, True),
+        ({"added": 0, "updated": 0, "removed": 0, "failed": 1}, None),
+        ({"added": 0, "updated": 0, "removed": 1, "failed": 0}, None),
+        ({"added": 2, "updated": 0, "removed": 0, "failed": 0}, None),
+        ({"added": 0, "updated": True, "removed": 0, "failed": 0}, None),
+        ({"added": 0, "updated": 0, "removed": -1, "failed": 0}, None),
+        ({"added": 0, "updated": 0, "removed": 0}, None),
+    ],
+)
+def test_missing_group_tolerance_preserves_sync_failure_checks(
+    result: dict[str, int], expected: bool | None
+) -> None:
+    session = MagicMock(spec=requests.Session)
+    session.request.return_value = FakeResponse(200, result)
+
+    def sync() -> bool:
+        return _sync_group_mapper(
+            session,
+            "https://keycloak.example.com",
+            "platform",
+            "provider-id",
+            "mapper-id",
+            1,
+            allow_missing=True,
+        )
+
+    if expected is None:
+        with pytest.raises(ActiveDirectoryError):
+            sync()
+    else:
+        assert sync() is expected
 
 
 def test_group_sync_accepts_exact_approved_group_count() -> None:

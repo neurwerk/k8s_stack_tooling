@@ -193,7 +193,7 @@ reconciles the managed provider and mappers, verifies every mutation by
 readback, and synchronizes the approved group mappers. The provider is
 read-only, uses `NO_CACHE`, disables scheduled full and changed-user sync, and
 uses the standard Microsoft Active Directory account-control mapper. Group
-sync must process every approved group. In legacy mode, each non-brief group
+sync must process every approved group in legacy mode. Each non-brief group
 representation must expose one case-insensitively exact expected Active
 Directory DN in `attributes.LDAP_ENTRY_DN`. Missing or ambiguous LDAP metadata
 fails reconciliation. Bind credentials remain write-only; Keycloak's
@@ -205,8 +205,9 @@ lookup and exact CN and distinguished-name filters. Eligibility uses direct
 do not grant access. Each source becomes a child of its canonical target and
 inherits that parent's existing roles. Keycloak 26.7.2 binds these groups by
 parent and name, not `LDAP_ID` or `LDAP_ENTRY_DN`. Verification checks sync counts,
-mapper settings, and the real parent/child IDs, names, and paths. A missing
-source fails sync. No plugin, role rewrite, or local membership copy is used.
+mapper settings, and the real parent/child IDs, names, and paths for found groups.
+A successful zero-match sync warns and keeps the mapping for later discovery;
+connection, bind, and sync errors still fail. No local membership copy is used.
 
 During mapping reconciliation and transitions to/from legacy mode, the provider
 is temporarily disabled until every check succeeds. Failures after this point
