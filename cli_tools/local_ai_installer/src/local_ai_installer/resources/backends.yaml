@@ -1,0 +1,5 @@
+# Stock packages. OCI references are immutable and installed by LocalAI's CLI.
+llama-cpp: oci://localai/localai-backends@sha256:589b76484a42e00b005cc3d79f49c944f329d1ddb0de0605a0aa29dd285914e2
+faster-whisper: oci://localai/localai-backends@sha256:fb4c8093fdb4a4b36a716342b57e25c5aaec58edf3612054de97d65898f28ca5
+chatterbox: oci://localai/localai-backends@sha256:b06cb05ee3328604de905342c8b6baab3d9426f732556d1b33bf8bc7cf35cd07
+transformers: oci://localai/localai-backends@sha256:0c5f0fe9846fc8b5f1c5fe38134a12a9327894523094b3d7b00b623bc2dd2934

@@ -1,0 +1,90 @@
+name: local-ai
+
+x-runtime: &runtime
+  image: localai/localai:v4.10.0-gpu-nvidia-cuda-12@sha256:fe1c77680c6400f898efffdf3d1b39fcf1d85093c93fbd9b8857089aa317f401
+  platform: linux/amd64
+  entrypoint: [/local-ai]
+  volumes:
+    - models:/models
+    - backends:/backends
+    - configuration:/configuration
+    - data:/data
+
+services:
+  localai:
+    <<: *runtime
+    gpus: all
+    init: true
+    restart: unless-stopped
+    command: [run]
+    ports:
+      - "${LOCALAI_BIND_ADDRESS:-127.0.0.1}:${LOCALAI_PORT:-8080}:8080"
+    environment:
+      LOCALAI_API_KEY: ${LOCALAI_API_KEY:?Set LOCALAI_API_KEY in the installer environment}
+      LOCALAI_MODELS_PATH: /models
+      LOCALAI_BACKENDS_PATH: /backends
+      LOCALAI_CONFIG_DIR: /configuration
+      LOCALAI_DATA_PATH: /data
+      LOCALAI_THREADS: ${LOCALAI_THREADS:-4}
+      LOCALAI_DISABLE_AGENTS: "true"
+      LOCALAI_DISABLE_ASSISTANT: "true"
+      LOCALAI_DISABLE_MCP: "true"
+      LOCALAI_P2P: "false"
+      LOCALAI_FEDERATED: "false"
+      LOCALAI_AUTOLOAD_GALLERIES: "false"
+      LOCALAI_AUTOLOAD_BACKEND_GALLERIES: "false"
+      LOCALAI_GALLERIES: '[]'
+      LOCALAI_BACKEND_GALLERIES: '[]'
+      LOCALAI_AUTO_UPGRADE_BACKENDS: "false"
+      LOCALAI_MAX_ACTIVE_BACKENDS: ${LOCALAI_MAX_ACTIVE_BACKENDS:-3}
+      LOCALAI_VRAM_BUDGET: ${LOCALAI_VRAM_BUDGET:-14GiB}
+      LOCALAI_WATCHDOG_IDLE: "true"
+      LOCALAI_WATCHDOG_IDLE_TIMEOUT: 15m
+      LOCALAI_FORCE_EVICTION_WHEN_BUSY: "false"
+      LOCALAI_MAX_CONCURRENT_BACKEND_REQUESTS: "2"
+      LOCALAI_UPLOAD_LIMIT: "32"
+      HF_HOME: /models/cache
+      HF_HUB_CACHE: /models/cache/hub
+      HUGGINGFACE_HUB_CACHE: /models/cache/hub
+      TRANSFORMERS_CACHE: /models/cache/hub
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      PYTHON_GRPC_MAX_WORKERS: "1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:8080/readyz]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 8
+    stop_grace_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  backend-install:
+    <<: *runtime
+    profiles: [setup]
+    restart: "no"
+    environment:
+      LOCALAI_BACKENDS_PATH: /backends
+      LOCALAI_BACKEND_GALLERIES: '[]'
+    command: [backends, list]
+
+  setup:
+    profiles: [setup]
+    image: python:3.12.12-slim-bookworm@sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130be301
+    platform: linux/amd64
+    entrypoint: [python, -c]
+    restart: "no"
+    volumes:
+      - models:/models
+    # The workstation sends the packaged one-shot worker code and data via Docker.
+    # No local bind mounts, socket mount, custom runtime image or persistent agent.
+
+volumes:
+  models: {name: local-ai_models}
+  backends: {name: local-ai_backends}
+  configuration: {name: local-ai_configuration}
+  data: {name: local-ai_data}

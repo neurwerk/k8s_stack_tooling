@@ -1,0 +1,72 @@
+# One selected preset per local alias. Paths/cache refs are generated from the
+# downloader's verified, immutable inventory. No remote-model routing is present.
+vlm-documents:
+  model_id: granite-docling-258m
+  variant_id: gguf-bf16
+  enabled: true
+  model_file: granite-docling-258M-BF16.gguf
+  projector: mmproj-model-f16.gguf
+  config:
+    backend: llama-cpp
+    context_size: 8192
+    gpu_layers: 999
+    known_usecases: [chat, vision]
+    options: ["use_jinja:true", "parallel:1", "--special", "--fit:off"]
+    parameters: {temperature: 0, max_tokens: 4096}
+stt-general:
+  model_id: whisper-large-v3
+  variant_id: ctranslate2
+  enabled: true
+  cache_repo: Systran/faster-whisper-large-v3
+  config:
+    backend: faster-whisper
+    cuda: true
+    known_usecases: [transcript]
+tts-german:
+  model_id: chatterbox-multilingual-v2
+  variant_id: pytorch-v2
+  enabled: true
+  cache_repo: ResembleAI/chatterbox
+  config:
+    backend: chatterbox
+    cuda: true
+    known_usecases: [tts]
+    options: ["multilingual:true", "language_id:de"]
+    tts: {voice: default}
+ner-german:
+  model_id: openmed-german-pii
+  variant_id: transformers
+  enabled: true
+  config:
+    backend: transformers
+    type: TokenClassification
+    context_size: 512
+    cuda: true
+    known_usecases: [token_classify]
+    pii_detection: {min_score: 0.0, default_action: mask}
+llm-general:
+  model_id: qwen3-4b
+  variant_id: gguf-q4-k-m
+  enabled: false
+  model_file: Qwen3-4B-Q4_K_M.gguf
+  config:
+    backend: llama-cpp
+    context_size: 4096
+    gpu_layers: 999
+    known_usecases: [chat]
+    reasoning: {disable: true}
+    options: ["use_jinja:true", "parallel:1"]
+    parameters: {temperature: 0.7, max_tokens: 1024}
+vlm-general:
+  model_id: qwen3-vl-8b
+  variant_id: gguf-q4-k-m
+  enabled: false
+  model_file: Qwen3VL-8B-Instruct-Q4_K_M.gguf
+  projector: mmproj-Qwen3VL-8B-Instruct-F16.gguf
+  config:
+    backend: llama-cpp
+    context_size: 4096
+    gpu_layers: 999
+    known_usecases: [chat, vision]
+    options: ["use_jinja:true", "parallel:1"]
+    parameters: {max_tokens: 1024}

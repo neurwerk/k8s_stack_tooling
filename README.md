@@ -12,7 +12,7 @@ package and seven independently locked CLI projects.
 | [`maintenance`](cli_tools/maintenance/) | Starts and stops maintenance pages for selected products | Authorized operator workstation |
 | [`platform-release`](cli_tools/platform_release/) | Reviews, checks and stages signed Base platform releases through protected workflows | Trusted release custodian workstation |
 | [`package-checker`](cli_tools/package_checker/) | Reports published GHCR versions and active GitHub Actions builds | Developer or operator workstation |
-| [`media-downloader-uploader`](cli_tools/media_downloader_uploader/) | Downloads verified Hugging Face artifacts and publishes immutable PII bundles | Workstation with external storage and explicit cluster access |
+| [`local-ai-installer`](cli_tools/local_ai_installer/) | Downloads verified model artifacts and provisions a stock LocalAI Docker host | Workstation with external storage and an explicit Docker context |
 | [`openbao-stack-setup`](cli_tools/openbao_stack_setup/) | Bootstraps, reconciles, verifies, and updates supported OpenBao state | Trusted operator workstation only |
 | [`openrouter-catalog-sync`](cli_tools/openrouter_catalog_sync/) | Selects reviewed OpenRouter models and generates client Helm values and a complete model cost catalog | Developer or operator workstation |
 | [`keycloak-users`](cli_tools/keycloak_users/) | Guides manual browser-login setup and creates local users with group membership and seven-day onboarding invitations | Authorized operator workstation |
@@ -232,19 +232,11 @@ the package and Actions read permissions required for the repositories being
 inspected. See the [package checker README](cli_tools/package_checker/README.md)
 for inventory and output details.
 
-### Media Downloader Uploader
+### LocalAI Installer
 
-The media tool requires explicit external storage paths. It has no
-machine-specific storage default. Configure both
-`MEDIA_DOWNLOADER_UPLOADER_STORAGE_ROOT` and `HF_HOME` to paths on the same
-non-root mounted volume.
-
-Uploading a PII bundle additionally requires
-`MEDIA_DOWNLOADER_UPLOADER_KUBE_CONTEXT`. Every `kubectl` process receives that
-context through `--context`; the tool never relies on the active context.
-Deleting a pre-existing incomplete object prefix requires typing the selected
-context. See the [media tool README](cli_tools/media_downloader_uploader/README.md)
-before downloading or publishing artifacts.
+Downloads verified models and provisions stock LocalAI over HTTP using an explicit
+Docker context. Replaces the media downloader and removes its Ceph publishing.
+See the [installer README](cli_tools/local_ai_installer/README.md) for setup.
 
 ### OpenBao Stack Setup
 
