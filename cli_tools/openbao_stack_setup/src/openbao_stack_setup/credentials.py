@@ -226,7 +226,13 @@ def reconcile_internal_credentials(
     opensearch, count = _upsert(
         client,
         "monitor-opensearch/internal",
-        _random_fields("adminPassword", "fluentBitPassword", "studioPassword"),
+        _random_fields(
+            "adminPassword",
+            "dashboardCookieSecret",
+            "dashboardPassword",
+            "fluentBitPassword",
+            "studioPassword",
+        ),
     )
     _record_change(changed, "monitor-opensearch/internal", count)
     added += count

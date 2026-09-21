@@ -105,6 +105,13 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     agentgateway_password = agentgateway["postgresqlPassword"]
     assert isinstance(agentgateway_password, str)
     assert re.fullmatch(r"[A-Za-z0-9_-]+", agentgateway_password)
+    assert set(original["monitor-opensearch/internal"]) == {
+        "adminPassword",
+        "dashboardCookieSecret",
+        "dashboardPassword",
+        "fluentBitPassword",
+        "studioPassword",
+    }
     assert set(original["frontend-studio/internal"]) == {"opensearchPassword"}
     postgres_auth = original["infra-postgres-auth/internal"]
     postgres_operations = original["infra-postgres-operations/internal"]
