@@ -162,4 +162,4 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
         docker.worker(application)
     # On failure leave the service stopped, preserving old definitions/history
     # and staged data for inspection. Do not auto-restart a partially applied set.
-    docker.run("up", "-d", "--wait", "--wait-timeout", "180", "localai")
+    docker.run("up", "--pull", "never", "-d", "--wait", "--wait-timeout", "180", "localai")

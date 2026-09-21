@@ -13,6 +13,8 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import uuid
+import zipfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path("/models")
@@ -205,6 +207,68 @@ def apply(payload):
         raise
 
 
+def pkuseg_cache(manifest):
+    """Initialize stock package data while LocalAI is stopped; no code changes."""
+    if not inspect(manifest):
+        raise ValueError("Auxiliary archive has not been staged")
+    records = manifest["files"]
+    if len(records) != 1 or records[0]["path"] != "spacy_ontonotes.zip":
+        raise ValueError("Unexpected tokenizer cache artifact")
+    record = records[0]
+    source = safe(ROOT, manifest["destination"]) / record["path"]
+    cache_root = safe(ROOT, "cache")
+    cache_root.mkdir(exist_ok=True)
+    version = safe(cache_root, "pkuseg-" + record["sha256"])
+    with zipfile.ZipFile(source) as archive:
+        members = archive.infolist()
+        names = [relative(item.filename.rstrip("/")) for item in members]
+        if (
+            len(set(names)) != len(names)
+            or sum(item.file_size for item in members) > 512 * 1024 * 1024
+        ):
+            raise ValueError("Invalid auxiliary archive layout/size")
+        if any((item.external_attr >> 16) & 0o170000 == 0o120000 for item in members):
+            raise ValueError("Auxiliary archive symlinks are not supported")
+        if not version.exists():
+            with tempfile.TemporaryDirectory(dir=cache_root, prefix=".pkuseg-") as folder:
+                stage = Path(folder) / "cache"
+                extracted = stage / "spacy_ontonotes"
+                extracted.mkdir(parents=True)
+                for item, name in zip(members, names, strict=True):
+                    target = safe(extracted, name)
+                    if item.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(item) as data, target.open("xb") as out:
+                            shutil.copyfileobj(data, out)
+                # Stock download_model checks for the ZIP, then loads extracted
+                # files separately. Keeping only one of the two is insufficient.
+                (stage / record["path"]).symlink_to(source)
+                os.rename(stage, version)
+        for item, name in zip(members, names, strict=True):
+            if item.is_dir():
+                continue
+            target = safe(version / "spacy_ontonotes", name)
+            expected = hashlib.sha256()
+            with archive.open(item) as data:
+                while chunk := data.read(1024 * 1024):
+                    expected.update(chunk)
+            if sha256(target) != expected.hexdigest():
+                raise ValueError("Existing tokenizer cache is corrupt")
+        if sha256(version / record["path"]) != record["sha256"]:
+            raise ValueError("Tokenizer ZIP cache is corrupt")
+    active = cache_root / "pkuseg"
+    if active.exists() and not active.is_symlink():
+        raise ValueError("Refusing to replace an unmanaged tokenizer cache directory")
+    temporary = cache_root / (".pkuseg-link-" + uuid.uuid4().hex)
+    try:
+        temporary.symlink_to(version, target_is_directory=True)
+        os.replace(temporary, active)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main():
     line = sys.stdin.buffer.readline(16 * 1024 * 1024)
     if not line.endswith(b"\n"):
@@ -230,6 +294,23 @@ def main():
         elif action == "apply":
             apply(payload)
             result = {"applied": payload["alias"]}
+        elif action == "check-space":
+            required = payload["required_bytes"]
+            if type(required) is not int or required < 0:
+                raise ValueError("Invalid unpacking space requirement")
+            if shutil.disk_usage("/backends").free < required:
+                raise ValueError("Insufficient free space for offline backend installation")
+            model_bytes = payload.get("model_bytes", 0)
+            if (
+                type(model_bytes) is not int
+                or model_bytes < 0
+                or shutil.disk_usage(ROOT).free < model_bytes
+            ):
+                raise ValueError("Insufficient free space for auxiliary model cache")
+            result = {"space_ready": True}
+        elif action == "pkuseg-cache":
+            pkuseg_cache(payload["manifest"])
+            result = {"cache_ready": True}
         else:
             raise ValueError("Unknown setup action")
         print(json.dumps(result))

@@ -11,12 +11,16 @@ from pydantic import ValidationError
 from local_ai_installer.downloader.config import Settings
 from local_ai_installer.downloader.main import main as downloads
 from local_ai_installer.installer.docker import DeploymentSettings, Docker, slots
+from local_ai_installer.installer.images import download_images
 from local_ai_installer.installer.upload import provision
 
 
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
     if action == "downloads":
         downloads()
+        return
+    if action == "images":
+        download_images(Settings())
         return
     if action == "slots":
         for alias, preset in slots().items():
@@ -32,7 +36,7 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
             return
     docker = Docker(DeploymentSettings())
     if action == "install":
-        docker.install()
+        docker.install(Settings().storage_root)
     elif action == "upload":
         provision(docker, Settings().storage_root, selected, dry_run=dry_run)
     elif action == "status":
@@ -45,6 +49,7 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
 def menu() -> None:
     choices = [
         questionary.Choice("Download/select model files", value="downloads"),
+        questionary.Choice("Download offline Docker/backend bundle", value="images"),
         questionary.Choice("View deployment slots", value="slots"),
         questionary.Choice("Install/update stock LocalAI (maintenance restart)", value="install"),
         questionary.Choice("Upload/apply model selections (maintenance restart)", value="upload"),
@@ -79,7 +84,9 @@ def menu() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action", nargs="?", choices=["downloads", "slots", "install", "upload", "status", "config"]
+        "action",
+        nargs="?",
+        choices=["downloads", "images", "slots", "install", "upload", "status", "config"],
     )
     parser.add_argument("slots", nargs="*")
     parser.add_argument(

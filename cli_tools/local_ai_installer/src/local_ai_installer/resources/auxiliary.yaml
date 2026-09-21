@@ -1,0 +1,6 @@
+# Stock spacy-pkuseg's published default-model checksum. Chatterbox initializes
+# this segmenter even for German; cache BOTH the ZIP and its extracted contents.
+pkuseg:
+  url: https://github.com/explosion/spacy-pkuseg/releases/download/v0.0.26/spacy_ontonotes.zip
+  sha256: b216e7f92de7ae285aeab8feba2faa8ea8216e5995ff6fb3d391cc8356db1bfe
+  filename: spacy_ontonotes.zip

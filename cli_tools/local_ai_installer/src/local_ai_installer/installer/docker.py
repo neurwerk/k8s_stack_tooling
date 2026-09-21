@@ -39,6 +39,9 @@ class Docker:
     """A workstation-side helper; no SSH command or Docker socket inside containers."""
 
     def __init__(self, settings: DeploymentSettings):
+        from local_ai_installer.installer.images import image_specs
+
+        runtime = {image.name: image.tag for image in image_specs() if not image.backend}
         self.settings = settings
         self.environment = {
             **os.environ,
@@ -48,14 +51,14 @@ class Docker:
             "LOCALAI_MAX_ACTIVE_BACKENDS": str(settings.max_backends),
             "LOCALAI_VRAM_BUDGET": settings.vram_budget,
             "LOCALAI_THREADS": str(settings.threads),
+            "LOCALAI_IMAGE": runtime["localai"],
+            "LOCALAI_SETUP_IMAGE": runtime["setup"],
         }
         # Hatch installs resources as real files. The package has no host bind
         # mounts, so this path is only read by the workstation's Compose CLI.
         compose_file = str(files("local_ai_installer.resources").joinpath("compose.yaml"))
-        self.command = [
-            "docker",
-            "--context",
-            settings.docker_context,
+        self.docker_command = ["docker", "--context", settings.docker_context]
+        self.command = self.docker_command + [
             "compose",
             "--project-name",
             "local-ai",
@@ -78,7 +81,7 @@ class Docker:
 
     def worker_command(self) -> list[str]:
         source = Path(__file__).with_name("worker.py").read_text(encoding="utf-8")
-        return self.command + ["run", "--rm", "-T", "--no-deps", "setup", source]
+        return self.command + ["run", "--pull", "never", "--rm", "-T", "--no-deps", "setup", source]
 
     def worker(self, payload: dict[str, Any]) -> dict[str, Any]:
         import json
@@ -93,13 +96,25 @@ class Docker:
         )
         return json.loads(result.stdout)
 
-    def install(self) -> None:
-        """Maintenance operation: stop LocalAI before replacing backend packages."""
-        self.run("pull", "localai", "setup")
+    def install(self, storage: Path) -> None:
+        """Stage verified offline assets before entering the maintenance window."""
+        from local_ai_installer.installer.images import stage_bundle
+
+        packages, auxiliary = stage_bundle(self, storage)
         self.run("stop", "localai")
-        for name, uri in yaml.safe_load(resource("backends.yaml")).items():
+        self.worker({"action": "pkuseg-cache", "manifest": auxiliary})
+        for name, uri in packages:
             self.run(
-                "run", "--rm", "--no-deps", "backend-install", "backends", "install", uri, name
+                "run",
+                "--pull",
+                "never",
+                "--rm",
+                "--no-deps",
+                "backend-install",
+                "backends",
+                "install",
+                uri,
+                name,
             )
         definitions = {}
         for alias, preset in slots().items():
@@ -111,4 +126,4 @@ class Docker:
             config["limits"] = {"max_concurrent": 1, "retry_after_seconds": 2}
             definitions[alias] = yaml.safe_dump(config, sort_keys=False)
         self.worker({"action": "seed", "definitions": definitions})
-        self.run("up", "-d", "--wait", "--wait-timeout", "180", "localai")
+        self.run("up", "--pull", "never", "-d", "--wait", "--wait-timeout", "180", "localai")
