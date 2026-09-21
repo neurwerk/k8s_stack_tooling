@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-ai-installer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Download verified models and provision a stock LocalAI Docker host."
 readme = "README.md"
 license = "MIT"

@@ -19,7 +19,8 @@ uv run local-ai-installer
 | `downloads` | Model selection, HF login, download queue and inventory |
 | `slots` | Show selected local model presets; works offline |
 | `config` | Validate Compose locally |
-| `install` | Install pinned official backends and start LocalAI |
+| `images` | Download/verify Linux/AMD64 image and backend archives locally (Skopeo required) |
+| `install` | Load cached images, install local backend archives and start LocalAI; no WAN |
 | `upload --dry-run` | Verify local artifacts without server access |
 | `upload [slot ...]` | Upload verified bundles, apply presets and restart LocalAI |
 | `status` | Show Docker service status |
@@ -47,5 +48,10 @@ byte offsets**; callers must chunk to the 512-token window. Stock Whisper uses
 auto language detection; Chatterbox V2 returns completed audio. Native NER disable
 semantics differ from chat: enforce access in the client routing layer.
 
-Target deployment/GPU validation is pending. Bootstrap needs registry access;
-stock auxiliary-cache readiness and actual VRAM use must be checked on the host.
+Run `images` on the internet-connected workstation first; archives and temporary
+files stay under external storage `docker-images/`. `install` verifies the full
+bundle before target changes, loads runtime images through the Docker context,
+and uses stock LocalAI `ocifile://` backend installation. All services use
+`pull_policy: never`. Verified local tags avoid registry lookups after `docker load`.
+The bundle also seeds Chatterbox's checksum-pinned PKUSEG cache (ZIP + extracted data).
+Target deployment, cold auxiliary-cache readiness and actual VRAM use remain unverified.

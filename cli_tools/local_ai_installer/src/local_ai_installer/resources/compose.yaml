@@ -1,7 +1,8 @@
 name: local-ai
 
 x-runtime: &runtime
-  image: localai/localai:v4.10.0-gpu-nvidia-cuda-12@sha256:fe1c77680c6400f898efffdf3d1b39fcf1d85093c93fbd9b8857089aa317f401
+  image: ${LOCALAI_IMAGE:?Run through local-ai-installer to select the verified offline image}
+  pull_policy: never
   platform: linux/amd64
   entrypoint: [/local-ai]
   volumes:
@@ -50,6 +51,7 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
+      PKUSEG_HOME: /models/cache/pkuseg
       PYTHON_GRPC_MAX_WORKERS: "1"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     healthcheck:
@@ -74,12 +76,14 @@ services:
 
   setup:
     profiles: [setup]
-    image: python:3.12.12-slim-bookworm@sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130be301
+    image: ${LOCALAI_SETUP_IMAGE:?Run through local-ai-installer to select the verified helper image}
+    pull_policy: never
     platform: linux/amd64
     entrypoint: [python, -c]
     restart: "no"
     volumes:
       - models:/models
+      - backends:/backends
     # The workstation sends the packaged one-shot worker code and data via Docker.
     # No local bind mounts, socket mount, custom runtime image or persistent agent.
 
