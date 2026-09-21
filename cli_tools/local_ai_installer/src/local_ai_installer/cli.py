@@ -10,12 +10,39 @@ from pydantic import ValidationError
 
 from local_ai_installer.downloader.config import Settings
 from local_ai_installer.downloader.main import main as downloads
+from local_ai_installer.installer.assignments import deployment_slots
 from local_ai_installer.installer.docker import DeploymentSettings, Docker, slots
 from local_ai_installer.installer.images import download_images
 from local_ai_installer.installer.upload import provision
 
 
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
+    from local_ai_installer import workflow
+
+    local_actions = {
+        "select": workflow.select_models,
+        "stage": workflow.upload_models,
+        "assign": workflow.assign_models,
+        "plan": workflow.deployment_status,
+        "remote": lambda: workflow.deployment_status(remote=True),
+        "apply": lambda: workflow.apply_assignments(execute),
+        "test": workflow.test_models,
+    }
+    if action in local_actions:
+        local_actions[action]()
+        return
+    download_actions = {
+        "download": "download",
+        "inventory": "view_installed",
+        "queue": "view_queue",
+        "login": "authentication",
+        "storage": "storage_status",
+    }
+    if action in download_actions:
+        if action == "download":
+            download_images(Settings())
+        downloads(download_actions[action])
+        return
     if action == "downloads":
         downloads()
         return
@@ -27,9 +54,10 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
             state = "enabled after upload" if preset["enabled"] else "disabled backup"
             print(f"{alias}: {preset['model_id']}/{preset['variant_id']} ({state})")
         return
-    selected = aliases or [name for name, slot in slots().items() if slot["enabled"]]
+    configured = deployment_slots(Settings().storage_root) if action == "upload" else slots()
+    selected = aliases or [name for name, slot in configured.items() if slot["enabled"]]
     if action == "upload":
-        if len(set(selected)) != len(selected) or any(name not in slots() for name in selected):
+        if len(set(selected)) != len(selected) or any(name not in configured for name in selected):
             raise ValueError("Select each known model slot at most once")
         if dry_run:
             provision(None, Settings().storage_root, selected, dry_run=True)
@@ -48,11 +76,23 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
 
 def menu() -> None:
     choices = [
-        questionary.Choice("Download/select model files", value="downloads"),
-        questionary.Choice("Download offline Docker/backend bundle", value="images"),
-        questionary.Choice("View deployment slots", value="slots"),
-        questionary.Choice("Install/update stock LocalAI (maintenance restart)", value="install"),
-        questionary.Choice("Upload/apply model selections (maintenance restart)", value="upload"),
+        questionary.Separator("── Models ──"),
+        questionary.Choice("1. Browse catalog / select downloads", value="select"),
+        questionary.Choice("2. Download selected models", value="download"),
+        questionary.Choice("3. Upload downloaded models (files only)", value="stage"),
+        questionary.Choice("4. Assign uploaded models to aliases", value="assign"),
+        questionary.Choice("5. Review / apply assignments (restart)", value="apply"),
+        questionary.Choice("6. Test applied model (TTS / chat)", value="test"),
+        questionary.Separator("── Inventory ──"),
+        questionary.Choice("Deployment table (offline)", value="plan"),
+        questionary.Choice("Verify remote model files", value="remote"),
+        questionary.Choice("Download queue", value="queue"),
+        questionary.Choice("Downloaded inventory", value="inventory"),
+        questionary.Separator("── Setup ──"),
+        questionary.Choice("Hugging Face login", value="login"),
+        questionary.Choice("Storage status", value="storage"),
+        questionary.Choice("Download Docker/backend/cache bundle", value="images"),
+        questionary.Choice("Install/update LocalAI runtime (restart)", value="install"),
         questionary.Choice("Server status", value="status"),
         questionary.Choice("Exit", value="exit"),
     ]
@@ -60,18 +100,14 @@ def menu() -> None:
         action = questionary.select("LocalAI Installer", choices=choices).ask()
         if action in (None, "exit"):
             return
-        aliases = None
-        if action == "upload":
-            aliases = questionary.checkbox(
-                "Select model slots to provision",
-                choices=[
-                    questionary.Choice(name, checked=p["enabled"]) for name, p in slots().items()
-                ],
-            ).ask()
-            if not aliases:
-                continue
         try:
-            execute(action, aliases)
+            if (
+                action != "install"
+                or questionary.confirm(
+                    "Install/update runtime on the configured target?", default=False
+                ).ask()
+            ):
+                execute(action)
         except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             # Pydantic validation can include input values. Never print it here.
             print(
@@ -86,7 +122,27 @@ def main() -> None:
     parser.add_argument(
         "action",
         nargs="?",
-        choices=["downloads", "images", "slots", "install", "upload", "status", "config"],
+        choices=[
+            "downloads",
+            "images",
+            "slots",
+            "install",
+            "upload",
+            "status",
+            "config",
+            "select",
+            "download",
+            "stage",
+            "assign",
+            "plan",
+            "remote",
+            "apply",
+            "test",
+            "inventory",
+            "queue",
+            "login",
+            "storage",
+        ],
     )
     parser.add_argument("slots", nargs="*")
     parser.add_argument(

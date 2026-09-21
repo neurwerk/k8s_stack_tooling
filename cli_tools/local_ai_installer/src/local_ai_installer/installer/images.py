@@ -310,6 +310,35 @@ def verified_bundle(storage: Path) -> list[BundleImage]:
     return result
 
 
+def runtime_matches(info: dict[str, Any], image: BundleImage) -> bool:
+    if (info.get("Os"), info.get("Architecture")) != ("linux", "amd64"):
+        return False
+    if info.get("Id") == image.config_digest:
+        return True
+    # Containerd stores expose a manifest digest as Id, not the config digest.
+    # Compare the runtime configuration and ordered layer identities instead.
+    descriptor = info.get("Descriptor") or {}
+    if not info.get("Id") or descriptor.get("digest") != info["Id"]:
+        return False
+    with tarfile.open(image.archive, mode="r:") as archive:
+        _, entries = member_json(archive, "manifest.json")
+        if not isinstance(entries, list) or len(entries) != 1:
+            return False
+        raw, config = member_json(archive, entries[0]["Config"])
+    if (
+        not isinstance(config, dict)
+        or "sha256:" + hashlib.sha256(raw).hexdigest() != image.config_digest
+    ):
+        return False
+    return bool(
+        info.get("Config") == config.get("config", {})
+        and info.get("RootFS")
+        == {"Type": config["rootfs"]["type"], "Layers": config["rootfs"]["diff_ids"]}
+        and info.get("Variant", "") == config.get("variant", "")
+        and info.get("OsVersion", "") == config.get("os.version", "")
+    )
+
+
 def load_runtime(docker: Docker, image: BundleImage) -> None:
     """Import using the existing context; Docker never resolves a registry here."""
 
@@ -334,11 +363,7 @@ def load_runtime(docker: Docker, image: BundleImage) -> None:
             check=True,
         )
         info = inspect()
-    if info is None or (info.get("Id"), info.get("Os"), info.get("Architecture")) != (
-        image.config_digest,
-        "linux",
-        "amd64",
-    ):
+    if info is None or not runtime_matches(info, image):
         raise ValueError(f"Loaded image identity/platform mismatch for {image.spec.name}")
 
 

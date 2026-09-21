@@ -52,7 +52,7 @@ _MENU_CHOICES = [
 ]
 
 
-def main() -> None:
+def main(action: str | None = None) -> None:
     """Open the interactive curated-model downloader menu."""
     logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s %(message)s", level=logging.INFO)
     try:
@@ -64,7 +64,10 @@ def main() -> None:
         raise SystemExit(1) from error
     client = HuggingFaceClient(huggingface_environment(settings))
     store = ArtifactStore(settings.storage_root.resolve(), client)
-    _run_menu(store, client, settings, catalog, _ask_text, print)
+    if action is None:
+        _run_menu(store, client, settings, catalog, _ask_text, print)
+    else:
+        _run_selection(action, store, client, settings, catalog, print, _ask_text)
 
 
 def _select_menu_option() -> str | None:
@@ -218,7 +221,7 @@ def _require_authentication(client: HuggingFaceClient) -> None:
     """Require a valid token in the configured external Hugging Face home."""
     if client.authenticated_user() is None:
         raise MediaDownloaderError(
-            "Select option 5 to log in to Hugging Face on the external drive."
+            "Choose Hugging Face login/authentication for this external drive first."
         )
 
 

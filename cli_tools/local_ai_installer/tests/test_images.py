@@ -19,7 +19,12 @@ def digest(value: bytes) -> str:
 def archive_fixture(root: Path, architecture="amd64", corrupt=False):
     layer = b"verified layer contents"
     config = json.dumps(
-        {"os": "linux", "architecture": architecture, "rootfs": {"diff_ids": [digest(layer)]}}
+        {
+            "os": "linux",
+            "architecture": architecture,
+            "config": {"Entrypoint": ["/entrypoint.sh"]},
+            "rootfs": {"type": "layers", "diff_ids": [digest(layer)]},
+        }
     ).encode()
     source = json.dumps({"schemaVersion": 2, "config": {"digest": digest(config)}}).encode()
     spec = images.ImageSpec("sample", "example/sample@" + digest(source))
@@ -60,6 +65,45 @@ def test_wrong_source_manifest_is_rejected(tmp_path):
     spec, path, source, _ = archive_fixture(tmp_path)
     with pytest.raises(ValueError, match="Source manifest mismatch"):
         images.validate_archive(spec, path, source + b"\n")
+
+
+@pytest.mark.parametrize("store", ["classic", "containerd"])
+def test_loaded_runtime_supports_both_image_stores(tmp_path, store):
+    spec, path, _, config_digest = archive_fixture(tmp_path)
+    image = images.BundleImage(spec, path, "unused", config_digest, 0)
+    info = {
+        "Id": config_digest if store == "classic" else digest(b"manifest"),
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Config": {"Entrypoint": ["/entrypoint.sh"]},
+        "RootFS": {"Type": "layers", "Layers": [digest(b"verified layer contents")]},
+    }
+    info["Descriptor"] = {"digest": info["Id"]}
+    assert images.runtime_matches(info, image)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"Architecture": "arm64"},
+        {"Config": {"Entrypoint": ["/different.sh"]}},
+        {"RootFS": {"Type": "layers", "Layers": [digest(b"wrong layer")]}},
+        {"Descriptor": {"digest": digest(b"wrong manifest")}},
+    ],
+)
+def test_containerd_runtime_rejects_different_content(tmp_path, change):
+    spec, path, _, config_digest = archive_fixture(tmp_path)
+    image = images.BundleImage(spec, path, "unused", config_digest, 0)
+    info = {
+        "Id": digest(b"manifest"),
+        "Descriptor": {"digest": digest(b"manifest")},
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Config": {"Entrypoint": ["/entrypoint.sh"]},
+        "RootFS": {"Type": "layers", "Layers": [digest(b"verified layer contents")]},
+    }
+    info.update(change)
+    assert not images.runtime_matches(info, image)
 
 
 def test_incomplete_bundle_does_not_contact_or_stop_the_server(tmp_path, monkeypatch):

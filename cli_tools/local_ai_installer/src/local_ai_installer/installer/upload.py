@@ -14,15 +14,15 @@ import yaml
 from local_ai_installer.downloader.catalog import load_catalog, load_installed
 from local_ai_installer.downloader.integrity import verify_checksums
 from local_ai_installer.downloader.models import StoredArtifact
-from local_ai_installer.installer.docker import Docker, slots
+from local_ai_installer.installer.assignments import deployment_slots, load_deployment
+from local_ai_installer.installer.docker import Docker
 from local_ai_installer.installer.worker import safe
 
 
-def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+def prepare_artifact(root: Path, model_id: str, variant_id: str) -> tuple[Path, dict[str, Any]]:
     """Require a completed matching artifact; never resolve/download a new revision."""
-    preset = slots()[alias]
-    model = load_catalog().model(preset["model_id"])
-    variant = model.variant(preset["variant_id"])
+    model = load_catalog().model(model_id)
+    variant = model.variant(variant_id)
     source_id = variant.source or model.source
     requested_revision = variant.revision or model.revision
     entries = [
@@ -31,7 +31,7 @@ def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any
         if e.model_id == model.id and e.variant_id == variant.id
     ]
     if len(entries) != 1:
-        raise ValueError(f"Download {model.id}/{variant.id} before provisioning {alias}")
+        raise ValueError(f"Download {model.id}/{variant.id} before uploading or applying it")
     entry = entries[0]
     expected = f"models/{model.category}/{source_id}/{entry.revision}/{variant.id}"
     if entry.path != expected or entry.source != source_id or entry.verification != "sha256":
@@ -64,6 +64,21 @@ def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any
         safe(source, record.path)
     verify_checksums(source, artifact.files)
     records = [r.model_dump() for r in artifact.files]
+    fingerprint = hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+    destination = f"library/{model.id}/{entry.revision}/{variant.id}/{fingerprint}"
+    return source, {
+        "destination": destination,
+        "source": source_id,
+        "revision": entry.revision,
+        "files": records,
+    }
+
+
+def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    preset = deployment_slots(root)[alias]
+    source, manifest = prepare_artifact(root, preset["model_id"], preset["variant_id"])
+    records = manifest["files"]
+    destination = manifest["destination"]
     # Hash model content, not download timestamps in artifact.yaml. A repaired
     # local download of identical bytes must reuse the same remote publication.
     names = {r["path"] for r in records}
@@ -87,14 +102,6 @@ def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any
             raise ValueError("NER tokenizer assets are missing")
     if not required <= names:
         raise ValueError(f"Missing model companions: {sorted(required - names)}")
-    fingerprint = hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
-    destination = f"library/{model.id}/{entry.revision}/{variant.id}/{fingerprint}"
-    manifest = {
-        "destination": destination,
-        "source": source_id,
-        "revision": entry.revision,
-        "files": records,
-    }
     config = preset["config"]
     config.update(name=alias, disabled=not preset["enabled"])
     config.setdefault("parameters", {})["model"] = preset.get(
@@ -145,6 +152,8 @@ def transfer(docker: Docker, source: Path, manifest: dict[str, Any]) -> None:
 
 
 def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bool = False) -> None:
+    if docker is not None:
+        load_deployment(root, docker.settings.docker_context)
     # Preflight every source before contacting/changing the server.
     prepared = [prepare(root, alias) for alias in aliases]
     for source, manifest, application in prepared:

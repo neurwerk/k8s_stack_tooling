@@ -14,8 +14,42 @@ cp .env.example .env
 uv run local-ai-installer
 ```
 
+## Offline server workflow
+
+**Recommended:** `uv run local-ai-installer` opens one menu:
+**Select → Download → Upload files → Assign aliases → Apply → Test.**
+Install the runtime once from **Setup** before uploading models.
+
+Catalog tables show variant-level **Supported / Unverified / Unsupported** status.
+Supported means reviewed for the pinned LocalAI 4.10.0 backend bundle, not tested
+on your GPU. Qwen-Image-2.1 and Silero VAD are downloadable, unverified candidates;
+activation requires a reviewed backend recipe. Details include size and hardware notes.
+
+Assignments live on external storage in `deployment.json`, scoped to the Docker
+context. Uploading files does not enable models. Applying saved assignments restarts
+LocalAI. Remote file checks are explicit; offline tables say **Not checked**.
+Optional TTS/chat probes record **Verified** responses, invalidated by changes to
+the target, assignment, live configuration, artifact or backend pins. Other model
+types need testing in LocalAI. These probes do not assess output quality or VRAM fit.
+
+On the internet-connected workstation, with external storage attached:
+
+```bash
+uv run local-ai-installer images          # Download Docker/backend bundle
+uv run local-ai-installer downloads       # Select models, log in to HF, download queue
+uv run local-ai-installer install         # Install on target without WAN
+uv run local-ai-installer upload --dry-run
+uv run local-ai-installer upload          # Upload/apply enabled slots
+```
+
+Model selection works locally; the remote GUI is not required. Use the menu to
+assign uploaded, supported variants; bundled presets remain the CLI defaults.
+
 | Command suffix | Action |
 | --- | --- |
+| `select`, `download` | Browse grouped tables; download queue plus the supported runtime/backend bundle |
+| `stage`, `assign`, `apply` | Upload files, save alias choices, then apply them |
+| `plan`, `remote`, `test` | Offline deployment table, remote file checks, TTS/chat inference probes |
 | `downloads` | Model selection, HF login, download queue and inventory |
 | `slots` | Show selected local model presets; works offline |
 | `config` | Validate Compose locally |

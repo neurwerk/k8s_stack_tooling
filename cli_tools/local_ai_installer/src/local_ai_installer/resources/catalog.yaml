@@ -1,5 +1,54 @@
 schemaVersion: 1
 models:
+  - id: silero-vad
+    category: vad
+    displayName: Silero VAD (ONNX)
+    description: Voice activity detection for speech boundaries; does not transcribe audio.
+    source: onnx-community/silero-vad
+    revision: e71cae966052b992a7eca6b17738916ce0eca4ec
+    license:
+      name: MIT
+      url: https://huggingface.co/onnx-community/silero-vad/blob/main/LICENSE
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: silero-vad
+      languages: [multilingual]
+      intendedUse: voice-activity-detection
+    variants:
+      - id: onnx
+        format: onnx
+        estimatedDownloadBytes: 2244156
+        include: [onnx/model.onnx, LICENSE, README.md]
+        localai: unverified
+        compatibilityNotes: ONNX export not yet validated against a pinned official LocalAI VAD backend; current bundle has no VAD backend.
+        runtimeNotes: Downloadable candidate only; not deployable until the backend and model interface are verified together.
+
+  - id: qwen-image-2.1
+    category: image-generation
+    displayName: Qwen-Image-2.1
+    description: Unified text-to-image and image editing, including RGBA transparency.
+    source: Qwen/Qwen-Image-2.1
+    revision: 790c92633540aa0cb11d9abf19eb46d861714758
+    license:
+      name: qwen-research
+      url: https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE
+      commercialUse: null
+      noticeRequired: true
+      notes: Review the upstream Qwen Research License before use.
+    metadata:
+      architecture: QwenImage21Pipeline
+      parameterCount: 7B visual generation component
+      languages: [multilingual]
+      intendedUse: image-generation-and-editing
+    variants:
+      - id: diffusers
+        format: diffusers
+        estimatedDownloadBytes: 33134949212
+        localai: unverified
+        compatibilityNotes: Requires QwenImage21Pipeline; not verified with the pinned LocalAI 4.10.0 bundle. No deployment recipe yet.
+        runtimeNotes: Upstream requires recent Diffusers and Transformers >=5.17. Full repository is about 31 GiB; CPU offload and 16 GB GPU feasibility need validation.
+
   - id: chatterbox-multilingual-v2
     category: tts
     displayName: Chatterbox Multilingual V2 (stock LocalAI)
@@ -18,6 +67,8 @@ models:
       intendedUse: multilingual-text-to-speech
     variants:
       - id: pytorch-v2
+        localai: supported
+        compatibilityNotes: Reviewed stock LocalAI 4.10.0 chatterbox recipe; offline inference not yet verified.
         format: pytorch
         precision: fp32
         estimatedDownloadBytes: 3208951748
@@ -42,6 +93,8 @@ models:
       intendedUse: speech-recognition
     variants:
       - id: ctranslate2
+        localai: supported
+        compatibilityNotes: Reviewed stock LocalAI 4.10.0 faster-whisper recipe; server inference not yet verified.
         format: ctranslate2
         precision: fp16
         estimatedDownloadBytes: 3100000000
@@ -70,6 +123,8 @@ models:
         quantization: Q4_K_M
         estimatedDownloadBytes: 2497280256
         include: [Qwen3-4B-Q4_K_M.gguf]
+        localai: supported
+        compatibilityNotes: Reviewed stock LocalAI 4.10.0 llama-cpp recipe; server inference not yet verified.
         runtimeNotes: "Native llama-cpp/Jinja; start with 4096 context. Approx. 4 GB VRAM is a target to measure. Local backup remains disabled until explicitly enabled."
 
   - id: qwen3-vl-8b
@@ -94,6 +149,8 @@ models:
         quantization: Q4_K_M
         estimatedDownloadBytes: 6186814624
         include: [Qwen3VL-8B-Instruct-Q4_K_M.gguf, mmproj-Qwen3VL-8B-Instruct-F16.gguf]
+        localai: supported
+        compatibilityNotes: Reviewed stock LocalAI 4.10.0 llama-cpp vision recipe; server inference not yet verified.
         runtimeNotes: "Paired model/projector for stock llama-cpp. Download size excludes runtime/KV/image overhead. Local backup is disabled by default."
 
   - id: ai4privacy-multilingual-pii
@@ -172,6 +229,8 @@ models:
       piiAlias: german-pii
     variants:
       - id: transformers
+        localai: supported
+        compatibilityNotes: Reviewed stock LocalAI 4.10.0 transformers token-classification recipe; server inference not yet verified.
         format: transformers
         quantization: none
         precision: fp32
@@ -681,6 +740,8 @@ models:
         estimatedDownloadBytes: 529851188
         runtimeNotes: "16 GB candidate. Stored BF16; use FP32 and SDPA/eager on Turing, following IBM's older-GPU guidance. Japanese, Arabic, and Chinese support is experimental."
       - id: gguf-bf16
+        localai: supported
+        compatibilityNotes: Reviewed stock LocalAI 4.10.0 llama-cpp Docling recipe; server inference not yet verified.
         source: ibm-granite/granite-docling-258M-GGUF
         revision: e1e344cb19bae46a1d5edb4f04a27ebe0c268f72
         format: gguf

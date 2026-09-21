@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -65,6 +66,10 @@ class ModelVariant(BaseModel):
     estimated_download_bytes: int = Field(alias="estimatedDownloadBytes", ge=1)
     include: list[str] = Field(default_factory=list)
     runtime_notes: str = Field(default="", alias="runtimeNotes")
+    localai: Literal["supported", "unverified", "unsupported"] = "unverified"
+    compatibility_notes: str = Field(
+        default="Not assessed against our backend bundle.", alias="compatibilityNotes"
+    )
 
     @field_validator("id")
     @classmethod
