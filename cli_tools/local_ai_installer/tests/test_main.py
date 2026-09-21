@@ -125,7 +125,7 @@ def test_run_selection_requires_authentication_for_download(tmp_path: Path) -> N
     _run_selection("download", Mock(), client, settings, _catalog(), outputs.append)
 
     assert outputs == [
-        "Operation failed: Select option 5 to log in to Hugging Face on the external drive."
+        "Operation failed: Choose Hugging Face login/authentication for this external drive first."
     ]
 
 

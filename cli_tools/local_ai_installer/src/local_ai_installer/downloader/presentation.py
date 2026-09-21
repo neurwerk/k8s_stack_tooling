@@ -17,6 +17,8 @@ from local_ai_installer.downloader.models import (
 )
 
 CATEGORY_NAMES = {
+    "image-generation": "Image generation",
+    "vad": "Voice activity detection",
     "asr": "Speech recognition",
     "llm": "Language models",
     "ner": "Named-entity recognition",
@@ -35,9 +37,13 @@ def format_bytes(value: int) -> str:
 
 def _table(title: str, *columns: str) -> Table:
     """Create a consistently styled table whose data is rendered literally."""
-    table = Table(title=Text(title), box=box.SIMPLE, padding=(0, 1), leading=1)
+    table = Table(title=Text(title), box=box.SIMPLE, padding=(0, 1))
     for column in columns:
-        table.add_column(column, justify="right" if column == "Download" else "left")
+        table.add_column(
+            column,
+            justify="right" if column == "Download" else "left",
+            min_width=8 if column == "Download" else None,
+        )
     return table
 
 
@@ -67,7 +73,7 @@ def show_variants(model: CatalogModel, output: Callable[[str], None]) -> None:
         output(model.license.notes)
     console = Console()
     wide = console.width >= 110
-    columns = ["Variant", "Format / stored weights", "Download"]
+    columns = ["Variant", "Format / stored weights", "LocalAI", "Download"]
     if wide:
         columns.append("Runtime notes")
     table = _table(model.display_name, *columns)
@@ -79,6 +85,7 @@ def show_variants(model: CatalogModel, output: Callable[[str], None]) -> None:
         row = [
             variant.id,
             f"{variant.format}\n{weights}",
+            variant.localai.title(),
             format_bytes(variant.estimated_download_bytes),
         ]
         if wide:
@@ -88,6 +95,7 @@ def show_variants(model: CatalogModel, output: Callable[[str], None]) -> None:
         table.add_row(*(Text(cell) for cell in row))
     _emit(console, table, output)
     _notes(notes, console, output)
+    _notes([(v.id, v.compatibility_notes) for v in model.variants], console, output)
 
 
 def show_queue(
@@ -98,7 +106,7 @@ def show_queue(
         output("Download queue is empty.")
         return
     console = Console()
-    table = _table("Download queue", "Model / category / license", "Variant", "Download")
+    table = _table("Download queue", "Model / category / license", "Variant", "LocalAI", "Download")
     notes = []
     licences: dict[str, str] = {}
     total = 0
@@ -109,6 +117,7 @@ def show_queue(
         table.add_row(
             Text(f"{model.display_name}\n{model.category.upper()} | {model.license.name}"),
             Text(variant.id),
+            Text(variant.localai.title()),
             Text(format_bytes(variant.estimated_download_bytes)),
         )
         if variant.runtime_notes:
@@ -130,11 +139,20 @@ def show_installed(
         return
     console = Console()
     table = _table("Installed models", "Model / category", "Variant", "Stored size")
+    models = {model.id: model for model in catalog.models}
     for item in state.installed:
-        model = catalog.model(item.model_id)
+        model = models.get(item.model_id)
+        label = (
+            f"{model.display_name}\n{model.category.upper()}"
+            if model is not None
+            else f"{item.model_id}\nNot in current catalog"
+        )
+        variant = item.variant_id
+        if model is not None and not any(v.id == item.variant_id for v in model.variants):
+            variant += "\nNot in current catalog"
         table.add_row(
-            Text(f"{model.display_name}\n{model.category.upper()}"),
-            Text(item.variant_id),
+            Text(label),
+            Text(variant),
             Text(format_bytes(item.total_bytes)),
         )
     _emit(console, table, output)
