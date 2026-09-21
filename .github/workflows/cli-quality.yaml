@@ -30,8 +30,8 @@ jobs:
           - name: Package Checker
             project: cli_tools/package_checker
             needs_base: true
-          - name: Media Downloader Uploader
-            project: cli_tools/media_downloader_uploader
+          - name: LocalAI Installer
+            project: cli_tools/local_ai_installer
             needs_base: false
           - name: OpenBao Stack Setup
             project: cli_tools/openbao_stack_setup
