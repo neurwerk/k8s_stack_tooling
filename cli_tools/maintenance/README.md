@@ -55,4 +55,4 @@ uv run --frozen pytest
 uv build
 ```
 
-Tests mock kubectl and HTTPS. Required coverage is 80%.
+Tests mock kubectl and HTTPS. Coverage output is informational.
