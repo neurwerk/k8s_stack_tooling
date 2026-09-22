@@ -7,6 +7,10 @@ files.
 
 ## Setup
 
+Package `0.2.19` tidies stale token accessors when OpenBao returns HTTP 403 while
+reconciliation verifies and revokes old root tokens. Cleanup is bounded and remains
+fail-closed if every listed accessor cannot be inspected after maintenance.
+
 ### Optional WireGuard Server Key
 
 Package `0.2.13` adds a selection-gated WireGuard catalog at schema `4`, reusing
