@@ -7,7 +7,7 @@ files.
 
 ## Setup
 
-Package `0.2.19` tidies stale token accessors when OpenBao returns HTTP 403 while
+Package `0.2.20` tidies stale token accessors when OpenBao returns HTTP 403 while
 reconciliation verifies and revokes old root tokens. Cleanup is bounded and remains
 fail-closed if every listed accessor cannot be inspected after maintenance.
 
