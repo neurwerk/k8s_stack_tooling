@@ -357,7 +357,10 @@ class OpenBaoClient:
             raise OpenBaoError(f"OpenBao request {method} /v1/{path} failed") from None
         if response.status_code == 404 and allow_not_found:
             return None
-        if response.status_code not in (200, 204):
+        accepted = response.status_code in (200, 204) or (
+            response.status_code == 202 and method == "POST" and path == "auth/token/tidy"
+        )
+        if not accepted:
             raise OpenBaoError(
                 f"OpenBao request {method} /v1/{path} failed with HTTP {response.status_code}"
             )
