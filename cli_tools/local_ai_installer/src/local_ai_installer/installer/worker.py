@@ -275,7 +275,9 @@ def main():
         raise ValueError("Missing or oversized job header")
     payload = json.loads(line)
     ROOT.mkdir(parents=True, exist_ok=True)
-    with (ROOT / ".installer.lock").open("a") as lock:
+    state = safe(ROOT, ".installer")
+    state.mkdir(exist_ok=True)
+    with safe(state, "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         action = payload["action"]
         if action == "seed":

@@ -1,5 +1,13 @@
 # One selected preset per local alias. Paths/cache refs are generated from the
 # downloader's verified, immutable inventory. No remote-model routing is present.
+vad-general:
+  model_id: silero-vad
+  variant_id: onnx
+  enabled: true
+  model_file: onnx/model.onnx
+  config:
+    backend: silero-vad
+    known_usecases: [vad]
 vlm-documents:
   model_id: granite-docling-258m
   variant_id: gguf-bf16
@@ -21,6 +29,8 @@ stt-general:
   config:
     backend: faster-whisper
     cuda: true
+    # Cold Python/CUDA imports can exceed LocalAI's default readiness window.
+    grpc: {attempts: 60, attempts_sleep_time: 2}
     known_usecases: [transcript]
 tts-german:
   model_id: chatterbox-multilingual-v2
@@ -30,6 +40,7 @@ tts-german:
   config:
     backend: chatterbox
     cuda: true
+    grpc: {attempts: 60, attempts_sleep_time: 2}
     known_usecases: [tts]
     options: ["multilingual:true", "language_id:de"]
     tts: {voice: default}

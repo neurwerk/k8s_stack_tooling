@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from local_ai_installer.downloader.config import Settings
 from local_ai_installer.downloader.main import main as downloads
+from local_ai_installer.installer.api_tests import menu as api_tests
 from local_ai_installer.installer.assignments import deployment_slots
 from local_ai_installer.installer.docker import DeploymentSettings, Docker, slots
 from local_ai_installer.installer.images import download_images
@@ -26,7 +27,8 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "plan": workflow.deployment_status,
         "remote": lambda: workflow.deployment_status(remote=True),
         "apply": lambda: workflow.apply_assignments(execute),
-        "test": workflow.test_models,
+        "test": api_tests,
+        "verify": workflow.test_models,
     }
     if action in local_actions:
         local_actions[action]()
@@ -82,7 +84,8 @@ def menu() -> None:
         questionary.Choice("3. Upload downloaded models (files only)", value="stage"),
         questionary.Choice("4. Assign uploaded models to aliases", value="assign"),
         questionary.Choice("5. Review / apply assignments (restart)", value="apply"),
-        questionary.Choice("6. Test applied model (TTS / chat)", value="test"),
+        questionary.Choice("6. Test API endpoints", value="test"),
+        questionary.Choice("Record model verification (TTS / chat)", value="verify"),
         questionary.Separator("── Inventory ──"),
         questionary.Choice("Deployment table (offline)", value="plan"),
         questionary.Choice("Verify remote model files", value="remote"),
@@ -138,6 +141,7 @@ def main() -> None:
             "remote",
             "apply",
             "test",
+            "verify",
             "inventory",
             "queue",
             "login",

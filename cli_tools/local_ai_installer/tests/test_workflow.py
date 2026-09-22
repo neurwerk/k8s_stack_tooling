@@ -132,7 +132,6 @@ def test_presets_have_reviewed_variant_metadata():
             catalog.model(preset["model_id"]).variant(preset["variant_id"]).localai == "supported"
         )
     assert catalog.model("qwen-image-2.1").variant("diffusers").localai == "unverified"
-    assert catalog.model("silero-vad").variant("onnx").localai == "unverified"
 
 
 def test_legacy_inventory_does_not_block_assignment_or_display(tmp_path, monkeypatch):
