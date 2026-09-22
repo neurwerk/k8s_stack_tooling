@@ -455,7 +455,7 @@ uv build
 Tests fake GitHub operations and signing. Local bare-Git regression tests use only
 temporary filesystem remotes, with network protocols disabled. No credentials or cluster
 are required.
-The package enforces 80 percent coverage. Base owns release rules; this package
+Coverage output is informational. Base owns release rules; this package
 calls existing Base scripts and workflows.
 Set `PLATFORM_RELEASE_BASE_FIXTURE=/path/to/trusted/base` when running pytest to
 also exercise that checkout's real generator and migration parser without modifying
