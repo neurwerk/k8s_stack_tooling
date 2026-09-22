@@ -36,7 +36,7 @@ from openbao_stack_setup.catalog import (
     WIREGUARD_SECRET_STORE,
     HelmReleaseTarget,
 )
-from openbao_stack_setup.client import OpenBaoClient, OpenBaoError
+from openbao_stack_setup.client import OpenBaoClient, OpenBaoError, TokenAccessorLookupError
 from openbao_stack_setup.cluster import Cluster, ClusterError, StackIdentity
 from openbao_stack_setup.credentials import (
     BOOTSTRAP_PASSWORDS,
@@ -77,6 +77,8 @@ from openbao_stack_setup.seed import seed_bootstrap
 
 _ADDRESS = "https://127.0.0.1:8200"
 _BOOTSTRAP_PASSWORD_ACKNOWLEDGEMENT = "I HAVE SAVED THESE PASSWORDS"  # noqa: S105
+_TOKEN_TIDY_ATTEMPTS = 30
+_TOKEN_TIDY_INTERVAL_SECONDS = 1
 
 
 _BOOTSTRAP_EXTERNAL_SECRETS = BOOTSTRAP_EXTERNAL_SECRETS
@@ -468,11 +470,31 @@ def _write_bootstrap_passwords(
 
 def _revoke_other_root_tokens(client: OpenBaoClient) -> None:
     current_accessor = client.self_accessor()
+    root_accessors: tuple[str, ...] = ()
+    try:
+        root_accessors = _other_root_accessors(client, current_accessor)
+    except TokenAccessorLookupError:
+        client.tidy_tokens()
+        for attempt in range(_TOKEN_TIDY_ATTEMPTS):
+            time.sleep(_TOKEN_TIDY_INTERVAL_SECONDS)
+            try:
+                root_accessors = _other_root_accessors(client, current_accessor)
+                break
+            except TokenAccessorLookupError:
+                if attempt == _TOKEN_TIDY_ATTEMPTS - 1:
+                    raise SetupError("OpenBao token tidy did not remove stale accessors") from None
+    for accessor in root_accessors:
+        client.revoke_accessor(accessor)
+
+
+def _other_root_accessors(client: OpenBaoClient, current_accessor: str) -> tuple[str, ...]:
+    root_accessors = []
     for accessor in client.list_token_accessors():
         metadata = client.lookup_accessor(accessor)
         policies = metadata.get("policies")
         if accessor != current_accessor and isinstance(policies, list) and "root" in policies:
-            client.revoke_accessor(accessor)
+            root_accessors.append(accessor)
+    return tuple(root_accessors)
 
 
 def _verify_secret_operator(cluster: Cluster, unauthenticated: OpenBaoClient) -> None:

@@ -38,6 +38,10 @@ class OpenBaoError(RuntimeError):
     """Raised for redacted OpenBao transport or response failures."""
 
 
+class TokenAccessorLookupError(OpenBaoError):
+    """Raised when OpenBao lists an accessor whose token metadata is unavailable."""
+
+
 @dataclass(frozen=True)
 class SecretRecord:
     """Represent one KV v2 value and its current version."""
@@ -229,11 +233,20 @@ class OpenBaoClient:
 
     def lookup_accessor(self, accessor: str) -> dict[str, JsonValue]:
         """Return non-sensitive metadata for one token accessor."""
-        payload = _mapping(
-            self._request("POST", "auth/token/lookup-accessor", {"accessor": accessor}),
-            "token accessor lookup",
-        )
+        try:
+            response = self._request("POST", "auth/token/lookup-accessor", {"accessor": accessor})
+        except OpenBaoError as exc:
+            if str(exc).endswith("failed with HTTP 403"):
+                raise TokenAccessorLookupError(
+                    "OpenBao listed a token accessor whose metadata is unavailable"
+                ) from None
+            raise
+        payload = _mapping(response, "token accessor lookup")
         return _mapping(payload.get("data"), "token accessor metadata")
+
+    def tidy_tokens(self) -> None:
+        """Start OpenBao maintenance for invalid token-store entries."""
+        self._write("auth/token/tidy", {})
 
     def self_accessor(self) -> str:
         """Return the accessor for this client token without returning the token."""
