@@ -20,9 +20,9 @@ models:
         format: onnx
         estimatedDownloadBytes: 2244156
         include: [onnx/model.onnx, LICENSE, README.md]
-        localai: unverified
-        compatibilityNotes: ONNX export not yet validated against a pinned official LocalAI VAD backend; current bundle has no VAD backend.
-        runtimeNotes: Downloadable candidate only; not deployable until the backend and model interface are verified together.
+        localai: supported
+        compatibilityNotes: Reviewed and manually exercised with the pinned LocalAI 4.10.0 CPU silero-vad backend.
+        runtimeNotes: "16 kHz mono float samples via /v1/vad. Append trailing silence for finite clips so the final speech segment closes; no speech transcription or sound classification."
 
   - id: qwen-image-2.1
     category: image-generation
