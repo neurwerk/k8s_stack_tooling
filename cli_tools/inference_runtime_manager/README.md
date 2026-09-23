@@ -33,6 +33,37 @@ docker --context ai-server info
 6. Enable or disable services and apply the assignments.
 7. Run **Test all enabled endpoints** and inspect output quality manually.
 
+## Default TTS Voice
+
+Choose **Record and provision default TTS voice** from the **Voices** section. The
+manager displays a German reading script, lets the operator select a microphone,
+records for 80 seconds, validates and plays the local recording, then asks before
+contacting the configured Docker target. Bluetooth headset microphones commonly
+switch to a low-bandwidth hands-free profile and can sound distorted; prefer the
+Mac's built-in microphone or a USB/wired microphone for voice cloning. Recording
+requires an existing `ffmpeg` executable; the manager never installs workstation
+packages. On macOS, install it separately with `brew install ffmpeg` if it is not
+already available.
+
+The manager uploads the WAV with SHA-256 verification into the persistent runtime
+configuration volume and recreates only `tts-german`. For comparison, the manager
+plays the original recording, Chatterbox reading the same full German script, and
+a short one-line test with the temporary candidate voice. The previous `default`
+voice is replaced atomically only after the operator accepts the comparison. Local
+recordings and generated samples remain in a temporary directory and are deleted
+when the workflow exits.
+
+The same interactive flow is available as:
+
+```bash
+uv run inference-runtime-manager voice
+```
+
+The voice recording is private biometric material. It is never placed in Git or
+external model storage. Anyone who can call the unauthenticated Chatterbox endpoint
+can synthesize with the configured default voice, so keep that endpoint on the
+documented trusted network boundary.
+
 Assignments live in external-storage `deployment.json` and are bound to one
 Docker context. Existing assignments without a runtime, or with the removed
 LocalAI runtime, are migrated to the reviewed runtime for that alias.

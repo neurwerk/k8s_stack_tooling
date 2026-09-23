@@ -1,5 +1,6 @@
 """Standard-library-only model-volume worker sent through the Docker context."""
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,10 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path("/models")
 CONFIG_ROOT = Path("/runtime-config")
+VOICE_ROOT = CONFIG_ROOT / "voices"
+VOICE_CANDIDATE = VOICE_ROOT / ".candidate.wav"
+VOICE_DEFAULT = VOICE_ROOT / "default"
+VOICE_LIMIT = 16 * 1024 * 1024
 
 
 def relative(value):
@@ -55,6 +60,35 @@ def atomic_write(path, data):
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def receive_voice(payload):
+    content = payload.get("content")
+    digest = payload.get("sha256")
+    if not isinstance(content, str):
+        raise ValueError("Invalid voice content")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        raise ValueError("Invalid voice checksum")
+    try:
+        data = base64.b64decode(content, validate=True)
+    except ValueError as exc:
+        raise ValueError("Invalid voice encoding") from exc
+    if not 0 < len(data) <= VOICE_LIMIT:
+        raise ValueError("Invalid voice size")
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("Voice checksum mismatch")
+    atomic_write(VOICE_CANDIDATE, data)
+    return {"staged": True, "sha256": digest}
+
+
+def promote_voice():
+    if not VOICE_CANDIDATE.is_file():
+        raise ValueError("No verified voice candidate exists")
+    os.replace(VOICE_CANDIDATE, VOICE_DEFAULT)
+
+
+def discard_voice():
+    VOICE_CANDIDATE.unlink(missing_ok=True)
 
 
 def validate(manifest):
@@ -183,7 +217,8 @@ def activate(payload):
 
 
 def configure():
-    chatterbox = b"""server:\n  host: 0.0.0.0\n  port: 8004\n  use_ngrok: false\n  use_auth: false\n  log_file_path: /tmp/chatterbox.log\nmodel:\n  repo_id: chatterbox-multilingual\ntts_engine:\n  device: cuda\n  predefined_voices_path: /tmp/voices\n  reference_audio_path: /tmp/reference_audio\n  default_voice_id: default\npaths:\n  model_cache: /models/cache\n  output: /tmp/outputs\ngeneration_defaults:\n  temperature: 0.8\n  exaggeration: 1.0\n  cfg_weight: 0.5\n  seed: 0\n  speed_factor: 1.0\n  language: de\naudio_output:\n  format: wav\n  sample_rate: 24000\n  max_reference_duration_sec: 30\n  save_to_disk: false\nui:\n  title: Chatterbox TTS Server\n  show_language_select: true\n  max_predefined_voices_in_dropdown: 0\ndebug:\n  save_intermediate_audio: false\n"""
+    chatterbox = b"""server:\n  host: 0.0.0.0\n  port: 8004\n  use_ngrok: false\n  use_auth: false\n  log_file_path: /tmp/chatterbox.log\nmodel:\n  repo_id: chatterbox-multilingual\ntts_engine:\n  device: cuda\n  predefined_voices_path: /runtime-config/voices\n  reference_audio_path: /tmp/reference_audio\n  default_voice_id: default\npaths:\n  model_cache: /models/cache\n  output: /tmp/outputs\ngeneration_defaults:\n  temperature: 0.8\n  exaggeration: 1.0\n  cfg_weight: 0.5\n  seed: 0\n  speed_factor: 1.0\n  language: de\naudio_output:\n  format: wav\n  sample_rate: 24000\n  max_reference_duration_sec: 30\n  save_to_disk: false\nui:\n  title: Chatterbox TTS Server\n  show_language_select: true\n  max_predefined_voices_in_dropdown: 0\ndebug:\n  save_intermediate_audio: false\n"""
+    VOICE_ROOT.mkdir(parents=True, exist_ok=True)
     atomic_write(CONFIG_ROOT / "chatterbox.yaml", chatterbox)
     aliases = json.dumps(
         {"stt-general": "Systran/faster-whisper-large-v3"}, sort_keys=True
@@ -213,6 +248,14 @@ def main():
         elif action == "configure":
             configure()
             result = {"configured": True}
+        elif action == "receive_voice":
+            result = receive_voice(payload)
+        elif action == "promote_voice":
+            promote_voice()
+            result = {"promoted": True}
+        elif action == "discard_voice":
+            discard_voice()
+            result = {"discarded": True}
         else:
             raise ValueError("Unknown setup action")
         print(json.dumps(result))

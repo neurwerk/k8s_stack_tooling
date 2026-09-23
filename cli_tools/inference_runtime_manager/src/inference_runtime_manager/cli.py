@@ -15,6 +15,7 @@ from inference_runtime_manager.installer.assignments import deployment_services,
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker, services
 from inference_runtime_manager.installer.images import download_images
 from inference_runtime_manager.installer.upload import provision
+from inference_runtime_manager.installer.voice import menu as voice
 
 
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
@@ -29,6 +30,7 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "toggle": workflow.toggle_service,
         "apply": workflow.apply_assignments,
         "test": api_tests,
+        "voice": voice,
     }
     if action in local_actions:
         local_actions[action]()
@@ -95,6 +97,8 @@ def menu() -> None:
         questionary.Choice("5. Enable / disable a service", value="toggle"),
         questionary.Choice("6. Review / apply assignments", value="apply"),
         questionary.Choice("7. Test all enabled endpoints", value="test"),
+        questionary.Separator("── Voices ──"),
+        questionary.Choice("Record and provision default TTS voice", value="voice"),
         questionary.Separator("── Inventory ──"),
         questionary.Choice("Deployment table (offline)", value="plan"),
         questionary.Choice("Verify remote model files", value="remote"),
@@ -151,6 +155,7 @@ def main() -> None:
             "remote",
             "apply",
             "test",
+            "voice",
             "inventory",
             "queue",
             "login",
