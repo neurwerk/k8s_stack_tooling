@@ -38,6 +38,10 @@ def test_available_packages_are_registered() -> None:
             "neurwerk/k8s_stack_keycloak_api_key_bridge",
         ),
         ("k8s-stack-keycloak-theme", "neurwerk/k8s_stack_keycloak_theme"),
+        (
+            "k8s-stack-opensearch-reporting-cli",
+            "neurwerk/k8s_stack_opensearch_reporting_cli",
+        ),
         ("addon-dify-ce-builder-api", "neurwerk/addon_dify_ce_builder"),
         ("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
         ("addon-dify-ce-builder-web", "neurwerk/addon_dify_ce_builder"),
