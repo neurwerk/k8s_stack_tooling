@@ -1142,6 +1142,7 @@ def test_provider_update_and_refresh() -> None:
             "monitor-kube-prometheus-stack",
             "monitor-kube-prometheus-stack-smtp-secret",
         ),
+        call("monitor-opensearch-secret", "monitor-opensearch", "monitor-opensearch-secret"),
     ]
     assert cluster.force_reconcile.call_args_list == [
         call("keycloak", "auth-keycloak"),

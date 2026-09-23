@@ -33,6 +33,7 @@ def test_smtp_is_a_managed_credential() -> None:
         "stack-setup/providers/smtp",
         "auth-keycloak/external",
         "monitor-kube-prometheus-stack/external",
+        "monitor-opensearch/external",
     )
     assert MANAGED_CREDENTIALS["smtp"].fields == ("smtpUsername", "smtpPassword")
 

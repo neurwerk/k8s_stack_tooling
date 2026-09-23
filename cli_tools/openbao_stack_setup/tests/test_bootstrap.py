@@ -55,7 +55,7 @@ def test_bootstrap_seeds_exact_roles_and_provider_records(tmp_path: Path) -> Non
         _client(tmp_path, session), _providers(), {}, _bootstrap_passwords(), _identity()
     )
 
-    assert report.external_records_changed == 5
+    assert report.external_records_changed == 6
     assert "frontend-librechat/external" not in session.secrets
     assert report.internal_records_changed == 14
     assert "librechat-code-interpreter" in ROLE_NAMESPACES
@@ -123,6 +123,10 @@ def test_smtp_update_replaces_the_managed_record(tmp_path: Path) -> None:
         "smtpUsername": "new",
         "smtpPassword": "new-secret",
     }
+    assert session.secrets["monitor-opensearch/external"].values == {
+        "smtpUsername": "new",
+        "smtpPassword": "new-secret",
+    }
 
 
 def test_secret_operator_policy_allows_only_managed_records() -> None:
@@ -136,6 +140,8 @@ def test_secret_operator_policy_allows_only_managed_records() -> None:
         "secret/metadata/infra-cert-manager/external",
         "secret/data/monitor-kube-prometheus-stack/external",
         "secret/metadata/monitor-kube-prometheus-stack/external",
+        "secret/data/monitor-opensearch/external",
+        "secret/metadata/monitor-opensearch/external",
         "secret/data/stack-setup/providers/smtp",
         "secret/metadata/stack-setup/providers/smtp",
         "secret/data/frontend-librechat/external",
