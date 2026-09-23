@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inference-runtime-manager"
+version = "0.2.0"
+description = "Download verified models and manage private inference runtimes."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.0", "pydantic-settings>=2.0", "PyYAML>=6.0",
+  "questionary>=2.1", "rich>=14.0",
+]
+
+[project.scripts]
+inference-runtime-manager = "inference_runtime_manager.cli:main"
+
+[project.urls]
+Repository = "https://github.com/neurwerk/k8s_stack_tooling"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inference_runtime_manager"]
+
+[dependency-groups]
+dev = ["ruff>=0.15.17", "ty>=0.0.49"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.ty.rules]
+all = "error"
