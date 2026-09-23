@@ -1,0 +1,246 @@
+name: local-ai
+
+x-common: &common
+  pull_policy: never
+  platform: linux/amd64
+  init: true
+  restart: unless-stopped
+  volumes:
+    - models:/models:ro
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+x-gpu: &gpu
+  gpus: all
+  environment:
+    NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+services:
+  vlm-documents:
+    <<: [*common, *gpu]
+    image: ${VLLM_IMAGE:?Run inference-runtime-manager images and install first}
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13 >/dev/null &&
+        exec vllm serve "$@"
+      - --
+      - /models/active/vlm-documents
+      - --served-model-name
+      - vlm-documents
+      - --dtype
+      - ${VLLM_GRANITE_DTYPE:-float32}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --limit-mm-per-prompt.image
+      - "1"
+      - --max-num-seqs
+      - "1"
+      - --gpu-memory-utilization
+      - ${VLLM_GRANITE_GPU_MEMORY_UTILIZATION:-0.25}
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_DOCUMENTS_PORT:-8000}:8000"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VLLM_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  llm-general:
+    <<: [*common, *gpu]
+    image: ${LLAMACPP_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - --model
+      - /models/active/llm-general/Qwen3-4B-Q4_K_M.gguf
+      - --alias
+      - llm-general
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --ctx-size
+      - "4096"
+      - --n-gpu-layers
+      - "999"
+      - --jinja
+      - --parallel
+      - "1"
+      - --offline
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${LLM_GENERAL_PORT:-8001}:8000"
+    environment:
+      LLAMA_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:8000/health]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 8
+
+  vlm-general:
+    <<: [*common, *gpu]
+    image: ${LLAMACPP_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - --model
+      - /models/active/vlm-general/Qwen3VL-8B-Instruct-Q4_K_M.gguf
+      - --mmproj
+      - /models/active/vlm-general/mmproj-Qwen3VL-8B-Instruct-F16.gguf
+      - --alias
+      - vlm-general
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --ctx-size
+      - "4096"
+      - --n-gpu-layers
+      - "999"
+      - --jinja
+      - --parallel
+      - "1"
+      - --offline
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_GENERAL_PORT:-8002}:8000"
+    environment:
+      LLAMA_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:8000/health]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  stt-general:
+    <<: [*common, *gpu]
+    image: ${SPEACHES_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - /bin/sh
+      - -c
+      - cp /runtime-config/model_aliases.json /home/ubuntu/speaches/model_aliases.json && exec uvicorn --factory speaches.main:create_app
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${STT_GENERAL_PORT:-8003}:8000"
+    volumes:
+      - models:/models:ro
+      - runtime-config:/runtime-config:ro
+    environment:
+      API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      ENABLE_UI: "false"
+      HF_HOME: /models/cache
+      HF_HUB_CACHE: /models/cache/hub
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      WHISPER__INFERENCE_DEVICE: cuda
+      WHISPER__COMPUTE_TYPE: float16
+      WHISPER__NUM_WORKERS: "1"
+      WHISPER__TTL: "-1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: [CMD, python, -c, "import os, urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Authorization': 'Bearer '+os.environ['API_KEY']}); urllib.request.urlopen(r, timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 90s
+      retries: 8
+
+  tts-german:
+    <<: [*common, *gpu]
+    image: ${CHATTERBOX_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        mkdir -p /tmp/voices /tmp/reference_audio /tmp/outputs &&
+        cp /app/voices/Emily.wav /tmp/voices/default &&
+        cp /runtime-config/chatterbox.yaml /app/config.yaml &&
+        exec python3 server.py
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${TTS_GERMAN_PORT:-8004}:8004"
+    volumes:
+      - models:/models:ro
+      - runtime-config:/runtime-config:ro
+    environment:
+      HF_HOME: /models/cache
+      HF_HUB_CACHE: /models/cache/hub
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: [CMD, python3, -c, "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8004/api/model-info', timeout=5)); assert data.get('loaded') is True"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  vad-general:
+    <<: *common
+    image: ${SPEACHES_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - /bin/sh
+      - -c
+      - cp /runtime-config/model_aliases.json /home/ubuntu/speaches/model_aliases.json && exec uvicorn --factory speaches.main:create_app
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VAD_GENERAL_PORT:-8005}:8000"
+    volumes:
+      - models:/models:ro
+      - runtime-config:/runtime-config:ro
+    environment:
+      API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      ENABLE_UI: "false"
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VAD_MODEL_TTL: "-1"
+    healthcheck:
+      test: [CMD, python, -c, "import os, urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Authorization': 'Bearer '+os.environ['API_KEY']}); urllib.request.urlopen(r, timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 8
+
+  ner-german:
+    <<: *common
+    image: ${KSERVE_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - --model_name=ner-german
+      - --model_dir=/models/active/ner-german
+      - --task=token_classification
+      - --backend=huggingface
+      - --dtype=float32
+      - --http_port=8080
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${NER_GERMAN_PORT:-8006}:8080"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1', 8080), 5); s.close()"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  setup:
+    profiles: [setup]
+    image: ${SETUP_IMAGE:?Run inference-runtime-manager images and install first}
+    pull_policy: never
+    platform: linux/amd64
+    entrypoint: [python, -c]
+    restart: "no"
+    volumes:
+      - models:/models
+      - runtime-config:/runtime-config
+
+volumes:
+  models: {name: local-ai_models}
+  runtime-config: {name: inference-runtime-manager_config}

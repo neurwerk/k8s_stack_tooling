@@ -1,5 +1,0 @@
-# Runtime images. Backend image pins remain in backends.yaml.
-# The installer verifies these source manifests and their config/layer identities,
-# then uses deterministic local tags so docker load needs no registry digest lookup.
-localai: localai/localai@sha256:fe1c77680c6400f898efffdf3d1b39fcf1d85093c93fbd9b8857089aa317f401
-setup: python@sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130be301

@@ -1,0 +1,55 @@
+vlm-documents:
+  runtime: vllm
+  service: vlm-documents
+  model_id: granite-docling-258m
+  variant_id: transformers
+  enabled: true
+  cache_repo: ibm-granite/granite-docling-258M
+  estimated_vram_gib: 4
+llm-general:
+  runtime: llama.cpp
+  service: llm-general
+  model_id: qwen3-4b
+  variant_id: gguf-q4-k-m
+  enabled: false
+  model_file: Qwen3-4B-Q4_K_M.gguf
+  estimated_vram_gib: 4
+vlm-general:
+  runtime: llama.cpp
+  service: vlm-general
+  model_id: qwen3-vl-8b
+  variant_id: gguf-q4-k-m
+  enabled: false
+  model_file: Qwen3VL-8B-Instruct-Q4_K_M.gguf
+  projector: mmproj-Qwen3VL-8B-Instruct-F16.gguf
+  estimated_vram_gib: 8
+stt-general:
+  runtime: speaches
+  service: stt-general
+  model_id: whisper-large-v3
+  variant_id: ctranslate2
+  enabled: true
+  cache_repo: Systran/faster-whisper-large-v3
+  estimated_vram_gib: 4
+tts-german:
+  runtime: chatterbox
+  service: tts-german
+  model_id: chatterbox-multilingual-v2
+  variant_id: pytorch-v2
+  enabled: true
+  cache_repo: ResembleAI/chatterbox
+  estimated_vram_gib: 4
+vad-general:
+  runtime: speaches
+  service: vad-general
+  model_id: silero-vad
+  variant_id: onnx
+  enabled: true
+  estimated_vram_gib: 0
+ner-german:
+  runtime: kserve
+  service: ner-german
+  model_id: openmed-german-pii
+  variant_id: transformers
+  enabled: false
+  estimated_vram_gib: 0

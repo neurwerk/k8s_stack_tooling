@@ -30,8 +30,8 @@ jobs:
           - name: Package Checker
             project: cli_tools/package_checker
             needs_base: true
-          - name: LocalAI Installer
-            project: cli_tools/local_ai_installer
+          - name: Inference Runtime Manager
+            project: cli_tools/inference_runtime_manager
             needs_base: false
           - name: OpenBao Stack Setup
             project: cli_tools/openbao_stack_setup
@@ -82,7 +82,20 @@ jobs:
       - name: Type check
         run: uv run --frozen ty check
 
+      - name: Render inference Compose configuration
+        if: matrix.project == 'cli_tools/inference_runtime_manager'
+        env:
+          INFERENCE_API_KEY: validation-only
+          SETUP_IMAGE: setup
+          VLLM_IMAGE: vllm
+          LLAMACPP_IMAGE: llamacpp
+          SPEACHES_IMAGE: speaches
+          CHATTERBOX_IMAGE: chatterbox
+          KSERVE_IMAGE: kserve
+        run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
+
       - name: Test
+        if: matrix.project != 'cli_tools/inference_runtime_manager'
         run: uv run --frozen pytest
 
       - name: Build
