@@ -226,14 +226,20 @@ def reconcile_internal_credentials(
     opensearch, count = _upsert(
         client,
         "monitor-opensearch/internal",
-        _random_fields(
-            "adminPassword",
-            "dashboardCookieSecret",
-            "dashboardPassword",
-            "fluentBitPassword",
-            "studioPassword",
-        ),
+        {
+            **_random_fields(
+                "adminPassword",
+                "dashboardCookieSecret",
+                "dashboardPassword",
+                "fluentBitPassword",
+                "provisionerPassword",
+                "reportReaderPassword",
+                "studioPassword",
+            ),
+            "queryDatasourceEncryptionKey": _printable_32,
+        },
     )
+    _validate_opensearch_query_encryption_key(opensearch)
     _record_change(changed, "monitor-opensearch/internal", count)
     added += count
 
@@ -349,6 +355,12 @@ def _docling_api_key(values: dict[str, JsonValue]) -> str:
     if not value.strip() or "\r" in value or "\n" in value:
         raise OpenBaoError("Docling API key is invalid; refusing to replace it")
     return value
+
+
+def _validate_opensearch_query_encryption_key(values: dict[str, JsonValue]) -> None:
+    value = _required_text(values, "queryDatasourceEncryptionKey")
+    if len(value) != 32:
+        raise OpenBaoError("OpenSearch query data-source encryption key must be 32 characters")
 
 
 def _wireguard_private_key() -> str:

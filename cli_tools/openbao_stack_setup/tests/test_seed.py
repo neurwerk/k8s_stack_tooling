@@ -55,7 +55,7 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         bootstrap_passwords(),
         identity(),
     )
-    assert report.external_records_changed == 5
+    assert report.external_records_changed == 6
     assert report.internal_records_changed == 14
     assert session.secrets["stack-setup/providers/smtp"].values == {
         "smtpUsername": "user",
@@ -66,6 +66,10 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         "smtpPassword": "password",
     }
     assert session.secrets["monitor-kube-prometheus-stack/external"].values == {
+        "smtpUsername": "user",
+        "smtpPassword": "password",
+    }
+    assert session.secrets["monitor-opensearch/external"].values == {
         "smtpUsername": "user",
         "smtpPassword": "password",
     }
@@ -117,7 +121,7 @@ def test_seed_merges_active_directory_with_smtp_siblings(tmp_path: Path) -> None
         active_directory=active_directory,
     )
 
-    assert report.external_records_changed == 5
+    assert report.external_records_changed == 6
     assert "stack-setup/providers/active-directory" not in session.secrets
     assert session.secrets["auth-keycloak/external"].values == {
         "smtpUsername": "smtp-user",
