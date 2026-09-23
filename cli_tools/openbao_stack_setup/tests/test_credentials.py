@@ -105,13 +105,20 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     agentgateway_password = agentgateway["postgresqlPassword"]
     assert isinstance(agentgateway_password, str)
     assert re.fullmatch(r"[A-Za-z0-9_-]+", agentgateway_password)
-    assert set(original["monitor-opensearch/internal"]) == {
+    opensearch = original["monitor-opensearch/internal"]
+    assert set(opensearch) == {
         "adminPassword",
         "dashboardCookieSecret",
         "dashboardPassword",
         "fluentBitPassword",
+        "provisionerPassword",
+        "queryDatasourceEncryptionKey",
+        "reportReaderPassword",
         "studioPassword",
     }
+    query_encryption_key = opensearch["queryDatasourceEncryptionKey"]
+    assert isinstance(query_encryption_key, str)
+    assert len(query_encryption_key) == 32
     assert set(original["frontend-studio/internal"]) == {"opensearchPassword"}
     postgres_auth = original["infra-postgres-auth/internal"]
     postgres_operations = original["infra-postgres-operations/internal"]
@@ -148,6 +155,25 @@ def test_internal_fixed_value_mismatch_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(OpenBaoError, match="Internal credential mismatch"):
         reconcile_internal_credentials(api, {})
+
+
+def test_invalid_opensearch_query_encryption_key_is_rejected_without_rotation(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession()
+    api = client(tmp_path, session)
+    reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
+    session.secrets["monitor-opensearch/internal"].values["queryDatasourceEncryptionKey"] = (
+        "too-short"
+    )
+
+    with pytest.raises(OpenBaoError, match="must be 32 characters"):
+        reconcile_internal_credentials(api, {})
+
+    assert (
+        session.secrets["monitor-opensearch/internal"].values["queryDatasourceEncryptionKey"]
+        == "too-short"
+    )
 
 
 def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:

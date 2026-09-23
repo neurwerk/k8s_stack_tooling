@@ -7,6 +7,19 @@ files.
 
 ## Setup
 
+### OpenSearch Reporting Credentials
+
+Package `0.2.21` additively provisions `queryDatasourceEncryptionKey`,
+`provisionerPassword`, and `reportReaderPassword` in `monitor-opensearch/internal`.
+The query data-source encryption key is exactly 32 characters. Existing values are
+preserved on reconciliation.
+
+SMTP bootstrap, reconciliation, and rotation also copy the managed credential pair
+to `monitor-opensearch/external`. Rotation refreshes the existing
+`monitor-opensearch-secret` ExternalSecret and relies on the workload's normal Secret
+reload behavior; it does not force the OpenSearch HelmRelease. Conflicting SMTP copies
+stop reconciliation without replacing data.
+
 Package `0.2.20` tidies stale token accessors when OpenBao returns HTTP 403 while
 reconciliation verifies and revokes old root tokens. Cleanup is bounded and remains
 fail-closed if every listed accessor cannot be inspected after maintenance.

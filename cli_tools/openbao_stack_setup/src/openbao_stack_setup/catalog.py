@@ -39,7 +39,11 @@ class SecretReplica:
 SMTP_REPLICA = SecretReplica(
     "stack-setup/providers/smtp",
     "auth-keycloak/external",
-    ("auth-keycloak/external", "monitor-kube-prometheus-stack/external"),
+    (
+        "auth-keycloak/external",
+        "monitor-kube-prometheus-stack/external",
+        "monitor-opensearch/external",
+    ),
     ("smtpUsername", "smtpPassword"),
 )
 
@@ -95,6 +99,9 @@ MONITOR_KUBE_PROMETHEUS_STACK_SMTP_EXTERNAL_SECRET = ExternalSecretTarget(
     "monitor-kube-prometheus-stack-smtp-secret",
     "monitor-kube-prometheus-stack",
     "monitor-kube-prometheus-stack-smtp-secret",
+)
+MONITOR_OPENSEARCH_EXTERNAL_SECRET = ExternalSecretTarget(
+    "monitor-opensearch-secret", "monitor-opensearch", "monitor-opensearch-secret"
 )
 INFRA_AGENTGATEWAY_EXTERNAL_SECRET = ExternalSecretTarget(
     "infra-agentgateway-secrets", "infra-agentgateway", "infra-agentgateway-secrets"
@@ -178,9 +185,7 @@ BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
     ExternalSecretTarget(
         "monitor-langfuse-secrets", "monitor-langfuse", "monitor-langfuse-secrets"
     ),
-    ExternalSecretTarget(
-        "monitor-opensearch-secret", "monitor-opensearch", "monitor-opensearch-secret"
-    ),
+    MONITOR_OPENSEARCH_EXTERNAL_SECRET,
     ExternalSecretTarget(
         "monitor-pii-engine-secrets", "monitor-pii-engine", "monitor-pii-engine-secrets"
     ),
@@ -250,6 +255,11 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
         ("smtpUsername", "smtpPassword"),
         MONITOR_KUBE_PROMETHEUS_STACK_SMTP_EXTERNAL_SECRET,
         (HelmReleaseTarget("kube-prometheus-stack", "monitor-kube-prometheus-stack"),),
+    ),
+    ProviderRefreshTarget(
+        "monitor-opensearch/external",
+        ("smtpUsername", "smtpPassword"),
+        MONITOR_OPENSEARCH_EXTERNAL_SECRET,
     ),
     ProviderRefreshTarget(
         "auth-keycloak/external",

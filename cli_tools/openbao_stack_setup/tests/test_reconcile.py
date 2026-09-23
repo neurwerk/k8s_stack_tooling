@@ -40,7 +40,7 @@ def state_values(
     *,
     applied: int = 4,
     client_name: str = "client",
-    package_version: str = "0.2.20",
+    package_version: str = "0.2.21",
 ) -> dict[str, JsonValue]:
     return {
         "schemaVersion": 1,
@@ -61,12 +61,16 @@ def test_reconcile_applies_catalog_and_cluster_bound_state(tmp_path: Path) -> No
     assert report.previous_version == 0
     assert "frontend-librechat/external" not in session.secrets
     assert report.applied_version == CURRENT_RECONCILIATION_VERSION
-    assert report.replicated_records == 2
+    assert report.replicated_records == 3
     assert session.secrets["stack-setup/providers/smtp"].values == {
         "smtpUsername": "smtp-user",
         "smtpPassword": "smtp-password",
     }
     assert session.secrets["monitor-kube-prometheus-stack/external"].values == {
+        "smtpUsername": "smtp-user",
+        "smtpPassword": "smtp-password",
+    }
+    assert session.secrets["monitor-opensearch/external"].values == {
         "smtpUsername": "smtp-user",
         "smtpPassword": "smtp-password",
     }
@@ -122,7 +126,7 @@ def test_reconcile_fails_closed_on_missing_password_or_conflicting_replica(
 
     reconcile_openbao(api, identity(), passwords())
     del session.secrets[RECONCILIATION_STATE_PATH]
-    session.secrets["monitor-kube-prometheus-stack/external"] = StoredSecret(
+    session.secrets["monitor-opensearch/external"] = StoredSecret(
         {"smtpUsername": "other", "smtpPassword": "other-password"}
     )
     with pytest.raises(OpenBaoError, match="conflicts"):
