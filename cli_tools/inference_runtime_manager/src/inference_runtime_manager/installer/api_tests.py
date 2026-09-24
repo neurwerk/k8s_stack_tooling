@@ -10,6 +10,7 @@ import tempfile
 import time
 import wave
 import zlib
+from datetime import datetime
 from pathlib import Path
 from struct import pack
 from typing import Any
@@ -32,6 +33,16 @@ ENDPOINTS = {
     "vad-general": (8000, "/health", "python"),
     "ner-german": (8080, "/v1/models/ner-german", "python"),
 }
+
+ORDER = [
+    "vlm-documents",
+    "llm-general",
+    "vlm-general",
+    "tts-german",
+    "stt-general",
+    "vad-general",
+    "ner-german",
+]
 
 
 def read_sample(path: str) -> bytes:
@@ -180,6 +191,23 @@ def validate_wav(data: bytes) -> None:
             raise ValueError("TTS returned empty audio")
 
 
+def synthesize_tts(docker: Docker, text: str) -> bytes:
+    speech = request(
+        docker,
+        "tts-german",
+        "/v1/audio/speech",
+        payload={
+            "model": "tts-german",
+            "input": text,
+            "voice": "default",
+            "response_format": "wav",
+            "language": "de",
+        },
+    )
+    validate_wav(speech)
+    return speech
+
+
 def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | None:
     _, health, _ = ENDPOINTS[alias]
     request(docker, alias, health)
@@ -209,19 +237,7 @@ def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | No
         if not value.get("choices", [{}])[0].get("message", {}).get("content"):
             raise ValueError("Chat response has no text")
     elif alias == "tts-german":
-        speech = request(
-            docker,
-            alias,
-            "/v1/audio/speech",
-            payload={
-                "model": "tts-german",
-                "input": SENTENCE,
-                "voice": "default",
-                "response_format": "wav",
-                "language": "de",
-            },
-        )
-        validate_wav(speech)
+        speech = synthesize_tts(docker, SENTENCE)
         with tempfile.NamedTemporaryFile(
             prefix="inference-speech-", suffix=".wav", delete=False
         ) as file:
@@ -260,6 +276,91 @@ def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | No
     return speech
 
 
+def enabled_docker(alias: str) -> Docker:
+    root = Settings().storage_root
+    docker = Docker(DeploymentSettings())
+    deployment = load_deployment(root, docker.settings.docker_context)
+    assignment = deployment.assignments.get(alias)
+    if assignment is None or not assignment.enabled:
+        raise ValueError(f"{alias} is not enabled")
+    return docker
+
+
+def test_individual(alias: str) -> None:
+    docker = enabled_docker(alias)
+    speech = None
+    if alias in {"stt-general", "vad-general"}:
+        sample = questionary.path("Local WAV to test:").ask()
+        if sample is None:
+            return
+        if not sample:
+            raise ValueError(f"A local WAV is required to test {alias} individually")
+        speech = read_sample(sample)
+    print("The request executes inside the remote service container against its loopback port.")
+    test_service(docker, alias, speech)
+
+
+def tts_menu() -> None:
+    while True:
+        action = questionary.select(
+            "TTS tests",
+            choices=[
+                questionary.Choice("Run standard endpoint test", value="standard"),
+                questionary.Choice("Generate WAV from custom text", value="custom"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+        if action in (None, "back"):
+            return
+        if action == "standard":
+            test_individual("tts-german")
+            continue
+        text = questionary.text("Text to synthesize:").ask()
+        if text is None:
+            return
+        text = text.strip()
+        if not text:
+            print("Enter non-empty text.")
+            continue
+
+        docker = enabled_docker("tts-german")
+        _, health, _ = ENDPOINTS["tts-german"]
+        request(docker, "tts-german", health)
+        speech = synthesize_tts(docker, text)
+        output_directory = Path("runtime")
+        output_directory.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        output = output_directory / f"tts-custom-{timestamp}.wav"
+        output.write_bytes(speech)
+        print(f"tts-german: audio saved to {output.resolve()}")
+
+
+def manual_menu() -> None:
+    choices = [
+        questionary.Choice("Test all enabled endpoints", value="all"),
+        questionary.Separator(" "),
+        questionary.Separator("── Individual Endpoints ──"),
+        *[
+            questionary.Choice("TTS tests", value="tts")
+            if alias == "tts-german"
+            else questionary.Choice(alias, value=alias)
+            for alias in ORDER
+        ],
+        questionary.Separator(" "),
+        questionary.Choice("Back", value="back"),
+    ]
+    while True:
+        action = questionary.select("Manual tests", choices=choices).ask()
+        if action in (None, "back"):
+            return
+        if action == "all":
+            menu()
+        elif action == "tts":
+            tts_menu()
+        else:
+            test_individual(action)
+
+
 def menu() -> None:
     root = Settings().storage_root
     docker = Docker(DeploymentSettings())
@@ -267,16 +368,7 @@ def menu() -> None:
     enabled_set = {
         alias for alias, assignment in deployment.assignments.items() if assignment.enabled
     }
-    order = [
-        "vlm-documents",
-        "llm-general",
-        "vlm-general",
-        "tts-german",
-        "stt-general",
-        "vad-general",
-        "ner-german",
-    ]
-    enabled = [alias for alias in order if alias in enabled_set]
+    enabled = [alias for alias in ORDER if alias in enabled_set]
     if not enabled:
         print("No enabled services.")
         return

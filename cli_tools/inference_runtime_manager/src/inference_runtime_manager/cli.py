@@ -10,7 +10,9 @@ from pydantic import ValidationError
 
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.downloader.main import main as downloads
+from inference_runtime_manager.installer.api_tests import manual_menu as manual_tests
 from inference_runtime_manager.installer.api_tests import menu as api_tests
+from inference_runtime_manager.installer.api_tests import tts_menu
 from inference_runtime_manager.installer.assignments import deployment_services, load_deployment
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker, services
 from inference_runtime_manager.installer.images import download_images
@@ -29,7 +31,9 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "remote": lambda: workflow.deployment_status(remote=True),
         "toggle": workflow.toggle_service,
         "apply": workflow.apply_assignments,
+        "manual-tests": manual_tests,
         "test": api_tests,
+        "tts-test": tts_menu,
         "voice": voice,
     }
     if action in local_actions:
@@ -96,20 +100,24 @@ def menu() -> None:
         questionary.Choice("4. Assign uploaded models to aliases", value="assign"),
         questionary.Choice("5. Enable / disable a service", value="toggle"),
         questionary.Choice("6. Review / apply assignments", value="apply"),
-        questionary.Choice("7. Test all enabled endpoints", value="test"),
-        questionary.Separator("── Voices ──"),
-        questionary.Choice("Record and provision default TTS voice", value="voice"),
+        questionary.Separator(" "),
+        questionary.Separator("── Manual Tests ──"),
+        questionary.Choice("7. Test endpoints", value="manual-tests"),
+        questionary.Separator(" "),
         questionary.Separator("── Inventory ──"),
         questionary.Choice("Deployment table (offline)", value="plan"),
         questionary.Choice("Verify remote model files", value="remote"),
         questionary.Choice("Download queue", value="queue"),
         questionary.Choice("Downloaded inventory", value="inventory"),
+        questionary.Separator(" "),
         questionary.Separator("── Setup ──"),
         questionary.Choice("Hugging Face login", value="login"),
         questionary.Choice("Storage status", value="storage"),
         questionary.Choice("Download runtime image bundle", value="images"),
         questionary.Choice("Install/update runtime images", value="install"),
         questionary.Choice("Server status", value="status"),
+        questionary.Choice("Record and provision default TTS voice", value="voice"),
+        questionary.Separator(" "),
         questionary.Choice("Exit", value="exit"),
     ]
     while True:
@@ -154,7 +162,9 @@ def main() -> None:
             "plan",
             "remote",
             "apply",
+            "manual-tests",
             "test",
+            "tts-test",
             "voice",
             "inventory",
             "queue",
