@@ -14,7 +14,11 @@ import yaml
 from inference_runtime_manager.downloader.catalog import load_catalog, load_installed
 from inference_runtime_manager.downloader.integrity import verify_checksums
 from inference_runtime_manager.downloader.models import StoredArtifact
-from inference_runtime_manager.installer.assignments import deployment_services, load_deployment
+from inference_runtime_manager.installer.assignments import (
+    compose_services,
+    deployment_services,
+    load_deployment,
+)
 from inference_runtime_manager.installer.docker import Docker
 from inference_runtime_manager.installer.worker import safe
 
@@ -76,15 +80,10 @@ def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any
     preset = deployment_services(root)[alias]
     source, manifest = prepare_artifact(root, preset["model_id"], preset["variant_id"])
     names = {record["path"] for record in manifest["files"]}
-    required = {preset[key] for key in ("model_file", "projector") if key in preset}
-    if alias == "stt-general":
-        required |= {"model.bin", "config.json", "tokenizer.json"}
-    if alias == "tts-german":
-        required |= {"t3_mtl23ls_v2.safetensors", "s3gen.pt", "ve.pt", "conds.pt"}
-    if alias in {"vlm-documents", "ner-german"}:
-        required.add("config.json")
-        if not any(name.endswith((".safetensors", ".bin")) for name in names):
-            raise ValueError(f"{alias}: model weights are missing")
+    required = set(preset.get("required_files", []))
+    required_suffixes = tuple(preset.get("required_any_suffix", []))
+    if required_suffixes and not any(name.endswith(required_suffixes) for name in names):
+        raise ValueError(f"{alias}: model weights are missing")
     if not required <= names:
         raise ValueError(f"Missing model companions: {sorted(required - names)}")
     return (
@@ -144,8 +143,11 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
     prepared = [prepare(root, alias) for alias in enabled]
     for source, manifest, application in prepared:
         print(f"{application['alias']}: {source} -> /models/{manifest['destination']}")
+        alternatives = set(compose_services(application["alias"])) - {application["service"]}
+        if alternatives:
+            print(f"{application['alias']}: stop alternatives {', '.join(sorted(alternatives))}")
     for alias in disabled:
-        print(f"{alias}: stop {configured[alias]['service']}")
+        print(f"{alias}: stop {', '.join(compose_services(alias))}")
     if dry_run:
         return
     if docker is None:
@@ -153,8 +155,11 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
     for source, manifest, _ in prepared:
         transfer(docker, source, manifest)
     for _, _, application in prepared:
-        docker.worker(application)
         service = application["service"]
+        alternatives = set(compose_services(application["alias"])) - {service}
+        if alternatives:
+            docker.run("stop", *sorted(alternatives))
+        docker.worker(application)
         docker.run(
             "up",
             "--pull",
@@ -167,4 +172,4 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
             service,
         )
     for alias in disabled:
-        docker.run("stop", configured[alias]["service"])
+        docker.run("stop", *compose_services(alias))

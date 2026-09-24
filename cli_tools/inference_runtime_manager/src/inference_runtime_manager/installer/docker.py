@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -50,7 +51,32 @@ def resource(name: str) -> str:
 
 
 def services() -> dict[str, Any]:
-    return yaml.safe_load(resource("services.yaml"))
+    """Return the package-default recipe for every stable alias."""
+    return {
+        alias: copy.deepcopy(next(recipe for recipe in recipes if recipe.get("default", False)))
+        for alias, recipes in service_recipes().items()
+    }
+
+
+def service_recipes() -> dict[str, list[dict[str, Any]]]:
+    """Return every reviewed recipe, accepting legacy single-recipe entries."""
+    configured = yaml.safe_load(resource("services.yaml"))
+    result: dict[str, list[dict[str, Any]]] = {}
+    for alias, value in configured.items():
+        recipes = value.get("recipes") if isinstance(value, dict) else None
+        if recipes is None:
+            recipes = [{**value, "default": True}]
+        if not isinstance(recipes, list) or not recipes:
+            raise ValueError(f"Service {alias} must define at least one recipe")
+        defaults = [recipe for recipe in recipes if recipe.get("default", False)]
+        identities = {(recipe.get("model_id"), recipe.get("variant_id")) for recipe in recipes}
+        service_names = {recipe.get("service") for recipe in recipes}
+        if len(defaults) != 1:
+            raise ValueError(f"Service {alias} must define exactly one default recipe")
+        if len(identities) != len(recipes) or len(service_names) != len(recipes):
+            raise ValueError(f"Service {alias} has duplicate recipe identities or service names")
+        result[alias] = copy.deepcopy(recipes)
+    return result
 
 
 class Docker:
@@ -81,6 +107,7 @@ class Docker:
             "LLAMACPP_IMAGE": images["llamacpp"],
             "SPEACHES_IMAGE": images["speaches"],
             "CHATTERBOX_IMAGE": images["chatterbox"],
+            "KOKORO_IMAGE": images["kokoro"],
             "KSERVE_IMAGE": images["kserve"],
         }
         compose_file = str(files("inference_runtime_manager.resources").joinpath("compose.yaml"))

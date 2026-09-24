@@ -8,5 +8,8 @@ llamacpp: ghcr.io/ggml-org/llama.cpp@sha256:d309d9f3584e0a2429e13fbb2ad836bdf2f3
 speaches: ghcr.io/speaches-ai/speaches@sha256:f34388613f5414d8e7e1df70ddedb0c4ac55d707733a2c657812fd13e6d1c2f2
 # ghcr.io/devnen/chatterbox-tts-server:main, inspected after upstream v2.0.0
 chatterbox: ghcr.io/devnen/chatterbox-tts-server@sha256:7bf0fcb39203fc18b20548b1f308bf6486b95aa12a8cc1fb6a8ee6409465e328
+# Package-owned model-free runtime, built locally for Linux/AMD64.
+kokoro:
+  build: kokoro_onnx
 # kserve/huggingfaceserver:v0.16.0, CPU image
 kserve: kserve/huggingfaceserver@sha256:c264e9eb1c9c57cbfe0b9d869dfb4713727d745999be43248eb24301a91701d0

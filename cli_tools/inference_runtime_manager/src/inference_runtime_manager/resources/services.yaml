@@ -6,23 +6,33 @@ vlm-documents:
   enabled: true
   cache_repo: ibm-granite/granite-docling-258M
   estimated_vram_gib: 4
+  internal_port: 8000
+  health_path: /health
+  transport: python3
+  required_files: [config.json]
+  required_any_suffix: [.safetensors, .bin]
 llm-general:
   runtime: llama.cpp
   service: llm-general
   model_id: qwen3-4b
   variant_id: gguf-q4-k-m
   enabled: false
-  model_file: Qwen3-4B-Q4_K_M.gguf
   estimated_vram_gib: 4
+  internal_port: 8000
+  health_path: /health
+  transport: curl
+  required_files: [Qwen3-4B-Q4_K_M.gguf]
 vlm-general:
   runtime: llama.cpp
   service: vlm-general
   model_id: qwen3-vl-8b
   variant_id: gguf-q4-k-m
   enabled: false
-  model_file: Qwen3VL-8B-Instruct-Q4_K_M.gguf
-  projector: mmproj-Qwen3VL-8B-Instruct-F16.gguf
   estimated_vram_gib: 8
+  internal_port: 8000
+  health_path: /health
+  transport: curl
+  required_files: [Qwen3VL-8B-Instruct-Q4_K_M.gguf, mmproj-Qwen3VL-8B-Instruct-F16.gguf]
 stt-general:
   runtime: speaches
   service: stt-general
@@ -31,14 +41,41 @@ stt-general:
   enabled: true
   cache_repo: Systran/faster-whisper-large-v3
   estimated_vram_gib: 4
+  internal_port: 8000
+  health_path: /health
+  transport: python
+  required_files: [model.bin, config.json, tokenizer.json]
 tts-german:
-  runtime: chatterbox
-  service: tts-german
-  model_id: chatterbox-multilingual-v2
-  variant_id: pytorch-v2
-  enabled: true
-  cache_repo: ResembleAI/chatterbox
-  estimated_vram_gib: 4
+  recipes:
+    - runtime: kokoro-onnx
+      service: tts-german-kokoro
+      model_id: kokoro-german-martin
+      variant_id: onnx
+      enabled: true
+      default: true
+      estimated_vram_gib: 0
+      internal_port: 8881
+      health_path: /health
+      transport: python
+      capabilities: []
+      required_files:
+        - kokoro-martin.onnx
+        - voices-martin.npz
+        - german_text_rules.py
+        - onnx-docker/tts_normalizer.py
+    - runtime: chatterbox
+      service: tts-german
+      model_id: chatterbox-multilingual-v2
+      variant_id: pytorch-v2
+      enabled: true
+      default: false
+      cache_repo: ResembleAI/chatterbox
+      estimated_vram_gib: 4
+      internal_port: 8004
+      health_path: /api/model-info
+      transport: python3
+      capabilities: [voice_cloning]
+      required_files: [t3_mtl23ls_v2.safetensors, s3gen.pt, ve.pt, conds.pt]
 vad-general:
   runtime: speaches
   service: vad-general
@@ -46,6 +83,9 @@ vad-general:
   variant_id: onnx
   enabled: true
   estimated_vram_gib: 0
+  internal_port: 8000
+  health_path: /health
+  transport: python
 ner-german:
   runtime: kserve
   service: ner-german
@@ -53,3 +93,8 @@ ner-german:
   variant_id: transformers
   enabled: false
   estimated_vram_gib: 0
+  internal_port: 8080
+  health_path: /v1/models/ner-german
+  transport: python
+  required_files: [config.json]
+  required_any_suffix: [.safetensors, .bin]

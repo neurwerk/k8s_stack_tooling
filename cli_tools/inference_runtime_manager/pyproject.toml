@@ -36,3 +36,6 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 
 [tool.ty.rules]
 all = "error"
+
+[tool.ty.src]
+exclude = ["src/inference_runtime_manager/resources/kokoro_onnx"]

@@ -91,6 +91,7 @@ jobs:
           LLAMACPP_IMAGE: llamacpp
           SPEACHES_IMAGE: speaches
           CHATTERBOX_IMAGE: chatterbox
+          KOKORO_IMAGE: kokoro
           KSERVE_IMAGE: kserve
         run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
 

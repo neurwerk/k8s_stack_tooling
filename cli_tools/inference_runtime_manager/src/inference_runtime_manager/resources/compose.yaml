@@ -182,6 +182,26 @@ services:
       start_period: 180s
       retries: 12
 
+  tts-german-kokoro:
+    <<: *common
+    image: ${KOKORO_IMAGE:?Run inference-runtime-manager images and install first}
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${TTS_GERMAN_PORT:-8004}:8881"
+    environment:
+      KOKORO_MODEL_ROOT: /models/active/tts-german
+      KOKORO_ONNX_INTRA_OP_THREADS: "4"
+      KOKORO_ONNX_INTER_OP_THREADS: "1"
+      OMP_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      NUMEXPR_NUM_THREADS: "4"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8881/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+
   vad-general:
     <<: *common
     image: ${SPEACHES_IMAGE:?Run inference-runtime-manager images and install first}

@@ -26,7 +26,7 @@ docker --context ai-server info
 ## Workflow
 
 1. Browse the catalog and select model variants.
-2. Download models and immutable Linux/AMD64 runtime images to external storage.
+2. Download models and prepare immutable Linux/AMD64 runtime images on external storage.
 3. Install the offline runtime images on the target.
 4. Upload verified model files.
 5. Assign an uploaded model to a stable service alias.
@@ -35,7 +35,8 @@ docker --context ai-server info
 
 ## Default TTS Voice
 
-Choose **Record and provision default TTS voice** from the **Voices** section. The
+When the active `tts-german` assignment is Chatterbox, choose **Record and
+provision default TTS voice** from the **Setup** section. The
 manager displays a German reading script, lets the operator select a microphone,
 records for 80 seconds, validates and plays the local recording, then asks before
 contacting the configured Docker target. Bluetooth headset microphones commonly
@@ -53,7 +54,8 @@ voice is replaced atomically only after the operator accepts the comparison. Loc
 recordings and generated samples remain in a temporary directory and are deleted
 when the workflow exits.
 
-The same interactive flow is available as:
+The same flow is available as the following command, which rejects recipes without
+the `voice_cloning` capability:
 
 ```bash
 uv run inference-runtime-manager voice
@@ -69,10 +71,10 @@ Docker context. Existing assignments without a runtime, or with the removed
 LocalAI runtime, are migrated to the reviewed runtime for that alias.
 
 Applying one assignment atomically points `/models/active/<alias>` at its
-immutable uploaded artifact and recreates only that service. Enabling runs
-`docker compose up -d <service>`; disabling runs `docker compose stop <service>`.
-There is no gateway, request-driven activation, backend scheduler or automatic
-eviction.
+immutable uploaded artifact, stops alternative recipes for the alias, and
+recreates the selected service. Disabling stops every recipe service for that
+alias. There is no gateway, request-driven activation, backend scheduler or
+automatic eviction.
 
 ## Services
 
@@ -82,7 +84,7 @@ eviction.
 | `llm-general` | llama.cpp | 8001 | disabled |
 | `vlm-general` | llama.cpp | 8002 | disabled |
 | `stt-general` | Speaches / Faster-Whisper | 8003 | enabled |
-| `tts-german` | Chatterbox multilingual | 8004 | enabled |
+| `tts-german` | Kokoro ONNX German Martin; Chatterbox fallback | 8004 | Kokoro enabled |
 | `vad-general` | Speaches / packaged Silero VAD | 8005 | enabled |
 | `ner-german` | KServe Hugging Face token classification | 8006 | disabled |
 | `image-generation-general` | catalog only | none | unavailable |
@@ -95,10 +97,18 @@ The alias in the table is also the stable client-facing model name. Runtime
 configuration maps it to the selected artifact or upstream model identifier, so
 changing an assignment does not require a client configuration change.
 
-vLLM, llama.cpp and Speaches enforce the configured bearer key. The selected
-upstream Chatterbox and KServe servers do not provide equivalent authentication;
-keep their ports bound to loopback or a trusted private interface until a separate
-authenticated client boundary is adopted.
+vLLM, llama.cpp and Speaches enforce the configured bearer key. Kokoro,
+Chatterbox and KServe do not provide equivalent authentication; keep their ports
+bound to loopback or a trusted private interface until a separate authenticated
+client boundary is adopted.
+
+The package-owned Kokoro runtime contains no model weights. `images` builds its
+locked `linux/amd64` image through
+`INFERENCE_RUNTIME_MANAGER_BUILD_DOCKER_CONTEXT` (default `desktop-linux`), rejects
+SSH/TCP build contexts, and writes the verified Docker archive directly to external
+storage. The pinned Martin ONNX model, voice and German normalization files remain
+a separately verified model artifact mounted at runtime. Existing Chatterbox voice
+recordings remain preserved when Martin is selected.
 
 ## Manual Checks
 

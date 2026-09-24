@@ -18,6 +18,7 @@ from inference_runtime_manager.installer.docker import DeploymentSettings, Docke
 from inference_runtime_manager.installer.images import download_images
 from inference_runtime_manager.installer.upload import provision
 from inference_runtime_manager.installer.voice import menu as voice
+from inference_runtime_manager.installer.voice import voice_cloning_available
 
 
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
@@ -47,8 +48,6 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "storage": "storage_status",
     }
     if action in download_actions:
-        if action == "download":
-            download_images(Settings())
         downloads(download_actions[action])
         return
     if action == "downloads":
@@ -116,7 +115,11 @@ def menu() -> None:
         questionary.Choice("Download runtime image bundle", value="images"),
         questionary.Choice("Install/update runtime images", value="install"),
         questionary.Choice("Server status", value="status"),
-        questionary.Choice("Record and provision default TTS voice", value="voice"),
+        *(
+            [questionary.Choice("Record and provision default TTS voice", value="voice")]
+            if voice_cloning_available()
+            else []
+        ),
         questionary.Separator(" "),
         questionary.Choice("Exit", value="exit"),
     ]
