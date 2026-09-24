@@ -21,7 +21,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.api_tests import request, validate_wav
-from inference_runtime_manager.installer.assignments import assigned_recipe
+from inference_runtime_manager.installer.assignments import assigned_recipe, compose_services
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 
 RECORDING_SECONDS = 80
@@ -195,6 +195,26 @@ def _speech(docker: Docker, voice: str, text: str) -> bytes:
 
 def provision(docker: Docker, recording: Path, output: Path) -> None:
     preset = require_voice_cloning(docker.settings)
+    running = set(
+        docker.run(
+            "ps", "--status", "running", "--services", capture=True, text=True
+        ).stdout.splitlines()
+    )
+    alternatives = set(compose_services("tts-german")) - {preset["service"]}
+    if (
+        docker.worker(
+            {
+                "action": "active",
+                "alias": "tts-german",
+                "model_id": preset["model_id"],
+                "variant_id": preset["variant_id"],
+            }
+        )
+        != {"active": True}
+        or preset["service"] not in running
+        or alternatives & running
+    ):
+        raise ValueError("Apply the Chatterbox assignment before provisioning its voice")
     try:
         upload_candidate(docker, recording)
         docker.worker({"action": "configure"})

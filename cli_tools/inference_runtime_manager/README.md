@@ -47,12 +47,13 @@ packages. On macOS, install it separately with `brew install ffmpeg` if it is no
 already available.
 
 The manager uploads the WAV with SHA-256 verification into the persistent runtime
-configuration volume and recreates only `tts-german`. For comparison, the manager
-plays the original recording, Chatterbox reading the same full German script, and
-a short one-line test with the temporary candidate voice. The previous `default`
-voice is replaced atomically only after the operator accepts the comparison. Local
-recordings and generated samples remain in a temporary directory and are deleted
-when the workflow exits.
+configuration volume only after verifying that the assigned Chatterbox artifact is
+active and that Chatterbox is the sole running TTS recipe. It then recreates only
+`tts-german`. For comparison, the manager plays the original recording, Chatterbox
+reading the same full German script, and a short one-line test with the temporary
+candidate voice. The previous `default` voice is replaced atomically only after the
+operator accepts the comparison. Local recordings and generated samples remain in
+a temporary directory and are deleted when the workflow exits.
 
 The same flow is available as the following command, which rejects recipes without
 the `voice_cloning` capability:
