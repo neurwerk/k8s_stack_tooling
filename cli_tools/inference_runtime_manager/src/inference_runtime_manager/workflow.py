@@ -243,7 +243,11 @@ def deployment_status(remote: bool = False) -> None:
                 local,
                 remote_state,
                 "Enabled" if preset["enabled"] else "Disabled",
-                "Running" if alias in running else "Stopped" if docker else "Not checked",
+                "Running"
+                if preset["service"] in running
+                else "Stopped"
+                if docker
+                else "Not checked",
             ]
         )
     table(

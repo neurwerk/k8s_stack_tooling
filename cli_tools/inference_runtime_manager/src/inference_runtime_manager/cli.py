@@ -18,6 +18,7 @@ from inference_runtime_manager.installer.docker import DeploymentSettings, Docke
 from inference_runtime_manager.installer.images import download_images
 from inference_runtime_manager.installer.upload import provision
 from inference_runtime_manager.installer.voice import menu as voice
+from inference_runtime_manager.installer.voice import voice_cloning_available
 
 
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
@@ -47,8 +48,6 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "storage": "storage_status",
     }
     if action in download_actions:
-        if action == "download":
-            download_images(Settings())
         downloads(download_actions[action])
         return
     if action == "downloads":
@@ -92,35 +91,39 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
 
 
 def menu() -> None:
-    choices = [
-        questionary.Separator("── Models ──"),
-        questionary.Choice("1. Browse catalog / select downloads", value="select"),
-        questionary.Choice("2. Download selected models", value="download"),
-        questionary.Choice("3. Upload downloaded models (files only)", value="stage"),
-        questionary.Choice("4. Assign uploaded models to aliases", value="assign"),
-        questionary.Choice("5. Enable / disable a service", value="toggle"),
-        questionary.Choice("6. Review / apply assignments", value="apply"),
-        questionary.Separator(" "),
-        questionary.Separator("── Manual Tests ──"),
-        questionary.Choice("7. Test endpoints", value="manual-tests"),
-        questionary.Separator(" "),
-        questionary.Separator("── Inventory ──"),
-        questionary.Choice("Deployment table (offline)", value="plan"),
-        questionary.Choice("Verify remote model files", value="remote"),
-        questionary.Choice("Download queue", value="queue"),
-        questionary.Choice("Downloaded inventory", value="inventory"),
-        questionary.Separator(" "),
-        questionary.Separator("── Setup ──"),
-        questionary.Choice("Hugging Face login", value="login"),
-        questionary.Choice("Storage status", value="storage"),
-        questionary.Choice("Download runtime image bundle", value="images"),
-        questionary.Choice("Install/update runtime images", value="install"),
-        questionary.Choice("Server status", value="status"),
-        questionary.Choice("Record and provision default TTS voice", value="voice"),
-        questionary.Separator(" "),
-        questionary.Choice("Exit", value="exit"),
-    ]
     while True:
+        choices = [
+            questionary.Separator("── Models ──"),
+            questionary.Choice("1. Browse catalog / select downloads", value="select"),
+            questionary.Choice("2. Download selected models", value="download"),
+            questionary.Choice("3. Upload downloaded models (files only)", value="stage"),
+            questionary.Choice("4. Assign uploaded models to aliases", value="assign"),
+            questionary.Choice("5. Enable / disable a service", value="toggle"),
+            questionary.Choice("6. Review / apply assignments", value="apply"),
+            questionary.Separator(" "),
+            questionary.Separator("── Manual Tests ──"),
+            questionary.Choice("7. Test endpoints", value="manual-tests"),
+            questionary.Separator(" "),
+            questionary.Separator("── Inventory ──"),
+            questionary.Choice("Deployment table (offline)", value="plan"),
+            questionary.Choice("Verify remote model files", value="remote"),
+            questionary.Choice("Download queue", value="queue"),
+            questionary.Choice("Downloaded inventory", value="inventory"),
+            questionary.Separator(" "),
+            questionary.Separator("── Setup ──"),
+            questionary.Choice("Hugging Face login", value="login"),
+            questionary.Choice("Storage status", value="storage"),
+            questionary.Choice("Download runtime image bundle", value="images"),
+            questionary.Choice("Install/update runtime images", value="install"),
+            questionary.Choice("Server status", value="status"),
+            *(
+                [questionary.Choice("Record and provision default TTS voice", value="voice")]
+                if voice_cloning_available()
+                else []
+            ),
+            questionary.Separator(" "),
+            questionary.Choice("Exit", value="exit"),
+        ]
         action = questionary.select("Inference Runtime Manager", choices=choices).ask()
         if action in (None, "exit"):
             return

@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from inference_runtime_manager.downloader.catalog import load_catalog
-from inference_runtime_manager.installer.docker import services
+from inference_runtime_manager.installer.docker import service_recipes, services
 
 ALIAS_CATEGORIES = {
     "llm-general": "llm",
@@ -41,15 +41,44 @@ class Deployment(BaseModel):
 
 def recipe(alias: str, model_id: str, variant_id: str) -> dict[str, Any]:
     """Return the reviewed service recipe for one alias/model combination."""
-    preset = services().get(alias)
-    if preset is None or (preset["model_id"], preset["variant_id"]) != (model_id, variant_id):
+    matches = [
+        preset
+        for preset in service_recipes().get(alias, [])
+        if (preset["model_id"], preset["variant_id"]) == (model_id, variant_id)
+    ]
+    if len(matches) != 1:
         raise ValueError(
             f"No reviewed standalone runtime recipe for {alias}: {model_id}/{variant_id}"
         )
+    preset = matches[0]
     model = load_catalog().model(model_id)
     if model.category != ALIAS_CATEGORIES[alias]:
         raise ValueError(f"Model category does not match {alias}")
     return copy.deepcopy(preset)
+
+
+def compose_services(alias: str) -> tuple[str, ...]:
+    """Return all mutually exclusive Compose services for one stable alias."""
+    recipes = service_recipes().get(alias)
+    if recipes is None:
+        raise ValueError(f"Unknown deployment alias: {alias}")
+    result = []
+    for preset in recipes:
+        service = preset["service"]
+        if not isinstance(service, str):
+            raise ValueError(f"Service {alias} has an invalid Compose service name")
+        result.append(service)
+    return tuple(result)
+
+
+def assigned_recipe(root: Path, target: str, alias: str) -> dict[str, Any] | None:
+    """Return the explicitly assigned recipe, including its desired enabled state."""
+    choice = load_deployment(root, target).assignments.get(alias)
+    if choice is None:
+        return None
+    preset = recipe(alias, choice.model_id, choice.variant_id)
+    preset["enabled"] = choice.enabled
+    return preset
 
 
 def load_deployment(root: Path, target: str | None = None) -> Deployment:

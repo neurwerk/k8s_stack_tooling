@@ -48,6 +48,34 @@ models:
         compatibilityNotes: Requires QwenImage21Pipeline. No standalone deployment recipe yet.
         runtimeNotes: Upstream requires recent Diffusers and Transformers >=5.17. Full repository is about 31 GiB; CPU offload and 16 GB GPU feasibility need validation.
 
+  - id: kokoro-german-martin
+    category: tts
+    displayName: Kokoro 82M German Martin (ONNX)
+    description: Fast fixed-voice German speech synthesis for the dedicated CPU ONNX runtime.
+    recommended: true
+    source: Godelaune/Kokoro-82M-ONNX-German-Martin
+    revision: a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin
+      commercialUse: true
+      noticeRequired: true
+      notes: Credit the Martin voice, Kokoro, Kikiri TTS, and the ONNX export as listed in the model card.
+    metadata:
+      architecture: kokoro-82m-onnx-single-speaker
+      parameterCount: 82M
+      languages: [de]
+      intendedUse: german-text-to-speech
+    variants:
+      - id: onnx
+        runtimes: [kokoro-onnx]
+        compatibilityNotes: Reviewed for the package-owned CPU runtime; target latency and quality remain to be exercised.
+        format: onnx
+        precision: fp32
+        estimatedDownloadBytes: 327000000
+        include: [kokoro-martin.onnx, voices-martin.npz, german_text_rules.py, onnx-docker/tts_normalizer.py, README.md]
+        runtimeNotes: Fixed Martin voice with German normalization. This recipe does not support voice cloning.
+
   - id: chatterbox-multilingual-v2
     category: tts
     displayName: Chatterbox Multilingual V2

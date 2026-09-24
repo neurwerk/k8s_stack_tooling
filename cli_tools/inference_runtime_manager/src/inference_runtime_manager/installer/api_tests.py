@@ -18,21 +18,11 @@ from typing import Any
 import questionary
 
 from inference_runtime_manager.downloader.config import Settings
-from inference_runtime_manager.installer.assignments import load_deployment
+from inference_runtime_manager.installer.assignments import assigned_recipe, load_deployment
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 
 LIMIT = 16 * 1024 * 1024
 SENTENCE = "Guten Tag. Dies ist ein kurzer Test."
-
-ENDPOINTS = {
-    "vlm-documents": (8000, "/health", "python3"),
-    "llm-general": (8000, "/health", "curl"),
-    "vlm-general": (8000, "/health", "curl"),
-    "stt-general": (8000, "/health", "python"),
-    "tts-german": (8004, "/api/ui/initial-data", "python3"),
-    "vad-general": (8000, "/health", "python"),
-    "ner-german": (8080, "/v1/models/ner-german", "python"),
-}
 
 ORDER = [
     "vlm-documents",
@@ -87,13 +77,18 @@ def sample_image() -> bytes:
 
 def request(
     docker: Docker,
-    service: str,
+    alias: str,
     path: str,
     *,
     payload: dict[str, Any] | None = None,
     audio: bytes | None = None,
 ) -> bytes:
-    port, _, transport = ENDPOINTS[service]
+    preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
+    if preset is None or not preset["enabled"]:
+        raise ValueError(f"{alias} is not enabled")
+    service = preset["service"]
+    port = preset["internal_port"]
+    transport = preset["transport"]
     if transport == "curl":
         if audio is not None:
             raise ValueError("llama.cpp endpoints do not accept audio")
@@ -147,7 +142,7 @@ except urllib.error.HTTPError as error:
     data, status = error.read(16777217), error.code
 sys.stdout.buffer.write(data + b"\n" + str(status).encode())
 """
-        fields = {"model": "stt-general"} if service == "stt-general" else {}
+        fields = {"model": "stt-general"} if alias == "stt-general" else {}
         data = (
             json.dumps(
                 {
@@ -175,7 +170,9 @@ sys.stdout.buffer.write(data + b"\n" + str(status).encode())
     )
     body, _, code = result.stdout.rpartition(b"\n")
     status = int(code) if code.isdigit() else 0
-    print(f"{service}: HTTP {status or 'unavailable'} in {time.monotonic() - started:.1f}s")
+    print(
+        f"{alias} ({service}): HTTP {status or 'unavailable'} in {time.monotonic() - started:.1f}s"
+    )
     if result.returncode:
         raise ValueError(result.stderr.decode(errors="replace")[-2000:])
     if not 200 <= status < 300:
@@ -192,6 +189,7 @@ def validate_wav(data: bytes) -> None:
 
 
 def synthesize_tts(docker: Docker, text: str) -> bytes:
+    started = time.monotonic()
     speech = request(
         docker,
         "tts-german",
@@ -205,12 +203,18 @@ def synthesize_tts(docker: Docker, text: str) -> bytes:
         },
     )
     validate_wav(speech)
+    with wave.open(io.BytesIO(speech)) as audio:
+        duration = audio.getnframes() / audio.getframerate()
+    elapsed = time.monotonic() - started
+    print(f"tts-german: {duration:.1f}s audio, real-time factor {elapsed / duration:.2f}")
     return speech
 
 
 def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | None:
-    _, health, _ = ENDPOINTS[alias]
-    request(docker, alias, health)
+    preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
+    if preset is None:
+        raise ValueError(f"{alias} has no saved assignment")
+    request(docker, alias, preset["health_path"])
     if alias in {"llm-general", "vlm-general", "vlm-documents"}:
         content: str | list[dict[str, Any]] = "Say hello briefly."
         if alias != "llm-general":
@@ -324,8 +328,12 @@ def tts_menu() -> None:
             continue
 
         docker = enabled_docker("tts-german")
-        _, health, _ = ENDPOINTS["tts-german"]
-        request(docker, "tts-german", health)
+        preset = assigned_recipe(
+            Settings().storage_root, docker.settings.docker_context, "tts-german"
+        )
+        if preset is None:
+            raise ValueError("tts-german has no saved assignment")
+        request(docker, "tts-german", preset["health_path"])
         speech = synthesize_tts(docker, text)
         output_directory = Path("runtime")
         output_directory.mkdir(exist_ok=True)

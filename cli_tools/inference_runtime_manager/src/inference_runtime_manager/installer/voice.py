@@ -12,13 +12,16 @@ import tempfile
 import time
 import wave
 from pathlib import Path
+from typing import Any
 
 import questionary
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
+from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.api_tests import request, validate_wav
+from inference_runtime_manager.installer.assignments import assigned_recipe, compose_services
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 
 RECORDING_SECONDS = 80
@@ -191,6 +194,27 @@ def _speech(docker: Docker, voice: str, text: str) -> bytes:
 
 
 def provision(docker: Docker, recording: Path, output: Path) -> None:
+    preset = require_voice_cloning(docker.settings)
+    running = set(
+        docker.run(
+            "ps", "--status", "running", "--services", capture=True, text=True
+        ).stdout.splitlines()
+    )
+    alternatives = set(compose_services("tts-german")) - {preset["service"]}
+    if (
+        docker.worker(
+            {
+                "action": "active",
+                "alias": "tts-german",
+                "model_id": preset["model_id"],
+                "variant_id": preset["variant_id"],
+            }
+        )
+        != {"active": True}
+        or preset["service"] not in running
+        or alternatives & running
+    ):
+        raise ValueError("Apply the Chatterbox assignment before provisioning its voice")
     try:
         upload_candidate(docker, recording)
         docker.worker({"action": "configure"})
@@ -203,7 +227,7 @@ def provision(docker: Docker, recording: Path, output: Path) -> None:
             "--wait",
             "--wait-timeout",
             "300",
-            "tts-german",
+            preset["service"],
         )
         short_output = output.with_name("generated-short.wav")
         print("Generating the full comparison reading...")
@@ -237,7 +261,28 @@ def provision(docker: Docker, recording: Path, output: Path) -> None:
         raise
 
 
+def require_voice_cloning(settings: DeploymentSettings | None = None) -> dict[str, Any]:
+    settings = settings or DeploymentSettings()
+    preset = assigned_recipe(Settings().storage_root, settings.docker_context, "tts-german")
+    if (
+        preset is None
+        or not preset["enabled"]
+        or "voice_cloning" not in preset.get("capabilities", [])
+    ):
+        raise ValueError("The active tts-german assignment does not support voice cloning")
+    return preset
+
+
+def voice_cloning_available() -> bool:
+    try:
+        require_voice_cloning()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def menu() -> None:
+    require_voice_cloning()
     Console().print(
         Panel(
             GERMAN_SCRIPT,

@@ -216,6 +216,32 @@ def activate(payload):
         temporary.unlink(missing_ok=True)
 
 
+def active(payload):
+    alias = payload["alias"]
+    model_id = payload["model_id"]
+    variant_id = payload["variant_id"]
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", alias) or not all(
+        re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value) for value in (model_id, variant_id)
+    ):
+        raise ValueError("Invalid active model identity")
+    link = ROOT / "active" / alias
+    if not link.is_symlink():
+        return False
+    target = link.resolve()
+    try:
+        relative_target = target.relative_to(ROOT)
+    except ValueError:
+        return False
+    parts = relative_target.parts
+    return bool(
+        target.is_dir()
+        and len(parts) == 5
+        and parts[0] == "library"
+        and parts[1] == model_id
+        and parts[3] == variant_id
+    )
+
+
 def configure():
     chatterbox = b"""server:\n  host: 0.0.0.0\n  port: 8004\n  use_ngrok: false\n  use_auth: false\n  log_file_path: /tmp/chatterbox.log\nmodel:\n  repo_id: chatterbox-multilingual\ntts_engine:\n  device: cuda\n  predefined_voices_path: /runtime-config/voices\n  reference_audio_path: /tmp/reference_audio\n  default_voice_id: default\npaths:\n  model_cache: /models/cache\n  output: /tmp/outputs\ngeneration_defaults:\n  temperature: 0.8\n  exaggeration: 1.0\n  cfg_weight: 0.5\n  seed: 0\n  speed_factor: 1.0\n  language: de\naudio_output:\n  format: wav\n  sample_rate: 24000\n  max_reference_duration_sec: 30\n  save_to_disk: false\nui:\n  title: Chatterbox TTS Server\n  show_language_select: true\n  max_predefined_voices_in_dropdown: 0\ndebug:\n  save_intermediate_audio: false\n"""
     VOICE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -245,6 +271,8 @@ def main():
         elif action == "activate":
             activate(payload)
             result = {"activated": payload["alias"]}
+        elif action == "active":
+            result = {"active": active(payload)}
         elif action == "configure":
             configure()
             result = {"configured": True}

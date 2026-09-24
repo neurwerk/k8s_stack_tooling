@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     hf_home: Path = Field(
         validation_alias=AliasChoices("HF_HOME", "MEDIA_DOWNLOADER_UPLOADER_HF_HOME"),
     )
+    build_docker_context: str = Field(
+        default="desktop-linux",
+        validation_alias="INFERENCE_RUNTIME_MANAGER_BUILD_DOCKER_CONTEXT",
+        min_length=1,
+    )
 
     @field_validator("storage_root", "hf_home")
     @classmethod
