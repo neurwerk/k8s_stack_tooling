@@ -123,6 +123,18 @@ STT, VAD or NER as applicable. TTS output can feed the speech checks, or the
 operator can select a local WAV. A successful response proves endpoint structure,
 not model quality or GPU fit.
 
+Each manual check prints the assigned catalog model name, model ID, variant,
+runtime, Docker context and service. It also checks whether the remote active
+model files match the assignment; this is distinct from a response-reported model
+(which may only be the stable endpoint alias). The test-all summary includes the
+assigned model for each result. A mismatch means the response's underlying model
+cannot be verified from the saved assignment alone.
+
+The standard and custom-text TTS checks save the generated WAV and then play it
+locally, including during test-all. Playback uses `afplay` on macOS or `ffplay`
+elsewhere. If no player is available or playback fails, the saved WAV remains
+available and successful generation still passes its endpoint check.
+
 ## GPU Notes
 
 GPU services use `gpus: all` and `NVIDIA_DRIVER_CAPABILITIES=compute,utility`.
