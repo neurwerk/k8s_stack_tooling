@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -132,6 +132,67 @@ class Docker:
             stdout=subprocess.PIPE if capture else None,
             **kwargs,
         )
+
+    def running_services(self) -> set[str]:
+        return set(
+            self.run(
+                "ps", "--status", "running", "--services", capture=True, text=True
+            ).stdout.splitlines()
+        )
+
+    def service_status(self) -> dict[str, tuple[str, str, str]]:
+        """Return Compose service state, health and image in a single remote query."""
+        output = self.run("ps", "--all", "--format", "json", capture=True, text=True).stdout
+        if not output.strip():
+            return {}
+        parsed = (
+            json.loads(output)
+            if output.lstrip().startswith("[")
+            else [json.loads(line) for line in output.splitlines() if line.strip()]
+        )
+        missing_images = [item["ID"] for item in parsed if not item.get("Image")]
+        inspected = {}
+        if missing_images:
+            result = subprocess.run(
+                self.docker_command + ["inspect", *missing_images],
+                env=self.environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            inspected = {
+                container["Id"]: container["Config"]["Image"]
+                for container in json.loads(result.stdout)
+            }
+        return {
+            item["Service"]: (
+                item.get("State", "unknown"),
+                item.get("Health") or "unknown",
+                item.get("Image") or inspected.get(item["ID"], ""),
+            )
+            for item in parsed
+        }
+
+    def image_matches(self, runtime: str, image: str) -> bool:
+        key = {
+            "vllm": "VLLM_IMAGE",
+            "llama.cpp": "LLAMACPP_IMAGE",
+            "speaches": "SPEACHES_IMAGE",
+            "chatterbox": "CHATTERBOX_IMAGE",
+            "kokoro-onnx": "KOKORO_IMAGE",
+            "kserve": "KSERVE_IMAGE",
+        }[runtime]
+        return image.removeprefix("docker.io/") == self.environment[key].removeprefix("docker.io/")
+
+    def active_identity(self, alias: str, service: str) -> tuple[str, str] | None:
+        """Read the active model link from an already running service, without a setup container."""
+        link = self.run(
+            "exec", "-T", service, "readlink", f"/models/active/{alias}", capture=True, text=True
+        ).stdout.strip()
+        parts = PurePosixPath(link).parts
+        if len(parts) != 7 or parts[:3] != ("/", "models", "library"):
+            return None
+        return parts[3], parts[5]
 
     def worker_command(self) -> list[str]:
         source = Path(__file__).with_name("worker.py").read_text(encoding="utf-8")

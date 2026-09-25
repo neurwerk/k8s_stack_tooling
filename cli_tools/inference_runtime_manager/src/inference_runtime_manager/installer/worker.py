@@ -129,6 +129,21 @@ def inspect(manifest):
     return True
 
 
+def present(manifest):
+    """Check a previously verified receipt and file sizes without re-hashing model weights."""
+    validate(manifest)
+    target = safe(ROOT, manifest["destination"])
+    if not target.is_dir():
+        return False
+    if json.loads(safe(target, ".receipt.json").read_text()) != manifest:
+        raise ValueError("Conflicting remote artifact; existing data preserved")
+    for item in manifest["files"]:
+        path = safe(target, item["path"])
+        if not path.is_file() or path.stat().st_size != item["size"]:
+            return False
+    return True
+
+
 def receive(manifest):
     validate(manifest)
     target = safe(ROOT, manifest["destination"])
@@ -190,7 +205,7 @@ def cache_view(repo, revision, target, records, base=None):
 
 def activate(payload):
     manifest = payload["manifest"]
-    if not inspect(manifest):
+    if not present(manifest):
         raise ValueError("Model must be fully staged before activation")
     alias = payload["alias"]
     if not re.fullmatch(r"[a-z][a-z0-9-]*", alias):
@@ -265,6 +280,8 @@ def main():
         action = payload["action"]
         if action == "inspect":
             result = {"present": inspect(payload["manifest"])}
+        elif action == "present":
+            result = {"present": present(payload["manifest"])}
         elif action == "receive":
             receive(payload["manifest"])
             result = {"published": True}
