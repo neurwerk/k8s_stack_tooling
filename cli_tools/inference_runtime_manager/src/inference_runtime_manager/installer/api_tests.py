@@ -44,26 +44,29 @@ def model_label(preset: dict[str, Any]) -> str:
     )
 
 
-def describe_assignment(docker: Docker, alias: str, preset: dict[str, Any]) -> None:
+def describe_assignment(
+    docker: Docker, alias: str, preset: dict[str, Any], running: set[str] | None = None
+) -> None:
     print(f"{alias}: assigned model: {model_label(preset)}")
     print(f"Docker context: {docker.settings.docker_context}; service: {preset['service']}")
+    running = running if running is not None else docker.running_services()
+    if preset["service"] not in running:
+        raise ValueError(
+            f"{alias}: assigned service is stopped. Choose 6. Review / apply assignments "
+            "to start it, then retry the test."
+        )
     try:
-        active = docker.worker(
-            {
-                "action": "active",
-                "alias": alias,
-                "model_id": preset["model_id"],
-                "variant_id": preset["variant_id"],
-            }
-        ) == {"active": True}
+        identity = docker.active_identity(alias, preset["service"])
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"Remote active model files: could not verify ({exc})")
     else:
-        print(
-            "Remote active model files: match assignment"
-            if active
-            else "Remote active model files: do not match assignment; response model is unverified"
-        )
+        expected = preset["model_id"], preset["variant_id"]
+        if identity == expected:
+            print("Remote active model: matches assignment")
+        elif identity is not None:
+            print(f"Remote active model: {identity[0]}/{identity[1]} (does not match assignment)")
+        else:
+            print("Remote active model: could not identify the model link")
 
 
 def read_sample(path: str) -> bytes:
@@ -113,6 +116,7 @@ def request(
     *,
     payload: dict[str, Any] | None = None,
     audio: bytes | None = None,
+    timing: dict[str, float] | None = None,
 ) -> bytes:
     preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
     if preset is None or not preset["enabled"]:
@@ -131,7 +135,7 @@ def request(
         if payload is not None:
             script += '-H "Content-Type: application/json" --data-binary @- '
             data = json.dumps(payload).encode()
-        script += f"--write-out '\n%{{http_code}}' http://127.0.0.1:{port}{path}"
+        script += f"--write-out '\n%{{http_code}} %{{time_total}}' http://127.0.0.1:{port}{path}"
         command = docker.command + [
             "exec",
             "-T",
@@ -144,7 +148,7 @@ def request(
         ]
     else:
         script = r"""
-import json, os, sys, urllib.error, urllib.request, uuid
+import json, os, sys, time, urllib.error, urllib.request, uuid
 request = json.loads(sys.stdin.buffer.readline())
 headers = {}
 key = os.environ.get("INFERENCE_API_KEY")
@@ -166,12 +170,17 @@ elif request["payload"] is not None:
     body = json.dumps(request["payload"]).encode()
     headers["Content-Type"] = "application/json"
 req = urllib.request.Request(request["url"], data=body, headers=headers)
+started = time.monotonic()
 try:
     with urllib.request.urlopen(req, timeout=300) as response:
         data, status = response.read(16777217), response.status
+        generation = response.headers.get("X-Generation-Time-Ms")
 except urllib.error.HTTPError as error:
     data, status = error.read(16777217), error.code
-sys.stdout.buffer.write(data + b"\n" + str(status).encode())
+    generation = error.headers.get("X-Generation-Time-Ms")
+elapsed_ms = (time.monotonic() - started) * 1000
+metadata = {"status": status, "service_http_ms": elapsed_ms, "generation_ms": generation}
+sys.stdout.buffer.write(data + b"\n" + json.dumps(metadata).encode())
 """
         fields = {"model": "stt-general"} if alias == "stt-general" else {}
         data = (
@@ -199,13 +208,36 @@ sys.stdout.buffer.write(data + b"\n" + str(status).encode())
     result = subprocess.run(
         command, env=docker.environment, input=data, capture_output=True, timeout=330, check=False
     )
-    body, _, code = result.stdout.rpartition(b"\n")
-    status = int(code) if code.isdigit() else 0
-    print(
-        f"{alias} ({service}): HTTP {status or 'unavailable'} in {time.monotonic() - started:.1f}s"
-    )
+    docker_ms = (time.monotonic() - started) * 1000
     if result.returncode:
-        raise ValueError(result.stderr.decode(errors="replace")[-2000:])
+        raise ValueError(
+            f"{alias}: Docker request failed after {docker_ms:.0f} ms: "
+            f"{result.stderr.decode(errors='replace')[-2000:]}"
+        )
+    body, _, trailer = result.stdout.rpartition(b"\n")
+    status = 0
+    service_ms = None
+    generation_ms = None
+    if transport == "curl":
+        values = trailer.split()
+        if len(values) == 2 and values[0].isdigit():
+            status, service_ms = int(values[0]), float(values[1]) * 1000
+    elif trailer:
+        metadata = json.loads(trailer)
+        status = metadata["status"]
+        service_ms = metadata["service_http_ms"]
+        generation_ms = metadata["generation_ms"]
+    if timing is not None:
+        timing["docker_ms"] = docker_ms
+        if service_ms is not None:
+            timing["service_http_ms"] = float(service_ms)
+        if generation_ms is not None:
+            timing["generation_ms"] = float(generation_ms)
+    print(
+        f"{alias} ({service}): HTTP {status or 'unavailable'}; "
+        f"Docker roundtrip {docker_ms:.0f} ms"
+        + (f", service HTTP {service_ms:.0f} ms" if service_ms is not None else "")
+    )
     if not 200 <= status < 300:
         raise ValueError(f"HTTP {status}: {body.decode(errors='replace')[:2000]}")
     if len(body) > LIMIT:
@@ -220,15 +252,20 @@ def validate_wav(data: bytes) -> None:
 
 
 def play_saved_wav(path: Path) -> None:
-    print(f"Playing {path} locally...")
+    print(f"Playing {path} locally (Ctrl+C skips playback)...")
+    started = time.monotonic()
     try:
         play(path)
+    except KeyboardInterrupt:
+        print("Playback skipped; WAV remains saved.")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"Could not play WAV: {exc}. Audio remains saved at {path}")
+    finally:
+        print(f"Playback time: {(time.monotonic() - started) * 1000:.0f} ms")
 
 
 def synthesize_tts(docker: Docker, text: str) -> bytes:
-    started = time.monotonic()
+    timing: dict[str, float] = {}
     speech = request(
         docker,
         "tts-german",
@@ -240,20 +277,44 @@ def synthesize_tts(docker: Docker, text: str) -> bytes:
             "response_format": "wav",
             "language": "de",
         },
+        timing=timing,
     )
     validate_wav(speech)
     with wave.open(io.BytesIO(speech)) as audio:
         duration = audio.getnframes() / audio.getframerate()
-    elapsed = time.monotonic() - started
-    print(f"tts-german: {duration:.1f}s audio, real-time factor {elapsed / duration:.2f}")
+        channels, sample_rate, bit_depth = (
+            audio.getnchannels(),
+            audio.getframerate(),
+            audio.getsampwidth() * 8,
+        )
+    generation_ms = timing.get("generation_ms")
+    if generation_ms is not None:
+        print(f"tts-german: model generation {generation_ms:.0f} ms (reported by runtime)")
+    else:
+        print("tts-german: model-only generation time unavailable from this runtime")
+    elapsed_ms = (
+        generation_ms
+        if generation_ms is not None
+        else timing.get("service_http_ms", timing["docker_ms"])
+    )
+    channel_label = {1: "mono", 2: "stereo"}.get(channels, f"{channels} channels")
+    print(
+        f"tts-german: {len(text):,} input characters → {duration:.2f}s WAV, {len(speech):,} bytes "
+        f"({len(speech) / (1024 * 1024):.2f} MiB), {sample_rate:,} Hz, "
+        f"{channel_label}, {bit_depth}-bit; "
+        f"real-time factor {elapsed_ms / (duration * 1000):.2f} "
+        f"({'generation' if generation_ms is not None else 'service HTTP'})"
+    )
     return speech
 
 
-def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | None:
+def test_service(
+    docker: Docker, alias: str, speech: bytes | None, running: set[str] | None = None
+) -> bytes | None:
     preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
     if preset is None:
         raise ValueError(f"{alias} has no saved assignment")
-    describe_assignment(docker, alias, preset)
+    describe_assignment(docker, alias, preset, running)
     request(docker, alias, preset["health_path"])
     if alias in {"llm-general", "vlm-general", "vlm-documents"}:
         content: str | list[dict[str, Any]] = "Say hello briefly."
@@ -284,12 +345,14 @@ def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | No
             print(f"{alias}: response-reported model: {value['model']} (may be an alias)")
     elif alias == "tts-german":
         speech = synthesize_tts(docker, SENTENCE)
+        started = time.monotonic()
         with tempfile.NamedTemporaryFile(
             prefix="inference-speech-", suffix=".wav", delete=False
         ) as file:
             file.write(speech)
             output = Path(file.name)
         print(f"tts-german: audio saved to {output}")
+        print(f"WAV save time: {(time.monotonic() - started) * 1000:.0f} ms")
         play_saved_wav(output)
     elif alias == "stt-general":
         if speech is None:
@@ -384,8 +447,10 @@ def tts_menu() -> None:
         output_directory.mkdir(exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         output = output_directory / f"tts-custom-{timestamp}.wav"
+        started = time.monotonic()
         output.write_bytes(speech)
         print(f"tts-german: audio saved to {output.resolve()}")
+        print(f"WAV save time: {(time.monotonic() - started) * 1000:.0f} ms")
         play_saved_wav(output.resolve())
 
 
@@ -435,6 +500,7 @@ def menu() -> None:
     ).ask():
         return
     print("Requests execute inside each remote service container against its loopback port.")
+    running = docker.running_services()
     results = []
     for alias in enabled:
         preset = assigned_recipe(root, docker.settings.docker_context, alias)
@@ -442,7 +508,7 @@ def menu() -> None:
             raise ValueError(f"{alias} has no saved assignment")
         identity = f"{alias} — assigned model: {model_label(preset)}"
         try:
-            speech = test_service(docker, alias, speech)
+            speech = test_service(docker, alias, speech, running)
             results.append(f"PASS {identity}")
         except (OSError, ValueError, wave.Error, subprocess.SubprocessError) as exc:
             results.append(f"FAIL {identity}: {exc}")

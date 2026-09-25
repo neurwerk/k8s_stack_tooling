@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import threading
+import time
 import wave
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -128,8 +129,13 @@ def voices() -> dict[str, list[str]]:
 
 @app.post("/v1/audio/speech")
 async def speech(request: SpeechRequest) -> Response:
+    started = time.monotonic()
     try:
         audio = await run_in_threadpool(synthesize, request.input, request.speed)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return Response(audio, media_type="audio/wav")
+    return Response(
+        audio,
+        media_type="audio/wav",
+        headers={"X-Generation-Time-Ms": f"{(time.monotonic() - started) * 1000:.1f}"},
+    )

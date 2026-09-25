@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,9 @@ from inference_runtime_manager.installer.docker import Docker
 from inference_runtime_manager.installer.worker import safe
 
 
-def prepare_artifact(root: Path, model_id: str, variant_id: str) -> tuple[Path, dict[str, Any]]:
+def prepare_artifact(
+    root: Path, model_id: str, variant_id: str, *, verify: bool = True
+) -> tuple[Path, dict[str, Any]]:
     model = load_catalog().model(model_id)
     variant = model.variant(variant_id)
     source_id = variant.source or model.source
@@ -65,7 +68,8 @@ def prepare_artifact(root: Path, model_id: str, variant_id: str) -> tuple[Path, 
         raise ValueError("Checksum index disagrees with artifact metadata")
     for record in artifact.files:
         safe(source, record.path)
-    verify_checksums(source, artifact.files)
+    if verify:
+        verify_checksums(source, artifact.files)
     records = [record.model_dump() for record in artifact.files]
     fingerprint = hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
     return source, {
@@ -102,8 +106,8 @@ def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any
 
 
 def transfer(docker: Docker, source: Path, manifest: dict[str, Any]) -> None:
-    if docker.worker({"action": "inspect", "manifest": manifest})["present"]:
-        print("Verified remote bundle already present; skipping upload.")
+    if docker.worker({"action": "present", "manifest": manifest})["present"]:
+        print("Previously verified remote bundle is present; skipping upload.")
         return
     process = subprocess.Popen(
         docker.worker_command(), env=docker.environment, stdin=subprocess.PIPE
@@ -140,7 +144,47 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
         raise ValueError("Unknown inference service")
     enabled = [alias for alias in aliases if configured[alias]["enabled"]]
     disabled = [alias for alias in aliases if not configured[alias]["enabled"]]
-    prepared = [prepare(root, alias) for alias in enabled]
+    states = docker.service_status() if docker is not None and not dry_run else {}
+    unchanged = []
+    changed = []
+    for alias in enabled:
+        preset = configured[alias]
+        alternatives = set(compose_services(alias)) - {preset["service"]}
+        state, health, image = states.get(preset["service"], ("", "", ""))
+        if (
+            docker is not None
+            and state == "running"
+            and health == "healthy"
+            and docker.image_matches(preset["runtime"], image)
+            and not any(
+                states.get(service, ("", "", ""))[0] == "running" for service in alternatives
+            )
+        ):
+            try:
+                active = docker.active_identity(alias, preset["service"])
+            except (OSError, subprocess.SubprocessError):
+                active = None
+            if active == (preset["model_id"], preset["variant_id"]):
+                unchanged.append(alias)
+                continue
+        changed.append(alias)
+    for alias in unchanged:
+        print(f"{alias}: healthy with matching model files and image; no restart needed.")
+    disabled = [
+        alias
+        for alias in disabled
+        if docker is None
+        or dry_run
+        or any(
+            states.get(service, ("", "", ""))[0] == "running" for service in compose_services(alias)
+        )
+    ]
+    prepared = []
+    for alias in changed:
+        print(f"{alias}: verifying local model checksums...", flush=True)
+        started = time.monotonic()
+        prepared.append(prepare(root, alias))
+        print(f"{alias}: local verification {time.monotonic() - started:.1f}s")
     for source, manifest, application in prepared:
         print(f"{application['alias']}: {source} -> /models/{manifest['destination']}")
         alternatives = set(compose_services(application["alias"])) - {application["service"]}
@@ -152,14 +196,20 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
         return
     if docker is None:
         raise ValueError("A Docker target is required for publication")
-    for source, manifest, _ in prepared:
+    for source, manifest, application in prepared:
+        print(f"{application['alias']}: checking remote bundle...", flush=True)
+        started = time.monotonic()
         transfer(docker, source, manifest)
+        print(f"Remote bundle check/upload: {time.monotonic() - started:.1f}s")
     for _, _, application in prepared:
         service = application["service"]
         alternatives = set(compose_services(application["alias"])) - {service}
         if alternatives:
             docker.run("stop", *sorted(alternatives))
+        started = time.monotonic()
         docker.worker(application)
+        print(f"{service}: activation {time.monotonic() - started:.1f}s")
+        started = time.monotonic()
         docker.run(
             "up",
             "--pull",
@@ -171,5 +221,8 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
             "300",
             service,
         )
+        print(f"{service}: startup/health {time.monotonic() - started:.1f}s")
     for alias in disabled:
         docker.run("stop", *compose_services(alias))
+    if not prepared and not disabled:
+        print("Remote deployment already matches the saved assignments.")

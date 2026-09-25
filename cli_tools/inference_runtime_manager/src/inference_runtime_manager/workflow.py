@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import time
 from pathlib import Path
 
 import questionary
@@ -26,6 +28,7 @@ from inference_runtime_manager.downloader.presentation import (
 from inference_runtime_manager.installer.assignments import (
     ALIAS_CATEGORIES,
     Assignment,
+    compose_services,
     deployment_services,
     load_deployment,
     recipe,
@@ -184,8 +187,8 @@ def assign_models() -> None:
         return
     entry, runtime = selected
     # Check actual publication, rather than trusting a previous upload receipt.
-    _, manifest = prepare_artifact(root, entry.model_id, entry.variant_id)
-    if not Docker(DeploymentSettings()).worker({"action": "inspect", "manifest": manifest})[
+    _, manifest = prepare_artifact(root, entry.model_id, entry.variant_id, verify=False)
+    if not Docker(DeploymentSettings()).worker({"action": "present", "manifest": manifest})[
         "present"
     ]:
         raise ValueError("Upload this model to the selected target before assigning it")
@@ -199,71 +202,128 @@ def assign_models() -> None:
         runtime=runtime,
     )
     save_deployment(root, deployment)
-    print("Saved locally. Choose Apply assignments to update the server.")
+    print(f"Saved {alias} locally for {target}.")
+    if questionary.confirm(f"Apply {alias} to {target} now?", default=False).ask():
+        from inference_runtime_manager.installer.upload import provision
+
+        provision(Docker(DeploymentSettings()), root, [alias])
+    else:
+        print("Choose Review / apply assignments when ready to update the server.")
 
 
-def deployment_status(remote: bool = False) -> None:
+def deployment_status(remote: bool = False, verify_remote: bool = False) -> None:
     root = storage()
+    if verify_remote and not remote:
+        raise ValueError("Remote verification requires a Docker context")
     configured = deployment_services(root)
     docker = Docker(DeploymentSettings()) if remote else None
-    running: set[str] = set()
+    deployment = load_deployment(root, docker.settings.docker_context if docker else None)
+    states: dict[str, tuple[str, str, str]] = {}
     if docker:
-        load_deployment(root, docker.settings.docker_context)
-        running = set(
-            docker.run(
-                "ps", "--status", "running", "--services", capture=True, text=True
-            ).stdout.splitlines()
-        )
+        states = docker.service_status()
     entries = {
         (e.model_id, e.variant_id): e for e in load_installed(root / "installed.yaml").installed
     }
     rows = []
     for alias in ALIAS_CATEGORIES:
-        preset = configured.get(alias)
-        if preset is None:
-            rows.append([alias, "—", "No service", "—", "Not checked", "Unavailable", "—"])
-            continue
-        key = preset["model_id"], preset["variant_id"]
+        assigned = alias in deployment.assignments
+        preset = configured.get(alias) if assigned else None
+        key = (preset["model_id"], preset["variant_id"]) if preset else None
         local = (
-            "Downloaded" if key in entries and (root / entries[key].path).is_dir() else "Missing"
+            "Downloaded"
+            if key in entries and (root / entries[key].path).is_dir()
+            else "Missing"
+            if key is not None
+            else "—"
         )
         remote_state = "Not checked"
-        if docker and local == "Downloaded":
+        if docker and verify_remote and key is not None and local == "Downloaded":
+            print(f"Fully verifying {alias} locally and on {docker.settings.docker_context}...")
+            started = time.monotonic()
             _, manifest = prepare_artifact(root, *key)
             remote_state = (
                 "Verified files"
                 if docker.worker({"action": "inspect", "manifest": manifest})["present"]
                 else "Missing"
             )
+            print(f"{alias}: full verification completed in {time.monotonic() - started:.1f}s")
+        elif docker and verify_remote and key is not None:
+            remote_state = "Local files missing"
+        observed = (
+            next(
+                (
+                    service
+                    for service in compose_services(alias)
+                    if states.get(service, ("", "", ""))[0] == "running"
+                ),
+                None,
+            )
+            if docker and alias in configured
+            else None
+        )
+        active = "—"
+        if observed and docker:
+            try:
+                identity = docker.active_identity(alias, observed)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                identity = None
+            active = (
+                "/".join(identity) + (" (matches)" if identity == key else " (differs)")
+                if identity is not None
+                else "Unknown"
+            )
+        service = preset["service"] if preset else "—"
+        state, health, image = states.get(observed or service, ("not created", "—", ""))
+        if observed and observed != service:
+            service = f"{observed} (other recipe)"
+        elif docker:
+            service = f"{service} ({state})"
+        if preset and observed == preset["service"] and image and docker:
+            if not docker.image_matches(preset["runtime"], image):
+                health += "; old image"
+        desired = (
+            f"{'ON' if preset['enabled'] else 'OFF'} {key[0]}/{key[1]} [{preset['runtime']}]"
+            if preset and key
+            else "Not assigned"
+        )
+        files = local if not verify_remote else f"Local: {local}; remote: {remote_state}"
         rows.append(
             [
                 alias,
-                "/".join(key),
-                preset["runtime"],
-                local,
-                remote_state,
-                "Enabled" if preset["enabled"] else "Disabled",
-                "Running"
-                if preset["service"] in running
-                else "Stopped"
-                if docker
-                else "Not checked",
+                desired,
+                active,
+                f"{service} / {health}" if docker else "Not checked",
+                files,
             ]
         )
     table(
-        "Deployment plan (not live model state)",
+        f"Deployment on {docker.settings.docker_context}" if docker else "Saved deployment plan",
         [
             "Alias",
-            "Assignment",
-            "Runtime",
-            "Local files",
-            "Remote files",
-            "Desired",
-            "Container",
+            "Desired assignment",
+            "Active model files",
+            "Service / health",
+            "Files",
         ],
         rows,
     )
-    print("File and container checks do not prove inference; use Test all enabled endpoints.")
+    if docker:
+        print(f"Docker context: {docker.settings.docker_context}")
+        for service, (state, _, image) in states.items():
+            if state == "running":
+                print(f"Running image for {service}: {image or 'unknown'}")
+        if (
+            "tts-german" in deployment.assignments
+            and configured["tts-german"]["runtime"] == "kokoro-onnx"
+        ):
+            print(
+                "Packaged Kokoro setup: CPUExecutionProvider, 4 intra-op / 1 inter-op threads; "
+                f"host {docker.settings.bind_address}:{docker.settings.tts_german_port}, "
+                "24 kHz mono PCM WAV output."
+            )
+    print(
+        "Active files and container health do not prove inference; use Test endpoints to check it."
+    )
 
 
 def toggle_service() -> None:
