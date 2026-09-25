@@ -22,6 +22,7 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.api_tests import request, validate_wav
 from inference_runtime_manager.installer.assignments import assigned_recipe, compose_services
+from inference_runtime_manager.installer.audio import play
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 
 RECORDING_SECONDS = 80
@@ -148,16 +149,6 @@ def validate_recording(path: Path) -> float:
     if frames == 0:
         raise ValueError("Recording is empty")
     return duration
-
-
-def play(path: Path) -> None:
-    player = shutil.which("afplay") if sys.platform == "darwin" else shutil.which("ffplay")
-    if player is None:
-        raise ValueError("No supported audio player found (`afplay` or `ffplay`)")
-    command = [player, str(path)]
-    if Path(player).name == "ffplay":
-        command = [player, "-nodisp", "-autoexit", "-loglevel", "error", str(path)]
-    subprocess.run(command, check=True)
 
 
 def upload_candidate(docker: Docker, path: Path) -> None:

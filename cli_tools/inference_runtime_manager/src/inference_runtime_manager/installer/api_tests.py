@@ -17,8 +17,10 @@ from typing import Any
 
 import questionary
 
+from inference_runtime_manager.downloader.catalog import load_catalog
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.assignments import assigned_recipe, load_deployment
+from inference_runtime_manager.installer.audio import play
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 
 LIMIT = 16 * 1024 * 1024
@@ -33,6 +35,35 @@ ORDER = [
     "vad-general",
     "ner-german",
 ]
+
+
+def model_label(preset: dict[str, Any]) -> str:
+    model = load_catalog().model(preset["model_id"])
+    return (
+        f"{model.display_name} ({preset['model_id']}/{preset['variant_id']}, {preset['runtime']})"
+    )
+
+
+def describe_assignment(docker: Docker, alias: str, preset: dict[str, Any]) -> None:
+    print(f"{alias}: assigned model: {model_label(preset)}")
+    print(f"Docker context: {docker.settings.docker_context}; service: {preset['service']}")
+    try:
+        active = docker.worker(
+            {
+                "action": "active",
+                "alias": alias,
+                "model_id": preset["model_id"],
+                "variant_id": preset["variant_id"],
+            }
+        ) == {"active": True}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"Remote active model files: could not verify ({exc})")
+    else:
+        print(
+            "Remote active model files: match assignment"
+            if active
+            else "Remote active model files: do not match assignment; response model is unverified"
+        )
 
 
 def read_sample(path: str) -> bytes:
@@ -188,6 +219,14 @@ def validate_wav(data: bytes) -> None:
             raise ValueError("TTS returned empty audio")
 
 
+def play_saved_wav(path: Path) -> None:
+    print(f"Playing {path} locally...")
+    try:
+        play(path)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"Could not play WAV: {exc}. Audio remains saved at {path}")
+
+
 def synthesize_tts(docker: Docker, text: str) -> bytes:
     started = time.monotonic()
     speech = request(
@@ -214,6 +253,7 @@ def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | No
     preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
     if preset is None:
         raise ValueError(f"{alias} has no saved assignment")
+    describe_assignment(docker, alias, preset)
     request(docker, alias, preset["health_path"])
     if alias in {"llm-general", "vlm-general", "vlm-documents"}:
         content: str | list[dict[str, Any]] = "Say hello briefly."
@@ -240,13 +280,17 @@ def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | No
         value = json.loads(request(docker, alias, "/v1/chat/completions", payload=payload))
         if not value.get("choices", [{}])[0].get("message", {}).get("content"):
             raise ValueError("Chat response has no text")
+        if isinstance(value.get("model"), str):
+            print(f"{alias}: response-reported model: {value['model']} (may be an alias)")
     elif alias == "tts-german":
         speech = synthesize_tts(docker, SENTENCE)
         with tempfile.NamedTemporaryFile(
             prefix="inference-speech-", suffix=".wav", delete=False
         ) as file:
             file.write(speech)
-            print(f"tts-german: audio saved to {file.name}")
+            output = Path(file.name)
+        print(f"tts-german: audio saved to {output}")
+        play_saved_wav(output)
     elif alias == "stt-general":
         if speech is None:
             raise ValueError("No speech sample is available")
@@ -276,7 +320,7 @@ def test_service(docker: Docker, alias: str, speech: bytes | None) -> bytes | No
         )
         if not isinstance(value, dict) or not isinstance(value.get("predictions"), list):
             raise ValueError("NER response has no predictions list")
-    print(f"PASS {alias}; review output quality manually.")
+    print(f"PASS {alias} — assigned model: {model_label(preset)}; review output quality manually.")
     return speech
 
 
@@ -333,6 +377,7 @@ def tts_menu() -> None:
         )
         if preset is None:
             raise ValueError("tts-german has no saved assignment")
+        describe_assignment(docker, "tts-german", preset)
         request(docker, "tts-german", preset["health_path"])
         speech = synthesize_tts(docker, text)
         output_directory = Path("runtime")
@@ -341,6 +386,7 @@ def tts_menu() -> None:
         output = output_directory / f"tts-custom-{timestamp}.wav"
         output.write_bytes(speech)
         print(f"tts-german: audio saved to {output.resolve()}")
+        play_saved_wav(output.resolve())
 
 
 def manual_menu() -> None:
@@ -391,11 +437,15 @@ def menu() -> None:
     print("Requests execute inside each remote service container against its loopback port.")
     results = []
     for alias in enabled:
+        preset = assigned_recipe(root, docker.settings.docker_context, alias)
+        if preset is None:
+            raise ValueError(f"{alias} has no saved assignment")
+        identity = f"{alias} — assigned model: {model_label(preset)}"
         try:
             speech = test_service(docker, alias, speech)
-            results.append(f"PASS {alias}")
+            results.append(f"PASS {identity}")
         except (OSError, ValueError, wave.Error, subprocess.SubprocessError) as exc:
-            results.append(f"FAIL {alias}: {exc}")
+            results.append(f"FAIL {identity}: {exc}")
             print(results[-1])
     print("\nSummary\n" + "\n".join(results))
     if any(result.startswith("FAIL ") for result in results):
