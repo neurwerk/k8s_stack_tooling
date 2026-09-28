@@ -33,6 +33,18 @@ vlm-general:
   health_path: /health
   transport: curl
   required_files: [Qwen3VL-8B-Instruct-Q4_K_M.gguf, mmproj-Qwen3VL-8B-Instruct-F16.gguf]
+vlm-images:
+  runtime: vllm
+  service: vlm-images
+  model_id: lightonocr-2-1b
+  variant_id: transformers
+  enabled: false
+  cache_repo: lightonai/LightOnOCR-2-1B
+  estimated_vram_gib: 6
+  internal_port: 8000
+  health_path: /health
+  transport: python3
+  required_files: [config.json, model.safetensors]
 stt-general:
   runtime: speaches
   service: stt-general

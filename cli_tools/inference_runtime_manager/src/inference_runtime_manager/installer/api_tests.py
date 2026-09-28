@@ -30,6 +30,7 @@ ORDER = [
     "vlm-documents",
     "llm-general",
     "vlm-general",
+    "vlm-images",
     "tts-german",
     "stt-general",
     "vad-general",
@@ -107,6 +108,52 @@ def sample_image() -> bytes:
         + chunk(b"IDAT", zlib.compress(pixels))
         + chunk(b"IEND", b"")
     )
+
+
+def image_ocr_payload(alias: str, image: bytes, max_tokens: int = 2048) -> dict[str, Any]:
+    """Build the model's native image-only transcription request."""
+    if image.startswith(b"\x89PNG\r\n\x1a\n"):
+        media_type = "image/png"
+    elif image.startswith(b"\xff\xd8\xff"):
+        media_type = "image/jpeg"
+    else:
+        raise ValueError("Image OCR requires PNG or JPEG input")
+    encoded = base64.b64encode(image).decode()
+    return {
+        "model": alias,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+                    }
+                ],
+            }
+        ],
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+
+
+def chat_completion_text(value: object) -> str:
+    """Accept one complete, nonempty OpenAI-compatible text completion."""
+    if not isinstance(value, dict):
+        raise ValueError("Chat response is not an object")
+    choices = value.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise ValueError("Chat response must contain one choice")
+    choice = choices[0]
+    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        raise ValueError("Chat response is incomplete")
+    message: object = choice.get("message")
+    content: object = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Chat response has no text")
+    return content.strip()
 
 
 def request(
@@ -316,7 +363,22 @@ def test_service(
         raise ValueError(f"{alias} has no saved assignment")
     describe_assignment(docker, alias, preset, running)
     request(docker, alias, preset["health_path"])
-    if alias in {"llm-general", "vlm-general", "vlm-documents"}:
+    if alias in {"llm-general", "vlm-general", "vlm-images", "vlm-documents"}:
+        if alias == "vlm-images":
+            value = json.loads(
+                request(
+                    docker,
+                    alias,
+                    "/v1/chat/completions",
+                    payload=image_ocr_payload(alias, sample_image()),
+                )
+            )
+            if chat_completion_text(value) != "TEST 123":
+                raise ValueError("Image OCR did not exactly transcribe the control text")
+            if isinstance(value.get("model"), str):
+                print(f"{alias}: response-reported model: {value['model']} (may be an alias)")
+            print(f"PASS {alias} — exact printed-text transcription; receiver owns formatting.")
+            return speech
         content: str | list[dict[str, Any]] = "Say hello briefly."
         if alias != "llm-general":
             image = base64.b64encode(sample_image()).decode()
