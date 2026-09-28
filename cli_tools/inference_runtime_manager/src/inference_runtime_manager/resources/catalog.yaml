@@ -180,6 +180,34 @@ models:
         compatibilityNotes: Reviewed for the pinned dedicated llama.cpp vision server; target inference remains to be exercised.
         runtimeNotes: "Paired model/projector for stock llama-cpp. Download size excludes runtime/KV/image overhead. Local backup is disabled by default."
 
+  - id: lightonocr-2-1b
+    category: ocr
+    displayName: LightOnOCR-2-1B (private image reader)
+    description: Compact end-to-end image and document transcription model qualified for the target Turing GPU.
+    recommended: true
+    source: lightonai/LightOnOCR-2-1B
+    revision: 7d6fa261386f8bde9576f8d8c6ad69b8565b48a3
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/lightonai/LightOnOCR-2-1B/blob/7d6fa261386f8bde9576f8d8c6ad69b8565b48a3/README.md#license
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: LightOnOCRForConditionalGeneration
+      parameterCount: 1B
+      contextLength: 16384
+      languages: [en, fr, de, es, it, nl, pt, sv, da, zh, ja]
+      intendedUse: private-image-text-extraction
+    variants:
+      - id: transformers
+        format: transformers
+        quantization: none
+        precision: bf16
+        estimatedDownloadBytes: 2023467964
+        runtimes: [vllm]
+        compatibilityNotes: Qualified with the pinned vLLM release using FP32 compute because FP16 produces non-finite probabilities on the target compute-capability 7.5 GPU.
+        runtimeNotes: "One request at a time, 4096 context and a 2048 output cap. Preserve native text output; the receiver owns application result formatting."
+
   - id: ai4privacy-multilingual-pii
     category: ner
     displayName: AI4Privacy Multilingual Categorical Anonymiser OpenPII

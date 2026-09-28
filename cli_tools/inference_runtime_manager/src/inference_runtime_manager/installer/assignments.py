@@ -15,6 +15,7 @@ from inference_runtime_manager.installer.docker import service_recipes, services
 ALIAS_CATEGORIES = {
     "llm-general": "llm",
     "vlm-general": "vlm",
+    "vlm-images": "ocr",
     "vlm-documents": "ocr",
     "stt-general": "asr",
     "tts-german": "tts",

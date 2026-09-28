@@ -103,6 +103,7 @@ the endpoint test checks that the service actually responds.
 | `tts-german` | Kokoro ONNX German Martin; Chatterbox fallback | 8004 | Kokoro enabled |
 | `vad-general` | Speaches / packaged Silero VAD | 8005 | enabled |
 | `ner-german` | KServe Hugging Face token classification | 8006 | disabled |
+| `vlm-images` | vLLM / LightOnOCR | 8007 | disabled |
 | `image-generation-general` | catalog only | none | unavailable |
 
 All inference services mount the preserved `local-ai_models` volume read-only.
@@ -131,7 +132,7 @@ recordings remain preserved when Martin is selected.
 `uv run inference-runtime-manager test` tests every enabled service. Requests
 run with `docker compose exec` inside the corresponding remote container and use
 that container's loopback port. The workstation does not need direct access to
-ports 8000-8006 and the bearer key is not printed.
+ports 8000-8007 and the bearer key is not printed.
 
 The flow checks health first, then exercises chat/vision, document parsing, TTS,
 STT, VAD or NER as applicable. TTS output can feed the speech checks, or the
@@ -168,6 +169,11 @@ exceed 14 GiB but never stops another service automatically.
 Granite-Docling uses the immutable Transformers checkpoint and serves model name
 `vlm-documents`. Stored weights remain BF16;
 `VLLM_GRANITE_DTYPE=float32` controls computation on the Turing GPU.
+
+LightOnOCR serves the `vlm-images` alias with one image and one request at a time.
+It uses FP32 computation, a 4096-token context and a 2048-token output cap because
+FP16 produces non-finite probabilities on the target Turing GPU. The endpoint emits
+native OCR text; clients own application-specific outcome formatting.
 
 ## Validation
 

@@ -40,9 +40,13 @@ class DeploymentSettings(BaseSettings):
     tts_german_port: int = Field(default=8004, ge=1, le=65535, alias="TTS_GERMAN_PORT")
     vad_general_port: int = Field(default=8005, ge=1, le=65535, alias="VAD_GENERAL_PORT")
     ner_german_port: int = Field(default=8006, ge=1, le=65535, alias="NER_GERMAN_PORT")
+    vlm_images_port: int = Field(default=8007, ge=1, le=65535, alias="VLM_IMAGES_PORT")
     vllm_granite_dtype: str = Field(default="float32", alias="VLLM_GRANITE_DTYPE")
     vllm_granite_gpu_memory_utilization: float = Field(
         default=0.25, gt=0, le=1, alias="VLLM_GRANITE_GPU_MEMORY_UTILIZATION"
+    )
+    vllm_images_gpu_memory_utilization: float = Field(
+        default=0.36, gt=0, le=1, alias="VLLM_IMAGES_GPU_MEMORY_UTILIZATION"
     )
 
 
@@ -98,10 +102,12 @@ class Docker:
             "TTS_GERMAN_PORT": str(settings.tts_german_port),
             "VAD_GENERAL_PORT": str(settings.vad_general_port),
             "NER_GERMAN_PORT": str(settings.ner_german_port),
+            "VLM_IMAGES_PORT": str(settings.vlm_images_port),
             "VLLM_GRANITE_DTYPE": settings.vllm_granite_dtype,
             "VLLM_GRANITE_GPU_MEMORY_UTILIZATION": str(
                 settings.vllm_granite_gpu_memory_utilization
             ),
+            "VLLM_IMAGES_GPU_MEMORY_UTILIZATION": str(settings.vllm_images_gpu_memory_utilization),
             "SETUP_IMAGE": images["setup"],
             "VLLM_IMAGE": images["vllm"],
             "LLAMACPP_IMAGE": images["llamacpp"],

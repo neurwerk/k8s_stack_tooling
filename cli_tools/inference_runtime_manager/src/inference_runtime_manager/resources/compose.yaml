@@ -122,6 +122,52 @@ services:
       start_period: 180s
       retries: 12
 
+  vlm-images:
+    <<: [*common, *gpu]
+    image: ${VLLM_IMAGE:?Run inference-runtime-manager images and install first}
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13 >/dev/null &&
+        exec vllm serve "$@"
+      - --
+      - /models/active/vlm-images
+      - --served-model-name
+      - vlm-images
+      - --dtype
+      - float32
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --limit-mm-per-prompt.image
+      - "1"
+      - --mm-processor-cache-gb
+      - "0"
+      - --no-enable-prefix-caching
+      - --max-num-seqs
+      - "1"
+      - --max-model-len
+      - "4096"
+      - --gpu-memory-utilization
+      - ${VLLM_IMAGES_GPU_MEMORY_UTILIZATION:-0.36}
+      - --enforce-eager
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_IMAGES_PORT:-8007}:8000"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VLLM_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
   stt-general:
     <<: [*common, *gpu]
     image: ${SPEACHES_IMAGE:?Run inference-runtime-manager images and install first}
