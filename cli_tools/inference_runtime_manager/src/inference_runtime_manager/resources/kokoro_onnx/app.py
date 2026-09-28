@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import importlib.util
 import io
 import os
@@ -17,7 +18,7 @@ from typing import Literal
 
 import numpy as np
 import onnxruntime as ort
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from kokoro_onnx import Kokoro
@@ -113,6 +114,20 @@ async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
+
+
+@app.middleware("http")
+async def authenticate(request: Request, call_next):
+    """Require the optional service key on inference routes."""
+    key = os.environ.get("API_KEY", "")
+    supplied = request.headers.get("Authorization")
+    if (
+        request.url.path.startswith("/v1/")
+        and key
+        and (supplied is None or not hmac.compare_digest(supplied, "Bearer " + key))
+    ):
+        return Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+    return await call_next(request)
 
 
 @app.get("/health")

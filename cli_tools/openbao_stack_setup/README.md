@@ -7,6 +7,14 @@ files.
 
 ## Setup
 
+### Image Inspection Credential
+
+The `image-inspection` managed credential writes only
+`monitor-agentgateway-extproc/external:apiKey` and refreshes the corresponding
+ExternalSecret. It does not enable the image reader or reuse the Docling inference
+credential. Existing installations must complete the authorized catalog
+reconciliation before setting it.
+
 ### OpenSearch Reporting Credentials
 
 Package `0.2.21` additively provisions `queryDatasourceEncryptionKey`,
@@ -110,7 +118,8 @@ uv run stack-setup secret set <provider> --context <context> --client <client>
 ```
 
 Supported managed credentials are `openrouter`, `deepseek`, `brave`, `route53`, `smtp`,
-`active-directory`, `librechat-stt`, `librechat-tts`, and `docling-inference`.
+`active-directory`, `librechat-stt`, `librechat-tts`, `docling-inference`, and
+`image-inspection`.
 The bootstrap command requires nonblank SMTP credentials when the client
 Keycloak values enable SMTP or monitoring email alerting is not explicitly disabled.
 The same SMTP credential is stored in the Keycloak and monitoring namespace paths. Credential

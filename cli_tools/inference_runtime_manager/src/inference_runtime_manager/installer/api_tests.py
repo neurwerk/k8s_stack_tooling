@@ -171,13 +171,16 @@ def request(
     service = preset["service"]
     port = preset["internal_port"]
     transport = preset["transport"]
+    request_environment = {
+        **docker.environment,
+        "INFERENCE_API_KEY": docker.settings.api_key_for(alias) or "",
+    }
     if transport == "curl":
         if audio is not None:
             raise ValueError("llama.cpp endpoints do not accept audio")
-        script = (
-            "curl -sS --max-time 300 --max-filesize 16777216 "
-            '-H "Authorization: Bearer $INFERENCE_API_KEY" '
-        )
+        script = "curl -sS --max-time 300 --max-filesize 16777216 "
+        if docker.settings.api_key_for(alias):
+            script += '-H "Authorization: Bearer $INFERENCE_API_KEY" '
         data = b""
         if payload is not None:
             script += '-H "Content-Type: application/json" --data-binary @- '
@@ -253,7 +256,7 @@ sys.stdout.buffer.write(data + b"\n" + json.dumps(metadata).encode())
         ]
     started = time.monotonic()
     result = subprocess.run(
-        command, env=docker.environment, input=data, capture_output=True, timeout=330, check=False
+        command, env=request_environment, input=data, capture_output=True, timeout=330, check=False
     )
     docker_ms = (time.monotonic() - started) * 1000
     if result.returncode:

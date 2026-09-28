@@ -24,6 +24,7 @@ services:
     command:
       - >-
         python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13 >/dev/null &&
+        if [ -n "$$VLM_DOCUMENTS_API_KEY" ]; then export VLLM_API_KEY="$$VLM_DOCUMENTS_API_KEY"; else unset VLLM_API_KEY; fi &&
         exec vllm serve "$@"
       - --
       - /models/active/vlm-documents
@@ -45,7 +46,7 @@ services:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_DOCUMENTS_PORT:-8000}:8000"
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      VLLM_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      VLM_DOCUMENTS_API_KEY: ${VLM_DOCUMENTS_API_KEY-}
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -79,7 +80,7 @@ services:
     ports:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${LLM_GENERAL_PORT:-8001}:8000"
     environment:
-      LLAMA_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      LLAMA_API_KEY: ${LLM_GENERAL_API_KEY-}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     healthcheck:
       test: [CMD, curl, --fail, --silent, http://127.0.0.1:8000/health]
@@ -113,7 +114,7 @@ services:
     ports:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_GENERAL_PORT:-8002}:8000"
     environment:
-      LLAMA_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      LLAMA_API_KEY: ${VLM_GENERAL_API_KEY-}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     healthcheck:
       test: [CMD, curl, --fail, --silent, http://127.0.0.1:8000/health]
@@ -129,6 +130,7 @@ services:
     command:
       - >-
         python3 -m pip uninstall -y nixl nixl-cu12 nixl-cu13 >/dev/null &&
+        if [ -n "$$VLM_IMAGES_API_KEY" ]; then export VLLM_API_KEY="$$VLM_IMAGES_API_KEY"; else unset VLLM_API_KEY; fi &&
         exec vllm serve "$@"
       - --
       - /models/active/vlm-images
@@ -156,7 +158,7 @@ services:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_IMAGES_PORT:-8007}:8000"
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      VLLM_API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      VLM_IMAGES_API_KEY: ${VLM_IMAGES_API_KEY-}
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -174,14 +176,14 @@ services:
     command:
       - /bin/sh
       - -c
-      - cp /runtime-config/model_aliases.json /home/ubuntu/speaches/model_aliases.json && exec uvicorn --factory speaches.main:create_app
+      - cp /runtime-config/model_aliases.json /home/ubuntu/speaches/model_aliases.json && if [ -n "$$STT_GENERAL_API_KEY" ]; then export API_KEY="$$STT_GENERAL_API_KEY"; else unset API_KEY; fi && exec uvicorn --factory speaches.main:create_app
     ports:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${STT_GENERAL_PORT:-8003}:8000"
     volumes:
       - models:/models:ro
       - runtime-config:/runtime-config:ro
     environment:
-      API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      STT_GENERAL_API_KEY: ${STT_GENERAL_API_KEY-}
       ENABLE_UI: "false"
       HF_HOME: /models/cache
       HF_HUB_CACHE: /models/cache/hub
@@ -193,7 +195,7 @@ services:
       WHISPER__TTL: "-1"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     healthcheck:
-      test: [CMD, python, -c, "import os, urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Authorization': 'Bearer '+os.environ['API_KEY']}); urllib.request.urlopen(r, timeout=5)"]
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 15s
       timeout: 10s
       start_period: 90s
@@ -221,6 +223,7 @@ services:
       HF_HUB_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      API_KEY: ${TTS_GERMAN_API_KEY-}
     healthcheck:
       test: [CMD, python3, -c, "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8004/api/model-info', timeout=5)); assert data.get('loaded') is True"]
       interval: 15s
@@ -235,6 +238,7 @@ services:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${TTS_GERMAN_PORT:-8004}:8881"
     environment:
       KOKORO_MODEL_ROOT: /models/active/tts-german
+      API_KEY: ${TTS_GERMAN_API_KEY-}
       KOKORO_ONNX_INTRA_OP_THREADS: "4"
       KOKORO_ONNX_INTER_OP_THREADS: "1"
       OMP_NUM_THREADS: "4"
@@ -254,20 +258,20 @@ services:
     command:
       - /bin/sh
       - -c
-      - cp /runtime-config/model_aliases.json /home/ubuntu/speaches/model_aliases.json && exec uvicorn --factory speaches.main:create_app
+      - cp /runtime-config/model_aliases.json /home/ubuntu/speaches/model_aliases.json && if [ -n "$$VAD_GENERAL_API_KEY" ]; then export API_KEY="$$VAD_GENERAL_API_KEY"; else unset API_KEY; fi && exec uvicorn --factory speaches.main:create_app
     ports:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VAD_GENERAL_PORT:-8005}:8000"
     volumes:
       - models:/models:ro
       - runtime-config:/runtime-config:ro
     environment:
-      API_KEY: ${INFERENCE_API_KEY:?Set INFERENCE_RUNTIME_MANAGER_API_KEY}
+      VAD_GENERAL_API_KEY: ${VAD_GENERAL_API_KEY-}
       ENABLE_UI: "false"
       HF_HUB_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       VAD_MODEL_TTL: "-1"
     healthcheck:
-      test: [CMD, python, -c, "import os, urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Authorization': 'Bearer '+os.environ['API_KEY']}); urllib.request.urlopen(r, timeout=5)"]
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 15s
       timeout: 10s
       start_period: 60s
@@ -289,6 +293,7 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
+      API_KEY: ${NER_GERMAN_API_KEY-}
     healthcheck:
       test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1', 8080), 5); s.close()"]
       interval: 15s
