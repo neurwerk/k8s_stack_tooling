@@ -12,9 +12,9 @@ cp .env.example .env
 uv run inference-runtime-manager
 ```
 
-Set the Docker context, external storage root and API key in `.env`. The old
-`LOCAL_AI_INSTALLER_DOCKER_CONTEXT`, `LOCAL_AI_INSTALLER_STORAGE_ROOT`,
-`LOCALAI_API_KEY` and `LOCALAI_BIND_ADDRESS` names remain accepted for migration.
+Set the Docker context, external storage root and any service API keys in `.env`.
+The old `LOCAL_AI_INSTALLER_DOCKER_CONTEXT`, `LOCAL_AI_INSTALLER_STORAGE_ROOT`
+and `LOCALAI_BIND_ADDRESS` names remain accepted for migration.
 
 For an SSH target:
 
@@ -114,10 +114,13 @@ The alias in the table is also the stable client-facing model name. Runtime
 configuration maps it to the selected artifact or upstream model identifier, so
 changing an assignment does not require a client configuration change.
 
-vLLM, llama.cpp and Speaches enforce the configured bearer key. Kokoro,
-Chatterbox and KServe do not provide equivalent authentication; keep their ports
-bound to loopback or a trusted private interface until a separate authenticated
-client boundary is adopted.
+Each stable service alias has an independent optional key setting in `.env`.
+An empty setting disables authentication for that service, and operators may use
+the same value in several settings until separate rotation is needed. vLLM,
+llama.cpp, Speaches and the package-owned Kokoro adapter enforce their configured
+key directly. The pinned Chatterbox and KServe runtimes do not enforce their
+reserved settings; keep those endpoints bound to loopback or a trusted private
+interface.
 
 The package-owned Kokoro runtime contains no model weights. `images` builds its
 locked `linux/amd64` image through

@@ -41,6 +41,9 @@ MANAGED_CREDENTIALS: dict[str, Provider] = {
     "smtp": SMTP,
     "active-directory": ACTIVE_DIRECTORY,
     "docling-inference": Provider("docling-inference", ("docling/external",), ("inferenceToken",)),
+    "image-inspection": Provider(
+        "image-inspection", ("monitor-agentgateway-extproc/external",), ("apiKey",)
+    ),
     "librechat-stt": Provider("librechat-stt", ("frontend-librechat/external",), ("sttApiKey",)),
     "librechat-tts": Provider("librechat-tts", ("frontend-librechat/external",), ("ttsApiKey",)),
 }

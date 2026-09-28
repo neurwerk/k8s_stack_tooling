@@ -763,7 +763,7 @@ wheels = [
 
 [[package]]
 name = "openbao-stack-setup"
-version = "0.2.21"
+version = "0.2.22"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

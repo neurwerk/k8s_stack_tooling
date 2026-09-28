@@ -115,6 +115,11 @@ DOCLING_SECRET_STORES = tuple(
     SecretStoreTarget(f"{namespace}-openbao-secret-store", namespace)
     for namespace in DOCLING_NAMESPACES
 )
+MONITOR_AGENTGATEWAY_EXTPROC_IMAGE_INSPECTION_EXTERNAL_SECRET = ExternalSecretTarget(
+    "monitor-agentgateway-extproc-image-inspection-secret",
+    "monitor-agentgateway-extproc",
+    "monitor-agentgateway-extproc-image-inspection-secret",
+)
 DOCLING_EXTERNAL_SECRETS = (
     ExternalSecretTarget("docling-api", "docling", "docling-api"),
     ExternalSecretTarget(
@@ -233,6 +238,11 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
         ExternalSecretTarget("docling-inference", "docling", "docling-inference"),
     ),
     ProviderRefreshTarget(
+        "monitor-agentgateway-extproc/external",
+        ("apiKey",),
+        MONITOR_AGENTGATEWAY_EXTPROC_IMAGE_INSPECTION_EXTERNAL_SECRET,
+    ),
+    ProviderRefreshTarget(
         "infra-agentgateway/external",
         ("openrouterApiKey", "deepseekApiKey", "braveApiKey"),
         INFRA_AGENTGATEWAY_EXTERNAL_SECRET,
@@ -308,7 +318,12 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
     for path in sorted(set(managed_paths)):
         capabilities = (
             '["create", "read", "update"]'
-            if path in ("frontend-librechat/external", "docling/external")
+            if path
+            in (
+                "frontend-librechat/external",
+                "docling/external",
+                "monitor-agentgateway-extproc/external",
+            )
             else '["read", "update"]'
         )
         blocks.append(

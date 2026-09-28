@@ -8,7 +8,7 @@ import os
 import subprocess
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from pydantic import AliasChoices, Field, SecretStr
@@ -23,10 +23,14 @@ class DeploymentSettings(BaseSettings):
         ),
         min_length=1,
     )
-    api_key: SecretStr = Field(
-        validation_alias=AliasChoices("INFERENCE_RUNTIME_MANAGER_API_KEY", "LOCALAI_API_KEY"),
-        min_length=1,
-    )
+    vlm_documents_api_key: SecretStr | None = Field(default=None, alias="VLM_DOCUMENTS_API_KEY")
+    llm_general_api_key: SecretStr | None = Field(default=None, alias="LLM_GENERAL_API_KEY")
+    vlm_general_api_key: SecretStr | None = Field(default=None, alias="VLM_GENERAL_API_KEY")
+    stt_general_api_key: SecretStr | None = Field(default=None, alias="STT_GENERAL_API_KEY")
+    tts_german_api_key: SecretStr | None = Field(default=None, alias="TTS_GERMAN_API_KEY")
+    vad_general_api_key: SecretStr | None = Field(default=None, alias="VAD_GENERAL_API_KEY")
+    ner_german_api_key: SecretStr | None = Field(default=None, alias="NER_GERMAN_API_KEY")
+    vlm_images_api_key: SecretStr | None = Field(default=None, alias="VLM_IMAGES_API_KEY")
     bind_address: str = Field(
         default="127.0.0.1",
         validation_alias=AliasChoices(
@@ -48,6 +52,11 @@ class DeploymentSettings(BaseSettings):
     vllm_images_gpu_memory_utilization: float = Field(
         default=0.36, gt=0, le=1, alias="VLLM_IMAGES_GPU_MEMORY_UTILIZATION"
     )
+
+    def api_key_for(self, alias: str) -> str | None:
+        """Return the independently configured key for one stable service alias."""
+        value = cast(SecretStr | None, getattr(self, alias.replace("-", "_") + "_api_key"))
+        return value.get_secret_value() if value is not None else None
 
 
 def resource(name: str) -> str:
@@ -93,7 +102,10 @@ class Docker:
         self.settings = settings
         self.environment = {
             **os.environ,
-            "INFERENCE_API_KEY": settings.api_key.get_secret_value(),
+            **{
+                alias.upper().replace("-", "_") + "_API_KEY": settings.api_key_for(alias) or ""
+                for alias in service_recipes()
+            },
             "INFERENCE_BIND_ADDRESS": settings.bind_address,
             "VLM_DOCUMENTS_PORT": str(settings.vlm_documents_port),
             "LLM_GENERAL_PORT": str(settings.llm_general_port),
