@@ -25,13 +25,13 @@ def model_choices(catalog: AvailableCatalog, selected: set[str]) -> list[Choice]
     """List each main model once with non-selectable headings and blank separators."""
     choices: list[Choice] = []
     category = None
-    for model in sorted(catalog.models, key=lambda item: (item.category, item.display_name)):
+    for model in sorted(catalog.models, key=lambda item: (item.browse_group, item.display_name)):
         if choices:
             choices.append(Separator(" "))
-        if model.category != category:
-            category = model.category
+        if model.browse_group != category:
+            category = model.browse_group
             heading = CATEGORY_NAMES.get(category, category.upper())
-            choices.append(Separator(f"── {heading} ({category.upper()}) ──"))
+            choices.append(Separator(f"── {heading} ──"))
         tags = []
         if model.recommended:
             tags.append("recommended")
@@ -47,6 +47,45 @@ def model_choices(catalog: AvailableCatalog, selected: set[str]) -> list[Choice]
             )
         )
     return choices
+
+
+def partition_queue(
+    catalog: AvailableCatalog, queue: DownloadQueue
+) -> tuple[DownloadQueue, list[tuple[Selection, str]]]:
+    """Separate current selections from entries removed from the catalog."""
+    models = {model.id: model for model in catalog.models}
+    current: list[Selection] = []
+    obsolete: list[tuple[Selection, str]] = []
+    for selection in queue.selected:
+        model = models.get(selection.model_id)
+        if model is None:
+            obsolete.append((selection, "model is not in the current catalog"))
+        elif not any(variant.id == selection.variant_id for variant in model.variants):
+            obsolete.append((selection, "variant is not in the current catalog"))
+        else:
+            current.append(selection)
+    return DownloadQueue(schemaVersion=1, selected=current), obsolete
+
+
+def review_obsolete_queue(
+    catalog: AvailableCatalog, queue: DownloadQueue, output: Callable[[str], None]
+) -> DownloadQueue | None:
+    """Require confirmation before dropping obsolete entries during a queue edit."""
+    current, obsolete = partition_queue(catalog, queue)
+    if not obsolete:
+        return current
+    output("Obsolete download queue entries:")
+    for selection, reason in obsolete:
+        output(f"- {selection.model_id} / {selection.variant_id}: {reason}")
+    plural = "entry" if len(obsolete) == 1 else "entries"
+    confirmed = questionary.confirm(
+        f"Remove {len(obsolete)} obsolete {plural} and continue editing?",
+        default=False,
+    ).ask()
+    if confirmed is not True:
+        output("Download queue unchanged.")
+        return None
+    return current
 
 
 def _ask_models(catalog: AvailableCatalog, selected: set[str]) -> list[str]:

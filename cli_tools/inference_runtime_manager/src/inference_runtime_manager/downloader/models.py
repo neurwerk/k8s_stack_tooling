@@ -125,6 +125,7 @@ class CatalogModel(BaseModel):
     Args:
         id: Stable catalog identifier.
         category: Model category, such as `ner` or `llm`.
+        menu_group: Optional operator-facing browser group within a storage category.
         display_name: Human-readable model name.
         description: Short catalog description.
         recommended: Whether the model is recommended by neurwerk.
@@ -138,6 +139,7 @@ class CatalogModel(BaseModel):
 
     id: str
     category: str
+    menu_group: str | None = Field(default=None, alias="menuGroup", pattern=_IDENTIFIER)
     display_name: str = Field(alias="displayName")
     description: str
     recommended: bool = False
@@ -215,6 +217,11 @@ class CatalogModel(BaseModel):
             if variant.id == variant_id:
                 return variant
         raise ValueError(f"Unknown variant {variant_id!r} for catalog model {self.id!r}")
+
+    @property
+    def browse_group(self) -> str:
+        """Return the operator-facing group without changing artifact categorization."""
+        return self.menu_group or self.category
 
 
 class AvailableCatalog(BaseModel):

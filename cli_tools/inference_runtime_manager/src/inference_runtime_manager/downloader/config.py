@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from inference_runtime_manager.configuration import load_workstation_config
 from inference_runtime_manager.downloader.errors import StorageUnavailableError
+
+
+def _configured_path(name: str) -> Path:
+    value = getattr(load_workstation_config(), name)
+    if value is None:
+        raise ValueError(f"Missing workstation configuration: {name}")
+    return cast(Path, value)
 
 
 class Settings(BaseSettings):
@@ -24,6 +33,7 @@ class Settings(BaseSettings):
     )
 
     storage_root: Path = Field(
+        default_factory=lambda: _configured_path("storage_root"),
         validation_alias=AliasChoices(
             "INFERENCE_RUNTIME_MANAGER_STORAGE_ROOT",
             "LOCAL_AI_INSTALLER_STORAGE_ROOT",
@@ -31,6 +41,7 @@ class Settings(BaseSettings):
         ),
     )
     hf_home: Path = Field(
+        default_factory=lambda: _configured_path("hf_home"),
         validation_alias=AliasChoices("HF_HOME", "MEDIA_DOWNLOADER_UPLOADER_HF_HOME"),
     )
     build_docker_context: str = Field(
@@ -38,6 +49,18 @@ class Settings(BaseSettings):
         validation_alias="INFERENCE_RUNTIME_MANAGER_BUILD_DOCKER_CONTEXT",
         min_length=1,
     )
+
+    @model_validator(mode="after")
+    def apply_workstation_config(self) -> Settings:
+        """Let interactive non-secret choices override legacy environment defaults."""
+        configured = load_workstation_config()
+        if configured.storage_root is not None:
+            self.storage_root = configured.storage_root
+        if configured.hf_home is not None:
+            self.hf_home = configured.hf_home
+        if configured.build_docker_context is not None:
+            self.build_docker_context = configured.build_docker_context
+        return self
 
     @field_validator("storage_root", "hf_home")
     @classmethod

@@ -11,6 +11,7 @@ import questionary
 from pydantic import ValidationError
 from questionary import Choice
 
+from inference_runtime_manager.configuration import management_state
 from inference_runtime_manager.downloader.catalog import (
     load_catalog,
     load_installed,
@@ -41,7 +42,7 @@ from inference_runtime_manager.downloader.presentation import (
 from inference_runtime_manager.downloader.presentation import (
     show_queue as _show_queue,
 )
-from inference_runtime_manager.downloader.selection import select_downloads
+from inference_runtime_manager.downloader.selection import review_obsolete_queue, select_downloads
 from inference_runtime_manager.downloader.store import ArtifactStore
 
 _logger = logging.getLogger(__name__)
@@ -61,8 +62,18 @@ def main(action: str | None = None) -> None:
     logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s %(message)s", level=logging.INFO)
     try:
         settings = Settings()
-        validate_storage(settings)
         catalog = load_catalog()
+    except (OSError, ValidationError, ValueError, TypeError) as error:
+        _logger.error("%s", error)  # noqa: TRY400 -- CLI needs concise user-facing output.
+        raise SystemExit(1) from error
+    if action == "view_queue":
+        _show_queue(load_queue(_queue_path(settings)), catalog, print)
+        return
+    if action == "select_models":
+        _select_models(catalog, settings, print)
+        return
+    try:
+        validate_storage(settings)
     except (OSError, ValidationError, ValueError, TypeError) as error:
         _logger.error("%s", error)  # noqa: TRY400 -- CLI needs concise user-facing output.
         raise SystemExit(1) from error
@@ -154,6 +165,9 @@ def _select_models(
 ) -> None:
     """Review model and variant choices before atomically saving the external queue."""
     queue = load_queue(_queue_path(settings))
+    queue = review_obsolete_queue(catalog, queue, output)
+    if queue is None:
+        return
     updated = select_downloads(catalog, queue, output)
     _confirm_gated(catalog, updated.selected)
     write_queue(_queue_path(settings), updated)
@@ -189,10 +203,36 @@ def _download_queue(
     if not queue.selected:
         output("Download queue is empty. Select models first.")
         return
+    remaining = _synchronize_selections(store, settings, catalog, queue.selected, output)
+    write_queue(queue_path, DownloadQueue(schemaVersion=1, selected=remaining))
+
+
+def download_selections(selections: list[Selection], output: Callable[[str], None] = print) -> None:
+    """Download selected model variants immediately for a guided workflow."""
+    settings = Settings()
+    validate_storage(settings)
+    catalog = load_catalog()
+    client = HuggingFaceClient(huggingface_environment(settings))
+    _require_authentication(client)
+    store = ArtifactStore(settings.storage_root.resolve(), client)
+    remaining = _synchronize_selections(store, settings, catalog, selections, output)
+    if remaining:
+        names = ", ".join(f"{item.model_id}/{item.variant_id}" for item in remaining)
+        raise MediaDownloaderError(f"Model download failed: {names}")
+
+
+def _synchronize_selections(
+    store: ArtifactStore,
+    settings: Settings,
+    catalog: AvailableCatalog,
+    selections: list[Selection],
+    output: Callable[[str], None],
+) -> list[Selection]:
+    """Synchronize selections and return only failures."""
     installed_path = _installed_path(settings)
     installed = load_installed(installed_path)
-    remaining: list[Selection] = []
-    for selection in queue.selected:
+    remaining = []
+    for selection in selections:
         try:
             request = _request_from_selection(catalog, selection)
             artifact = store.synchronize(request)
@@ -204,7 +244,7 @@ def _download_queue(
         except (MediaDownloaderError, OSError, ValidationError, ValueError, TypeError) as error:
             output(f"Failed {selection.model_id}/{selection.variant_id}: {error}")
             remaining.append(selection)
-    write_queue(queue_path, DownloadQueue(schemaVersion=1, selected=remaining))
+    return remaining
 
 
 def _request_from_selection(catalog: AvailableCatalog, selection: Selection) -> ArtifactRequest:
@@ -255,7 +295,7 @@ def _show_storage_status(settings: Settings, output: Callable[[str], None]) -> N
 
 def _queue_path(settings: Settings) -> Path:
     """Return the external-drive download queue path."""
-    return settings.storage_root / "download.yaml"
+    return management_state(settings.storage_root) / "download.yaml"
 
 
 def _installed_path(settings: Settings) -> Path:

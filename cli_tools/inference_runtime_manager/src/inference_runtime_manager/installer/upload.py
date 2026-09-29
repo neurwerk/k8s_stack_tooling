@@ -86,9 +86,18 @@ def prepare_artifact(
     }
 
 
-def prepare(root: Path, alias: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
-    preset = deployment_services(root)[alias]
-    source, manifest = prepare_artifact(root, preset["model_id"], preset["variant_id"])
+def prepare(
+    model_root: Path, state_root: Path, alias: str
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    preset = deployment_services(state_root)[alias]
+    return prepare_recipe(model_root, alias, preset)
+
+
+def prepare_recipe(
+    model_root: Path, alias: str, preset: dict[str, Any]
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    """Fully verify one selected recipe before any target modification."""
+    source, manifest = prepare_artifact(model_root, preset["model_id"], preset["variant_id"])
     names = {record["path"] for record in manifest["files"]}
     required = set(preset.get("required_files", []))
     required_suffixes = tuple(preset.get("required_any_suffix", []))
@@ -180,7 +189,7 @@ def activate_with_rollback(
             service,
         )
         print(f"{service}: startup/health {time.monotonic() - started:.1f}s")
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError, KeyboardInterrupt) as exc:
         try:
             docker.run("stop", service)
             docker.worker(
@@ -204,13 +213,21 @@ def activate_with_rollback(
                 )
         except (OSError, subprocess.SubprocessError, ValueError) as rollback_exc:
             raise RuntimeError(f"{alias}: activation and rollback failed") from rollback_exc
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         raise RuntimeError(f"{alias}: activation failed; previous service restored") from exc
 
 
-def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bool = False) -> None:
+def provision(
+    docker: Docker | None,
+    model_root: Path,
+    state_root: Path,
+    aliases: list[str],
+    dry_run: bool = False,
+) -> None:
     if docker is not None:
-        load_deployment(root, docker.settings.docker_context)
-    configured = deployment_services(root)
+        load_deployment(state_root, docker.settings.docker_context)
+    configured = deployment_services(state_root)
     if any(alias not in configured for alias in aliases):
         raise ValueError("Unknown inference service")
     enabled = [alias for alias in aliases if configured[alias]["enabled"]]
@@ -254,7 +271,7 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
     for alias in changed:
         print(f"{alias}: verifying local model checksums...", flush=True)
         started = time.monotonic()
-        prepared.append(prepare(root, alias))
+        prepared.append(prepare(model_root, state_root, alias))
         print(f"{alias}: local verification {time.monotonic() - started:.1f}s")
     for source, manifest, application in prepared:
         print(f"{application['alias']}: {source} -> /models/{manifest['destination']}")

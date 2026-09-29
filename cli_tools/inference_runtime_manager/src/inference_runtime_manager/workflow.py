@@ -5,12 +5,21 @@ from __future__ import annotations
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import questionary
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from inference_runtime_manager.configuration import (
+    WorkstationConfig,
+    config_path,
+    load_workstation_config,
+    management_state,
+    save_workstation_config,
+)
+from inference_runtime_manager.configuration import state_root as workstation_state_root
 from inference_runtime_manager.downloader.catalog import (
     load_catalog,
     load_installed,
@@ -18,12 +27,17 @@ from inference_runtime_manager.downloader.catalog import (
     write_queue,
 )
 from inference_runtime_manager.downloader.config import Settings, validate_storage
-from inference_runtime_manager.downloader.main import _confirm_gated
+from inference_runtime_manager.downloader.main import _confirm_gated, download_selections
 from inference_runtime_manager.downloader.models import DownloadQueue, Selection
 from inference_runtime_manager.downloader.presentation import (
     CATEGORY_NAMES,
     format_bytes,
+    show_queue,
     show_variants,
+)
+from inference_runtime_manager.downloader.selection import (
+    partition_queue,
+    review_obsolete_queue,
 )
 from inference_runtime_manager.installer.assignments import (
     ALIAS_CATEGORIES,
@@ -34,8 +48,22 @@ from inference_runtime_manager.installer.assignments import (
     recipe,
     save_deployment,
 )
-from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
-from inference_runtime_manager.installer.upload import prepare_artifact, transfer
+from inference_runtime_manager.installer.docker import (
+    DeploymentSettings,
+    Docker,
+    service_recipes,
+)
+from inference_runtime_manager.installer.images import (
+    image_names_for_runtime,
+    local_images_ready,
+    prepare_local_images,
+)
+from inference_runtime_manager.installer.upload import (
+    prepare_artifact,
+    prepare_recipe,
+    provision,
+    transfer,
+)
 
 
 def table(title: str, columns: list[str], rows: list[list[str]]) -> None:
@@ -53,41 +81,672 @@ def storage() -> Path:
     return settings.storage_root
 
 
+def state() -> Path:
+    settings = Settings()
+    return management_state(settings.storage_root)
+
+
+CATEGORY_GUIDES = {
+    "image-ocr": (
+        "Image OCR",
+        "Reads text from images for private attachment inspection.",
+        "vlm-images",
+    ),
+    "document-parsing": (
+        "Structured document parsing",
+        "Extracts document text, tables and layout as structured DocTags.",
+        "vlm-documents",
+    ),
+    "asr": ("Speech recognition", "Converts spoken audio into text.", "stt-general"),
+    "tts": ("Text-to-speech", "Generates spoken audio from text.", "tts-german"),
+    "vad": (
+        "Voice activity detection",
+        "Finds the parts of an audio recording that contain speech.",
+        "vad-general",
+    ),
+    "llm": (
+        "Language models",
+        "Generate text and answer text-based questions.",
+        "llm-general",
+    ),
+    "vlm": (
+        "General vision",
+        "Interprets image content and answers questions about it.",
+        "vlm-general",
+    ),
+    "ner": (
+        "Named-entity recognition",
+        "Detects entities and potentially identifying information in text.",
+        "ner-german",
+    ),
+    "image-generation": (
+        "Image generation",
+        "Creates or edits images from instructions; no runtime is configured yet.",
+        "image-generation-general",
+    ),
+}
+
+RUNTIME_NAMES = {
+    "vllm": "vLLM",
+    "llama.cpp": "llama.cpp",
+    "speaches": "Speaches",
+    "kokoro": "Kokoro ONNX",
+    "chatterbox": "Chatterbox",
+    "kserve": "KServe",
+}
+
+TARGET_CONTEXT_PLACEHOLDER = "ai-server"
+STORAGE_ROOT_PLACEHOLDER = "/Volumes/ExternalDrive/inference-runtime-manager"
+
+
+def runtime_family(runtime: str) -> str:
+    if runtime.startswith("vllm"):
+        return "vllm"
+    if runtime.startswith("llama.cpp"):
+        return "llama.cpp"
+    if runtime == "kokoro-onnx":
+        return "kokoro"
+    return runtime
+
+
+def configured_storage(settings: Settings) -> bool:
+    try:
+        validate_storage(settings)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def configured_environment() -> tuple[Settings, DeploymentSettings] | None:
+    """Open first-run configuration when required workstation choices are missing."""
+    try:
+        return Settings(), DeploymentSettings()
+    except ValueError:
+        print("Complete the workstation configuration before continuing.")
+        configuration_menu()
+    try:
+        return Settings(), DeploymentSettings()
+    except ValueError:
+        print("Configuration is incomplete; returning to the main menu.")
+        return None
+
+
+def add_to_download_queue(state_root: Path, selection: Selection) -> None:
+    catalog = load_catalog()
+    current, obsolete = partition_queue(catalog, load_queue(state_root / "download.yaml"))
+    if obsolete:
+        reviewed = review_obsolete_queue(catalog, load_queue(state_root / "download.yaml"), print)
+        if reviewed is None:
+            return
+        current = reviewed
+    selected = [
+        item
+        for item in current.selected
+        if (item.model_id, item.variant_id) != (selection.model_id, selection.variant_id)
+    ]
+    selected.append(selection)
+    write_queue(state_root / "download.yaml", DownloadQueue(schemaVersion=1, selected=selected))
+    print(f"Added {selection.model_id}/{selection.variant_id} to the download queue.")
+
+
+def select_recipe(alias: str, catalog: Any) -> dict[str, Any] | None:
+    recipes = service_recipes().get(alias, [])
+    families = list(dict.fromkeys(runtime_family(item["runtime"]) for item in recipes))
+    family = questionary.select(
+        "Runtime",
+        choices=[
+            questionary.Choice(RUNTIME_NAMES.get(item, item), value=item) for item in families
+        ],
+    ).ask()
+    if family is None:
+        return None
+    compatible = [item for item in recipes if runtime_family(item["runtime"]) == family]
+    model_ids = list(dict.fromkeys(item["model_id"] for item in compatible))
+    model_id = questionary.select(
+        "Model",
+        choices=[
+            questionary.Choice(
+                catalog.model(item).display_name,
+                value=item,
+                description=catalog.model(item).description,
+            )
+            for item in model_ids
+        ],
+    ).ask()
+    if model_id is None:
+        return None
+    variants = [item for item in compatible if item["model_id"] == model_id]
+    if len(variants) == 1:
+        return variants[0]
+    variant_id = questionary.select(
+        "Variant",
+        choices=[
+            questionary.Choice(
+                item["variant_id"],
+                value=item["variant_id"],
+                description=catalog.model(model_id).variant(item["variant_id"]).runtime_notes,
+            )
+            for item in variants
+        ],
+    ).ask()
+    return next((item for item in variants if item["variant_id"] == variant_id), None)
+
+
+def show_current_category_status(
+    alias: str,
+    title: str,
+    catalog: Any,
+    settings: Settings,
+    docker_settings: DeploymentSettings,
+    state_root: Path,
+) -> bool:
+    """Show saved, workstation and live target state before changing a category."""
+    deployment = load_deployment(state_root, docker_settings.docker_context)
+    choice = deployment.assignments.get(alias)
+    preset = recipe(alias, choice.model_id, choice.variant_id) if choice is not None else None
+    model_name = (
+        catalog.model(choice.model_id).display_name if choice is not None else "Not configured"
+    )
+    variant = choice.variant_id if choice is not None else "—"
+    runtime = (
+        RUNTIME_NAMES.get(runtime_family(preset["runtime"]), preset["runtime"])
+        if preset is not None
+        else "Not configured"
+    )
+    desired = "Not configured"
+    if choice is not None:
+        desired = "Enabled" if choice.enabled else "Disabled"
+    model_files = "—"
+    runtime_image = "—"
+    if choice is not None and preset is not None:
+        if configured_storage(settings):
+            installed = load_installed(settings.storage_root / "installed.yaml")
+            entry = next(
+                (
+                    item
+                    for item in installed.installed
+                    if (item.model_id, item.variant_id) == (choice.model_id, choice.variant_id)
+                ),
+                None,
+            )
+            model_files = (
+                "Downloaded"
+                if entry is not None and (settings.storage_root / entry.path).is_dir()
+                else "Missing"
+            )
+        else:
+            model_files = "Storage disconnected"
+        runtime_image = (
+            "Ready"
+            if local_images_ready(settings, image_names_for_runtime(preset["runtime"]))
+            else "Missing"
+        )
+
+    target_service = "Target unavailable"
+    active_model = "Unknown"
+    manual_test_ready = False
+    try:
+        docker = Docker(docker_settings)
+        states = docker.service_status()
+        recipes = service_recipes()[alias]
+        running = [
+            item for item in recipes if states.get(item["service"], ("", "", ""))[0] == "running"
+        ]
+        if len(running) > 1:
+            target_service = "Multiple mutually exclusive services are running"
+            active_model = "Ambiguous"
+        elif running:
+            running_preset = running[0]
+            _, health, _ = states[running_preset["service"]]
+            running_runtime = RUNTIME_NAMES.get(
+                runtime_family(running_preset["runtime"]), running_preset["runtime"]
+            )
+            target_service = f"{running_preset['service']}: running / {health} ({running_runtime})"
+            identity = docker.active_identity(alias, running_preset["service"])
+            if identity is None:
+                active_model = "Active model link unavailable"
+            else:
+                active_name = catalog.model(identity[0]).display_name
+                active_model = f"{active_name} / {identity[1]}"
+                if choice is not None and identity != (choice.model_id, choice.variant_id):
+                    active_model += " (differs from saved assignment)"
+            manual_test_ready = bool(
+                choice is not None
+                and choice.enabled
+                and preset is not None
+                and running_preset["service"] == preset["service"]
+                and health == "healthy"
+                and identity == (choice.model_id, choice.variant_id)
+            )
+        else:
+            known = [
+                f"{item['service']}: {states[item['service']][0]}"
+                for item in recipes
+                if item["service"] in states
+            ]
+            target_service = ", ".join(known) if known else "No container"
+            active_model = "None running"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+    table(
+        f"Current {alias} status",
+        ["Component", "Current state"],
+        [
+            ["Saved model", model_name],
+            ["Saved variant", variant],
+            ["Saved runtime", runtime],
+            ["Desired service state", desired],
+            ["Model files", model_files],
+            ["Workstation runtime image", runtime_image],
+            [f"Target ({docker_settings.docker_context})", target_service],
+            ["Active target model", active_model],
+        ],
+    )
+    return manual_test_ready
+
+
+def guided_models() -> None:
+    environment = configured_environment()
+    if environment is None:
+        return
+    settings, docker_settings = environment
+    catalog = load_catalog()
+    available_groups = {model.browse_group for model in catalog.models}
+    deployable_aliases = set(service_recipes())
+    group = questionary.select(
+        "Which service alias would you like to configure?",
+        choices=[
+            questionary.Choice(
+                f"{CATEGORY_GUIDES[key][2]} — {CATEGORY_GUIDES[key][0]}",
+                value=key,
+                description=CATEGORY_GUIDES[key][1],
+                disabled=(
+                    None
+                    if CATEGORY_GUIDES[key][2] in deployable_aliases
+                    else "No deployable runtime is configured"
+                ),
+            )
+            for key in CATEGORY_GUIDES
+            if key in available_groups
+        ],
+    ).ask()
+    if group is None:
+        return
+    title, description, alias = CATEGORY_GUIDES[group]
+    print(f"\n{title}: {description}")
+    if alias not in deployable_aliases:
+        print("This category is catalog-only; no deployable runtime is configured.")
+        return
+    local_state_root = workstation_state_root()
+    status_state_root = (
+        local_state_root
+        if (local_state_root / "deployment.json").is_file()
+        else settings.storage_root
+        if (settings.storage_root / "deployment.json").is_file()
+        else local_state_root
+    )
+    manual_test_ready = show_current_category_status(
+        alias, title, catalog, settings, docker_settings, status_state_root
+    )
+    action = questionary.select(
+        "What would you like to do?",
+        choices=[
+            questionary.Choice("Change model or runtime", value="change"),
+            questionary.Choice(
+                "Run manual endpoint test",
+                value="test",
+                disabled=None if manual_test_ready else "No matching healthy service is running",
+            ),
+            questionary.Choice("Back", value="back"),
+        ],
+    ).ask()
+    if action == "test":
+        from inference_runtime_manager.installer.api_tests import test_individual
+
+        test_individual(alias)
+        return
+    if action != "change":
+        return
+    state_root = management_state(settings.storage_root)
+    preset = select_recipe(alias, catalog)
+    if preset is None:
+        return
+    model = catalog.model(preset["model_id"])
+    variant = model.variant(preset["variant_id"])
+    selection = Selection(modelId=model.id, variantId=variant.id)
+    storage_ready = configured_storage(settings)
+    installed = load_installed(settings.storage_root / "installed.yaml") if storage_ready else None
+    local_model = bool(
+        installed
+        and any(
+            (entry.model_id, entry.variant_id) == (model.id, variant.id)
+            and (settings.storage_root / entry.path).is_dir()
+            for entry in installed.installed
+        )
+    )
+    runtime_images = image_names_for_runtime(preset["runtime"])
+    runtime_ready = local_images_ready(settings, runtime_images)
+    table(
+        f"{title} selection",
+        ["Component", "Selection", "Status"],
+        [
+            [
+                "Runtime",
+                RUNTIME_NAMES.get(runtime_family(preset["runtime"]), preset["runtime"]),
+                "Ready" if runtime_ready else "Missing",
+            ],
+            ["Model", model.display_name, "Downloaded" if local_model else "Missing"],
+            ["Variant", variant.id, format_bytes(variant.estimated_download_bytes)],
+            [
+                "Staging storage",
+                str(settings.storage_root),
+                "Available" if storage_ready else "Disconnected",
+            ],
+            ["Target", docker_settings.docker_context, alias],
+        ],
+    )
+    if not local_model:
+        action = questionary.select(
+            "Model files are not available locally",
+            choices=[
+                questionary.Choice(
+                    "Download now",
+                    value="download",
+                    disabled=None if storage_ready else "Staging storage is disconnected",
+                ),
+                questionary.Choice("Add to download queue for later", value="queue"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+        if action == "queue":
+            add_to_download_queue(state_root, selection)
+            return
+        if action != "download":
+            return
+        download_selections([selection])
+        local_model = True
+    if not runtime_ready:
+        if not questionary.confirm(
+            f"Prepare the required {RUNTIME_NAMES.get(runtime_family(preset['runtime']), preset['runtime'])} runtime on this workstation?",
+            default=True,
+        ).ask():
+            print("Model retained for later; runtime was not prepared.")
+            return
+        prepare_local_images(settings, runtime_images)
+    if not questionary.confirm(
+        f"Install the runtime and activate {model.display_name} on {docker_settings.docker_context}?",
+        default=False,
+    ).ask():
+        print("Model and runtime retained for later activation.")
+        return
+    docker = Docker(docker_settings)
+    deployment = load_deployment(state_root, docker_settings.docker_context)
+    previous = deployment.model_copy(deep=True)
+    deployment.assignments[alias] = Assignment(
+        model_id=model.id,
+        variant_id=variant.id,
+        enabled=True,
+        runtime=preset["runtime"],
+    )
+    try:
+        prepare_recipe(settings.storage_root, alias, preset)
+        save_deployment(state_root, deployment)
+        docker.install(settings, runtime_images)
+        provision(docker, settings.storage_root, state_root, [alias])
+    except BaseException:
+        save_deployment(state_root, previous)
+        raise
+    print(
+        f"{title} is ready: {model.display_name} on {RUNTIME_NAMES.get(runtime_family(preset['runtime']), preset['runtime'])}."
+    )
+    if questionary.confirm("Run the manual endpoint test now?", default=True).ask():
+        from inference_runtime_manager.installer.api_tests import test_individual
+
+        test_individual(alias)
+
+
+def runtime_updates() -> None:
+    environment = configured_environment()
+    if environment is None:
+        return
+    settings, docker_settings = environment
+    recipes = [item for values in service_recipes().values() for item in values]
+    families = list(dict.fromkeys(runtime_family(item["runtime"]) for item in recipes))
+    family = questionary.select(
+        "Runtime to prepare or update",
+        choices=[
+            questionary.Choice(RUNTIME_NAMES.get(item, item), value=item) for item in families
+        ],
+    ).ask()
+    if family is None:
+        return
+    matching = [item for item in recipes if runtime_family(item["runtime"]) == family]
+    names = list(
+        dict.fromkeys(
+            name for item in matching for name in image_names_for_runtime(item["runtime"])
+        )
+    )
+    if not questionary.confirm(
+        f"Prepare {RUNTIME_NAMES.get(family, family)} images on this workstation?", default=True
+    ).ask():
+        return
+    prepare_local_images(settings, names)
+    state_root = management_state(settings.storage_root)
+    deployment = load_deployment(state_root, docker_settings.docker_context)
+    affected = [
+        (alias, recipe(alias, choice.model_id, choice.variant_id))
+        for alias, choice in deployment.assignments.items()
+        if choice.enabled
+        and runtime_family(recipe(alias, choice.model_id, choice.variant_id)["runtime"]) == family
+    ]
+    if not questionary.confirm(
+        f"Stream these images to offline target {docker_settings.docker_context}?", default=False
+    ).ask():
+        return
+    docker = Docker(docker_settings)
+    docker.install(settings, names)
+    if not affected:
+        print("Runtime images are installed; no enabled saved assignment uses this runtime.")
+        return
+    if not questionary.confirm(
+        f"Recreate {len(affected)} enabled service(s) with the updated runtime now?",
+        default=False,
+    ).ask():
+        print("Runtime images are installed. Existing services remain unchanged.")
+        return
+    states = docker.service_status()
+    recreate = []
+    for alias, preset in affected:
+        state_name = states.get(preset["service"], ("", "", ""))[0]
+        if state_name != "running":
+            print(f"{alias}: assigned service is not running; skipped.")
+            continue
+        if docker.active_identity(alias, preset["service"]) != (
+            preset["model_id"],
+            preset["variant_id"],
+        ):
+            raise ValueError(f"{alias}: active model does not match the saved assignment")
+        tag = docker.image_tag_for(preset["runtime"])
+        recreate.append(
+            (
+                alias,
+                preset,
+                docker.service_container_image_id(preset["service"]),
+                tag,
+            )
+        )
+    updated = []
+    current = None
+    try:
+        for current in recreate:
+            alias, preset, _, _ = current
+            docker.run(
+                "up",
+                "--pull",
+                "never",
+                "-d",
+                "--no-deps",
+                "--force-recreate",
+                "--wait",
+                "--wait-timeout",
+                "300",
+                preset["service"],
+            )
+            updated.append(current)
+            current = None
+            print(f"{alias}: runtime updated and service is healthy.")
+    except (OSError, subprocess.SubprocessError, ValueError, KeyboardInterrupt) as exc:
+        rollback = ([current] if current is not None else []) + list(reversed(updated))
+        try:
+            for alias, preset, previous_image, tag in rollback:
+                repository = tag.rsplit(":", 1)[0]
+                rollback_tag = (
+                    f"{repository}:rollback-{previous_image.removeprefix('sha256:')[:16]}"
+                )
+                docker.tag_image(previous_image, rollback_tag)
+                docker.run_with_image(
+                    preset["runtime"],
+                    rollback_tag,
+                    "up",
+                    "--pull",
+                    "never",
+                    "-d",
+                    "--no-deps",
+                    "--force-recreate",
+                    "--wait",
+                    "--wait-timeout",
+                    "300",
+                    preset["service"],
+                )
+                print(f"{alias}: previous runtime restored.")
+        except (OSError, subprocess.SubprocessError, ValueError) as rollback_exc:
+            raise RuntimeError("Runtime update and rollback failed") from rollback_exc
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        raise RuntimeError("Runtime update failed; previous services restored") from exc
+
+
+def configuration_menu() -> None:
+    while True:
+        configured = load_workstation_config()
+        try:
+            settings = Settings()
+        except ValueError:
+            settings = None
+        try:
+            deployment = DeploymentSettings()
+        except ValueError:
+            deployment = None
+        storage_root = configured.storage_root or (
+            settings.storage_root if settings is not None else None
+        )
+        hf_home = configured.hf_home or (settings.hf_home if settings is not None else None)
+        build_context = configured.build_docker_context or (
+            settings.build_docker_context if settings is not None else "desktop-linux"
+        )
+        target_context = configured.docker_context or (
+            deployment.docker_context if deployment is not None else None
+        )
+        table(
+            "Configuration",
+            ["Setting", "Value"],
+            [
+                ["Target Docker context", target_context or "Not configured"],
+                ["Model staging storage", str(storage_root or "Not configured")],
+                ["Hugging Face home", str(hf_home or "Not configured")],
+                ["Workstation Docker context", build_context],
+                ["Local configuration", str(config_path())],
+            ],
+        )
+        action = questionary.select(
+            "Configuration",
+            choices=[
+                questionary.Choice("Select model staging storage", value="storage"),
+                questionary.Choice("Set target Docker context", value="target"),
+                questionary.Choice("Set workstation Docker context", value="build"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+        if action in (None, "back"):
+            return
+        if action == "storage":
+            value = questionary.path(
+                "Model staging directory:",
+                default=str(storage_root or ""),
+                placeholder=STORAGE_ROOT_PLACEHOLDER if storage_root is None else None,
+            ).ask()
+            if value is None:
+                continue
+            path = Path(value).expanduser()
+            if not path.is_dir():
+                print("Select an existing mounted directory.")
+                continue
+            configured.storage_root = path
+            configured.hf_home = path / "huggingface"
+        elif action == "target":
+            value = questionary.text(
+                "Target Docker context:",
+                default=target_context or "",
+                placeholder=TARGET_CONTEXT_PLACEHOLDER if target_context is None else None,
+            ).ask()
+            if not value:
+                continue
+            configured.docker_context = value.strip()
+        elif action == "build":
+            value = questionary.text("Workstation Docker context:", default=build_context).ask()
+            if not value:
+                continue
+            configured.build_docker_context = value.strip()
+        save_workstation_config(WorkstationConfig.model_validate(configured.model_dump()))
+        print("Configuration saved.")
+
+
 def select_models() -> None:
-    root = storage()
+    settings = Settings()
+    root = settings.storage_root
+    storage_ready = configured_storage(settings)
     catalog = load_catalog()
     category = questionary.select(
         "Category",
         choices=[
             questionary.Choice(CATEGORY_NAMES.get(c, c), value=c)
-            for c in sorted({m.category for m in catalog.models})
+            for c in sorted({m.browse_group for m in catalog.models})
         ],
     ).ask()
     if category is None:
         return
-    variants = [(m, v) for m in catalog.models if m.category == category for v in m.variants]
-    installed = {
-        (i.model_id, i.variant_id): i for i in load_installed(root / "installed.yaml").installed
-    }
-    queue = load_queue(root / "download.yaml")
+    models = [model for model in catalog.models if model.browse_group == category]
+    installed = (
+        {(i.model_id, i.variant_id): i for i in load_installed(root / "installed.yaml").installed}
+        if storage_ready
+        else {}
+    )
+    queue_path = management_state(root) / "download.yaml"
+    queue = load_queue(queue_path)
+    queue = review_obsolete_queue(catalog, queue, print)
+    if queue is None:
+        return
     selected = {(s.model_id, s.variant_id) for s in queue.selected}
     table(
         CATEGORY_NAMES.get(category, category),
-        ["#", "Model", "Variant", "Runtime", "Local files", "Download"],
+        ["#", "Model", "Variants", "Selected", "Local files"],
         [
             [
                 str(i),
-                m.display_name,
-                v.id,
-                ", ".join(v.runtimes) or "Download only",
-                "Downloaded"
-                if (m.id, v.id) in installed and (root / installed[m.id, v.id].path).is_dir()
-                else "Queued"
-                if (m.id, v.id) in selected
-                else "Missing",
-                format_bytes(v.estimated_download_bytes),
+                model.display_name,
+                str(len(model.variants)),
+                ", ".join(
+                    variant.id for variant in model.variants if (model.id, variant.id) in selected
+                )
+                or "—",
+                (
+                    f"{sum(1 for variant in model.variants if (model.id, variant.id) in installed and (root / installed[model.id, variant.id].path).is_dir())}/{len(model.variants)} downloaded"
+                    if storage_ready
+                    else "Storage disconnected"
+                ),
             ]
-            for i, (m, v) in enumerate(variants, 1)
+            for i, model in enumerate(models, 1)
         ],
     )
     action = questionary.select(
@@ -99,7 +758,7 @@ def select_models() -> None:
             choices=[
                 questionary.Choice(m.display_name, value=m)
                 for m in catalog.models
-                if m.category == category
+                if m.browse_group == category
             ],
         ).ask()
         if model is not None:
@@ -108,25 +767,56 @@ def select_models() -> None:
     if action != "Select downloads":
         return
     chosen = questionary.checkbox(
-        "Select rows (Space toggles, Enter saves this category)",
+        "Select models (Space toggles, Enter chooses variants)",
         choices=[
             questionary.Choice(
-                f"{i:>2}  {m.id} / {v.id}  [{', '.join(v.runtimes) or 'download only'}]",
-                value=(m.id, v.id),
-                checked=(m.id, v.id) in selected,
-                description=v.compatibility_notes,
+                f"{i:>2}  {model.display_name}",
+                value=model.id,
+                checked=any((model.id, variant.id) in selected for variant in model.variants),
+                description=model.description,
             )
-            for i, (m, v) in enumerate(variants, 1)
+            for i, model in enumerate(models, 1)
         ],
     ).ask()
     if chosen is None:
         return
-    kept = [s for s in queue.selected if catalog.model(s.model_id).category != category]
-    draft = DownloadQueue(
-        schemaVersion=1, selected=kept + [Selection(modelId=m, variantId=v) for m, v in chosen]
-    )
+    kept = [s for s in queue.selected if catalog.model(s.model_id).browse_group != category]
+    category_selections = []
+    for model in models:
+        if model.id not in chosen:
+            continue
+        if len(model.variants) == 1:
+            variant_ids = [model.variants[0].id]
+        else:
+            show_variants(model, print)
+            variant_ids = questionary.checkbox(
+                f"{model.display_name} — select variant(s)",
+                choices=[
+                    questionary.Choice(
+                        f"{variant.id} [{', '.join(variant.runtimes) or 'download only'}] — {format_bytes(variant.estimated_download_bytes)}",
+                        value=variant.id,
+                        checked=(model.id, variant.id) in selected,
+                        description=variant.compatibility_notes,
+                    )
+                    for variant in model.variants
+                ],
+                instruction="Arrows, Space to select, Enter to continue; Ctrl+C cancels.",
+            ).ask()
+            if variant_ids is None:
+                return
+            if not variant_ids:
+                print(f"Select at least one variant for {model.display_name}; queue unchanged.")
+                return
+        category_selections.extend(
+            Selection(modelId=model.id, variantId=variant_id) for variant_id in variant_ids
+        )
+    draft = DownloadQueue(schemaVersion=1, selected=kept + category_selections)
+    show_queue(draft, catalog, print)
+    if not questionary.confirm("Save this download queue?", default=False).ask():
+        print("Download queue unchanged.")
+        return
     _confirm_gated(catalog, draft.selected)
-    write_queue(root / "download.yaml", draft)
+    write_queue(queue_path, draft)
     print(f"Saved {len(draft.selected)} variants. Choose Download selected models next.")
 
 
@@ -155,8 +845,9 @@ def upload_models() -> None:
 
 def assign_models() -> None:
     root = storage()
+    state_root = state()
     target = DeploymentSettings().docker_context
-    deployment = load_deployment(root, target)
+    deployment = load_deployment(state_root, target)
     alias = questionary.select("Stable model name", choices=list(ALIAS_CATEGORIES)).ask()
     if alias is None:
         return
@@ -201,29 +892,36 @@ def assign_models() -> None:
         enabled=enabled,
         runtime=runtime,
     )
-    save_deployment(root, deployment)
+    save_deployment(state_root, deployment)
     print(f"Saved {alias} locally for {target}.")
     if questionary.confirm(f"Apply {alias} to {target} now?", default=False).ask():
         from inference_runtime_manager.installer.upload import provision
 
-        provision(Docker(DeploymentSettings()), root, [alias])
+        provision(Docker(DeploymentSettings()), root, state_root, [alias])
     else:
         print("Choose Review / apply assignments when ready to update the server.")
 
 
 def deployment_status(remote: bool = False, verify_remote: bool = False) -> None:
-    root = storage()
+    settings = Settings()
+    root = settings.storage_root
+    storage_ready = configured_storage(settings)
+    state_root = management_state(root)
     if verify_remote and not remote:
         raise ValueError("Remote verification requires a Docker context")
-    configured = deployment_services(root)
+    if verify_remote and not storage_ready:
+        raise ValueError("Connect the configured model staging storage before full verification")
+    configured = deployment_services(state_root)
     docker = Docker(DeploymentSettings()) if remote else None
-    deployment = load_deployment(root, docker.settings.docker_context if docker else None)
+    deployment = load_deployment(state_root, docker.settings.docker_context if docker else None)
     states: dict[str, tuple[str, str, str]] = {}
     if docker:
         states = docker.service_status()
-    entries = {
-        (e.model_id, e.variant_id): e for e in load_installed(root / "installed.yaml").installed
-    }
+    entries = (
+        {(e.model_id, e.variant_id): e for e in load_installed(root / "installed.yaml").installed}
+        if storage_ready
+        else {}
+    )
     rows = []
     for alias in ALIAS_CATEGORIES:
         assigned = alias in deployment.assignments
@@ -232,6 +930,8 @@ def deployment_status(remote: bool = False, verify_remote: bool = False) -> None
         local = (
             "Downloaded"
             if key in entries and (root / entries[key].path).is_dir()
+            else "Storage disconnected"
+            if key is not None and not storage_ready
             else "Missing"
             if key is not None
             else "—"
@@ -328,8 +1028,9 @@ def deployment_status(remote: bool = False, verify_remote: bool = False) -> None
 
 def toggle_service() -> None:
     root = storage()
+    state_root = state()
     settings = DeploymentSettings()
-    deployment = load_deployment(root, settings.docker_context)
+    deployment = load_deployment(state_root, settings.docker_context)
     if not deployment.assignments:
         print("Assign uploaded models before enabling a service.")
         return
@@ -341,15 +1042,15 @@ def toggle_service() -> None:
     if enabled is None or enabled == choice.enabled:
         return
     choice.enabled = enabled
-    save_deployment(root, deployment)
+    save_deployment(state_root, deployment)
     if questionary.confirm("Apply this service state now?", default=False).ask():
         from inference_runtime_manager.installer.upload import provision
 
-        provision(Docker(settings), root, [alias])
+        provision(Docker(settings), root, state_root, [alias])
 
 
-def warn_vram(root: Path) -> None:
-    deployment = load_deployment(root)
+def warn_vram(state_root: Path) -> None:
+    deployment = load_deployment(state_root)
     enabled = [
         recipe(alias, choice.model_id, choice.variant_id)
         for alias, choice in deployment.assignments.items()
@@ -365,18 +1066,19 @@ def warn_vram(root: Path) -> None:
 
 def apply_assignments() -> None:
     root = storage()
-    deployment = load_deployment(root, DeploymentSettings().docker_context)
+    state_root = state()
+    deployment = load_deployment(state_root, DeploymentSettings().docker_context)
     if not deployment.assignments:
         print(
             "Assign uploaded models first. Bundled defaults are suggestions, not saved assignments."
         )
         return
     deployment_status(remote=True)
-    warn_vram(root)
+    warn_vram(state_root)
     if questionary.confirm(
         "Apply saved assignments and recreate affected services?", default=False
     ).ask():
         from inference_runtime_manager.installer.upload import provision
 
-        provision(Docker(DeploymentSettings()), root, list(deployment.assignments))
-        save_deployment(root, deployment)
+        provision(Docker(DeploymentSettings()), root, state_root, list(deployment.assignments))
+        save_deployment(state_root, deployment)
