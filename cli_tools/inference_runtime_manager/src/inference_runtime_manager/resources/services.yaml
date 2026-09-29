@@ -34,17 +34,45 @@ vlm-general:
   transport: curl
   required_files: [Qwen3VL-8B-Instruct-Q4_K_M.gguf, mmproj-Qwen3VL-8B-Instruct-F16.gguf]
 vlm-images:
-  runtime: vllm
-  service: vlm-images
-  model_id: lightonocr-2-1b
-  variant_id: transformers
-  enabled: false
-  cache_repo: lightonai/LightOnOCR-2-1B
-  estimated_vram_gib: 6
-  internal_port: 8000
-  health_path: /health
-  transport: python3
-  required_files: [config.json, model.safetensors]
+  recipes:
+    - runtime: vllm
+      service: vlm-images
+      model_id: lightonocr-2-1b
+      variant_id: transformers
+      enabled: false
+      default: true
+      cache_repo: lightonai/LightOnOCR-2-1B
+      estimated_vram_gib: 6
+      internal_port: 8000
+      health_path: /health
+      transport: python3
+      required_files: [config.json, model.safetensors]
+    - runtime: llama.cpp-ocr-proxy
+      service: vlm-images-olmocr
+      model_id: olmocr-2-7b-1025
+      variant_id: gguf-q6-k
+      enabled: false
+      default: false
+      estimated_vram_gib: 10
+      internal_port: 8000
+      health_path: /health
+      transport: python3
+      required_files:
+        - allenai_olmOCR-2-7B-1025-Q6_K.gguf
+        - mmproj-allenai_olmOCR-2-7B-1025-f16.gguf
+    - runtime: vllm-ocr-proxy
+      service: vlm-images-nanonets
+      model_id: nanonets-ocr2-3b
+      variant_id: transformers
+      enabled: false
+      default: false
+      cache_repo: nanonets/Nanonets-OCR2-3B
+      estimated_vram_gib: 11
+      internal_port: 8000
+      health_path: /health
+      transport: python3
+      required_files: [config.json, model.safetensors.index.json]
+      required_any_suffix: [.safetensors]
 stt-general:
   runtime: speaches
   service: stt-general

@@ -257,6 +257,54 @@ def active(payload):
     )
 
 
+def active_destination(payload):
+    alias = payload["alias"]
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", alias):
+        raise ValueError("Invalid model alias")
+    link = ROOT / "active" / alias
+    if not link.is_symlink():
+        return None
+    target = link.resolve()
+    try:
+        relative_target = target.relative_to(ROOT)
+    except ValueError:
+        raise ValueError("Active model points outside model storage") from None
+    if (
+        not target.is_dir()
+        or len(relative_target.parts) != 5
+        or relative_target.parts[0] != "library"
+    ):
+        raise ValueError("Active model has an invalid destination")
+    return relative_target.as_posix()
+
+
+def restore_active(payload):
+    alias = payload["alias"]
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", alias):
+        raise ValueError("Invalid model alias")
+    active = ROOT / "active"
+    active.mkdir(exist_ok=True)
+    link = active / alias
+    if link.exists() and not link.is_symlink():
+        raise ValueError("Refusing to replace unmanaged active model data")
+    destination = payload.get("destination")
+    if destination is None:
+        link.unlink(missing_ok=True)
+        return
+    if not isinstance(destination, str):
+        raise ValueError("Invalid active model destination")
+    target = safe(ROOT, destination)
+    parts = target.relative_to(ROOT).parts
+    if not target.is_dir() or len(parts) != 5 or parts[0] != "library":
+        raise ValueError("Invalid active model destination")
+    temporary = active / ("." + alias + "-" + uuid.uuid4().hex)
+    try:
+        temporary.symlink_to(target, target_is_directory=True)
+        os.replace(temporary, link)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def configure():
     chatterbox = b"""server:\n  host: 0.0.0.0\n  port: 8004\n  use_ngrok: false\n  use_auth: false\n  log_file_path: /tmp/chatterbox.log\nmodel:\n  repo_id: chatterbox-multilingual\ntts_engine:\n  device: cuda\n  predefined_voices_path: /runtime-config/voices\n  reference_audio_path: /tmp/reference_audio\n  default_voice_id: default\npaths:\n  model_cache: /models/cache\n  output: /tmp/outputs\ngeneration_defaults:\n  temperature: 0.8\n  exaggeration: 1.0\n  cfg_weight: 0.5\n  seed: 0\n  speed_factor: 1.0\n  language: de\naudio_output:\n  format: wav\n  sample_rate: 24000\n  max_reference_duration_sec: 30\n  save_to_disk: false\nui:\n  title: Chatterbox TTS Server\n  show_language_select: true\n  max_predefined_voices_in_dropdown: 0\ndebug:\n  save_intermediate_audio: false\n"""
     VOICE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -290,6 +338,11 @@ def main():
             result = {"activated": payload["alias"]}
         elif action == "active":
             result = {"active": active(payload)}
+        elif action == "active_destination":
+            result = {"destination": active_destination(payload)}
+        elif action == "restore_active":
+            restore_active(payload)
+            result = {"restored": payload["alias"]}
         elif action == "configure":
             configure()
             result = {"configured": True}
