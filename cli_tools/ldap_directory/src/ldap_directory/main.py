@@ -13,6 +13,7 @@ from typing import cast
 from uuid import uuid4
 
 import questionary
+import requests
 import yaml
 from rich.console import Console
 from rich.table import Table
@@ -29,6 +30,71 @@ class Target:
     context: str
     client: str
     settings: dict[str, object]
+
+
+_IMAGE = "ghcr.io/neurwerk/k8s-stack-tooling"
+_RELEASES = "https://api.github.com/repos/neurwerk/k8s_stack_tooling/releases?per_page=100"
+_MINIMUM_WORKER_VERSION = (0, 7, 3)
+
+
+def select_image() -> str:
+    """Offer published worker images from the Tooling release's recorded digest."""
+    try:
+        response = requests.get(
+            _RELEASES,
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=(3.05, 15),
+        )
+        response.raise_for_status()
+        releases: object = response.json()
+    except (requests.RequestException, ValueError):
+        raise DiagnosticError("Could not check published Tooling images on GitHub") from None
+    if not isinstance(releases, list):
+        raise DiagnosticError("GitHub returned an invalid Tooling release list")
+
+    images: list[tuple[tuple[int, int, int], str]] = []
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        tag = release.get("tag_name")
+        body = release.get("body")
+        if (
+            not isinstance(tag, str)
+            or not isinstance(body, str)
+            or not isinstance(release.get("published_at"), str)
+            or release.get("draft") is not False
+            or release.get("prerelease") is not False
+        ):
+            continue
+        match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", tag)
+        if not match:
+            continue
+        version = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        if version < _MINIMUM_WORKER_VERSION:
+            continue
+        name = f"{_IMAGE}:{tag[1:]}"
+        row = re.compile(
+            rf"^\|\s*`{re.escape(name)}`\s*\|\s*"
+            rf"`{re.escape(_IMAGE)}@sha256:([a-f0-9]{{64}})`\s*\|\s*$",
+            re.MULTILINE,
+        )
+        digests = row.findall(body)
+        if len(digests) == 1:
+            images.append((version, f"{name}@sha256:{digests[0]}"))
+
+    if not images:
+        raise DiagnosticError("No published Tooling image includes the LDAP worker (needs 0.7.3+)")
+    choices = [
+        questionary.Choice(
+            f"Tooling {'.'.join(map(str, version))} ({image.rsplit(':', 1)[1][:12]}…)",
+            value=image,
+        )
+        for version, image in sorted(images, reverse=True)
+    ]
+    selected = questionary.select("Published Tooling image:", choices=choices).ask()
+    if not isinstance(selected, str) or selected not in {image for _, image in images}:
+        raise DiagnosticError("Cancelled")
+    return selected
 
 
 def kubectl(
@@ -344,24 +410,14 @@ def main() -> int:
     """Select a live LDAP context and print complete user and group inventories."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--context", help="Kubernetes context; otherwise choose from the menu")
-    parser.add_argument(
-        "--image",
-        required=True,
-        help="Published k8s-stack-tooling image pinned by version and sha256 digest",
-    )
     args = parser.parse_args()
-    image_pattern = (
-        r"ghcr\.io/neurwerk/k8s-stack-tooling:[0-9]+\.[0-9]+\.[0-9]+"
-        r"@sha256:[a-f0-9]{64}"
-    )
-    if not re.fullmatch(image_pattern, args.image):
-        parser.error("--image must be an exact k8s-stack-tooling version and digest")
     try:
         item = select_target(args.context)
+        image = select_image()
         mode = questionary.select("Show:", choices=["Users", "Groups", "Both"]).ask()
         if mode is None:
             return 0
-        run(item, args.image, mode.lower())
+        run(item, image, mode.lower())
     except KeyboardInterrupt:
         print("Cancelled", file=sys.stderr)
         return 130
