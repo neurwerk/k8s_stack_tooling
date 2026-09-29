@@ -135,6 +135,9 @@ def reconcile_internal_credentials(
             "sandboxApiKey",
             "pluginDaemonKey",
             "agentgatewayApiKey",
+            "difyAgentApiToken",
+            "difyAgentServerSecretKey",
+            "difyAgentSandboxAuthToken",
         ),
         {
             **_bootstrap_password_fields("frontend-dify/internal", bootstrap_passwords),

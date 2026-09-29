@@ -73,6 +73,25 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert second.added_fields == 0
     assert {path: record.values for path, record in session.secrets.items()} == original
 
+    dify = original["frontend-dify/internal"]
+    assert all(
+        dify[field]
+        for field in ("difyAgentApiToken", "difyAgentServerSecretKey", "difyAgentSandboxAuthToken")
+    )
+    assert (
+        len(
+            {
+                dify[field]
+                for field in (
+                    "difyAgentApiToken",
+                    "difyAgentServerSecretKey",
+                    "difyAgentSandboxAuthToken",
+                )
+            }
+        )
+        == 3
+    )
+
     librechat = original["frontend-librechat/internal"]
     code_interpreter = original["librechat-code-interpreter/internal"]
     assert {
