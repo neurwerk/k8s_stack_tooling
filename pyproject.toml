@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.7.2"
+version = "0.7.3"
 description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
@@ -17,6 +17,7 @@ dependencies = [
     "gunicorn>=26.2",
     "pydantic-settings>=2.10",
     "defusedxml>=0.7.1",
+    "ldap3>=2.9,<3",
 ]
 
 [project.scripts]
@@ -29,6 +30,7 @@ upsert-user = "k8s_stack_tooling.keycloak.upsert_user:main"
 send-user-actions-email = "k8s_stack_tooling.keycloak.send_user_actions_email:main"
 upsert-composite-roles = "k8s_stack_tooling.keycloak.upsert_composite_roles:main"
 upsert-opensearch-user = "k8s_stack_tooling.opensearch.upsert_opensearch_user:main"
+ldap-directory-worker = "k8s_stack_tooling.ldap_directory:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]

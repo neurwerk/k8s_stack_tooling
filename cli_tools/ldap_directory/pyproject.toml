@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ldap-directory"
+version = "0.1.0"
+description = "Inspect LDAP users and groups through an explicit Kubernetes context."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = ["questionary>=2.1,<3", "rich>=14,<15", "PyYAML>=6,<7"]
+
+[project.scripts]
+ldap-directory = "ldap_directory.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ldap_directory"]
+
+[dependency-groups]
+dev = ["ruff>=0.15.17", "ty>=0.0.49"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ty.rules]
+all = "error"
