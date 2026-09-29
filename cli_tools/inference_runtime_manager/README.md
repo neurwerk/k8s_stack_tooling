@@ -8,13 +8,16 @@ Kubernetes and never relies on the current Docker context implicitly.
 
 ```bash
 uv sync --dev
-cp .env.example .env
 uv run inference-runtime-manager
 ```
 
-Set the Docker context, external storage root and any service API keys in `.env`.
-The old `LOCAL_AI_INSTALLER_DOCKER_CONTEXT`, `LOCAL_AI_INSTALLER_STORAGE_ROOT`
-and `LOCALAI_BIND_ADDRESS` names remain accepted for migration.
+Use **Configuration** on first launch to select the target Docker context,
+workstation Docker context and model staging storage. Copy `.env.example` to
+`.env` only when environment defaults or service API keys are needed. Non-secret
+interactive choices are stored under the workstation config directory. The old
+`LOCAL_AI_INSTALLER_DOCKER_CONTEXT`,
+`LOCAL_AI_INSTALLER_STORAGE_ROOT` and `LOCALAI_BIND_ADDRESS` names remain accepted
+for migration.
 
 For an SSH target:
 
@@ -25,13 +28,28 @@ docker --context ai-server info
 
 ## Workflow
 
-1. Browse the catalog and select model variants.
-2. Download models and prepare immutable Linux/AMD64 runtime images on external storage.
-3. Install the offline runtime images on the target.
-4. Upload verified model files.
-5. Assign an uploaded model to a stable service alias.
-6. Enable or disable services and apply the assignments.
-7. Run **Test all enabled endpoints** and inspect output quality manually.
+1. Choose a stable service alias, shown with a short purpose description, and review its
+   saved model, runtime, local artifacts and live target state.
+2. Choose whether to change the alias's runtime, model and compatible variant.
+3. Decide whether to download missing model files now or queue them for later.
+4. Decide whether to prepare the required runtime image on the workstation.
+5. Decide whether to stream the runtime to the offline target and activate the model.
+6. Run the offered manual endpoint check and inspect output quality.
+
+The guided workflow combines upload, assignment, enablement and readiness checks
+behind the activation confirmation. **Advanced operations** retains the individual
+steps and runtime-only image updates for diagnostics and unusual maintenance.
+
+The catalog browser lists each model once, then opens a variant submenu for
+models published in multiple formats or quantizations. Entries retained in an
+older download queue but removed from the current catalog are shown explicitly;
+the manager asks before dropping them and leaves the queue unchanged when the
+operator declines or cancels.
+
+The browser separates structured document parsing from private image OCR even
+though both remain stored under the existing OCR artifact category. Granite-
+Docling produces DocTags for `vlm-documents`; LightOnOCR, olmOCR and Nanonets
+serve the mutually exclusive `vlm-images` attachment-inspection recipes.
 
 ## Default TTS Voice
 
@@ -67,9 +85,12 @@ external model storage. Anyone who can call the unauthenticated Chatterbox endpo
 can synthesize with the configured default voice, so keep that endpoint on the
 documented trusted network boundary.
 
-Assignments live in external-storage `deployment.json` and are bound to one
-Docker context. Existing assignments without a runtime, or with the removed
-LocalAI runtime, are migrated to the reviewed runtime for that alias.
+Download selections and assignments live in small workstation state files and are
+bound to one Docker context. Legacy `download.yaml` and `deployment.json` files are
+imported from connected staging storage once. Existing assignments without a
+runtime, or with the removed LocalAI runtime, are migrated to the reviewed runtime
+for that alias. Large model artifacts and their installed inventory remain on the
+selected staging storage.
 
 Applying one assignment atomically points `/models/active/<alias>` at its
 immutable uploaded artifact, stops alternative recipes for the alias, and
@@ -125,12 +146,13 @@ reserved settings; keep those endpoints bound to loopback or a trusted private
 interface.
 
 The package-owned Kokoro and OCR prompt-adapter runtimes contain no model weights.
-`images` builds their locked `linux/amd64` images through
+The manager pulls or builds locked `linux/amd64` images through
 `INFERENCE_RUNTIME_MANAGER_BUILD_DOCKER_CONTEXT` (default `desktop-linux`), rejects
-SSH/TCP build contexts, and writes the verified Docker archive directly to external
-storage. The pinned Martin ONNX model, voice and German normalization files remain
-a separately verified model artifact mounted at runtime. Existing Chatterbox voice
-recordings remain preserved when Martin is selected.
+SSH/TCP build contexts, and streams selected images from that workstation Docker
+store to the offline target. Runtime updates therefore do not depend on model
+staging storage. The pinned Martin ONNX model, voice and German normalization files
+remain a separately verified model artifact mounted at runtime. Existing Chatterbox
+voice recordings remain preserved when Martin is selected.
 
 All image-reader recipes expose the same image-only OpenAI-compatible API as
 `vlm-images`. LightOnOCR consumes that request directly. The package-owned olmOCR
@@ -170,9 +192,9 @@ reports Docker roundtrip and service HTTP time in milliseconds, model generation
 time when the runtime provides it, WAV duration, byte size and audio format,
 plus save and playback time. Generation-only timing requires an updated Kokoro
 image; older images and other TTS runtimes show request timing without claiming
-it is model-only inference time. Use **Download runtime image bundle** and
-**Install/update runtime images**, then **Review / apply assignments**, to
-deploy an updated packaged Kokoro adapter.
+it is model-only inference time. Use **Prepare or update runtime images** to deploy
+an updated packaged Kokoro adapter, then accept the prompt to recreate affected
+enabled services.
 
 ## GPU Notes
 
@@ -197,15 +219,13 @@ reader at a time.
 
 ## Validation
 
-The Docker-side OCR adapter has focused protocol, authentication and response
-normalization tests. Other validation uses linting, formatting, type checking,
-Compose rendering and package building. Live inference validation remains the
-operator-confirmed menu action.
+Automated validation uses linting, formatting, type checking, Compose rendering
+and package building. Runtime behavior and live inference are validated only by
+the operator-confirmed manual endpoint checks.
 
 ```bash
 uv run ruff check src
 uv run ruff format --check src
 uv run ty check
-uv run python -m unittest discover -s tests
 uv build
 ```

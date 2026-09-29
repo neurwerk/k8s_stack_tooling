@@ -17,12 +17,14 @@ from inference_runtime_manager.downloader.models import (
 )
 
 CATEGORY_NAMES = {
+    "document-parsing": "Structured document parsing (DocTags)",
+    "image-ocr": "Private image OCR / attachment inspection",
     "image-generation": "Image generation",
     "vad": "Voice activity detection",
     "asr": "Speech recognition",
     "llm": "Language models",
     "ner": "Named-entity recognition",
-    "ocr": "Document OCR / parsing",
+    "ocr": "OCR",
     "tts": "Text-to-speech",
     "vlm": "General vision",
 }
@@ -110,9 +112,26 @@ def show_queue(
     notes = []
     licences: dict[str, str] = {}
     total = 0
+    models = {model.id: model for model in catalog.models}
     for selection in queue.selected:
-        model = catalog.model(selection.model_id)
-        variant = model.variant(selection.variant_id)
+        model = models.get(selection.model_id)
+        if model is None:
+            table.add_row(
+                Text(f"{selection.model_id}\nNot in current catalog"),
+                Text(selection.variant_id),
+                Text("Unavailable"),
+                Text("Unknown"),
+            )
+            continue
+        variant = next((item for item in model.variants if item.id == selection.variant_id), None)
+        if variant is None:
+            table.add_row(
+                Text(f"{model.display_name}\n{model.category.upper()} | {model.license.name}"),
+                Text(f"{selection.variant_id}\nNot in current catalog"),
+                Text("Unavailable"),
+                Text("Unknown"),
+            )
+            continue
         total += variant.estimated_download_bytes
         table.add_row(
             Text(f"{model.display_name}\n{model.category.upper()} | {model.license.name}"),

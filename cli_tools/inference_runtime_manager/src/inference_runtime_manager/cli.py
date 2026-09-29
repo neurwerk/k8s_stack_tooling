@@ -8,6 +8,7 @@ import subprocess
 import questionary
 from pydantic import ValidationError
 
+from inference_runtime_manager.configuration import management_state
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.downloader.main import main as downloads
 from inference_runtime_manager.installer.api_tests import manual_menu as manual_tests
@@ -25,6 +26,9 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
     from inference_runtime_manager import workflow
 
     local_actions = {
+        "guided": workflow.guided_models,
+        "runtimes": workflow.runtime_updates,
+        "configuration": workflow.configuration_menu,
         "select": workflow.select_models,
         "stage": workflow.upload_models,
         "assign": workflow.assign_models,
@@ -66,9 +70,11 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
     configured = services()
     selected = aliases or [name for name, slot in configured.items() if slot["enabled"]]
     if action == "upload":
-        root = Settings().storage_root
-        deployment = load_deployment(root)
-        configured = deployment_services(root)
+        settings = Settings()
+        root = settings.storage_root
+        state_root = management_state(root)
+        deployment = load_deployment(state_root)
+        configured = deployment_services(state_root)
         selected = aliases or [
             name for name, assignment in deployment.assignments.items() if assignment.enabled
         ]
@@ -77,13 +83,20 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         ):
             raise ValueError("Select each assigned model slot at most once")
         if dry_run:
-            provision(None, root, selected, dry_run=True)
+            provision(None, root, state_root, selected, dry_run=True)
             return
     docker = Docker(DeploymentSettings())
     if action == "install":
-        docker.install(Settings().storage_root)
+        docker.install(Settings())
     elif action == "upload":
-        provision(docker, Settings().storage_root, selected, dry_run=dry_run)
+        settings = Settings()
+        provision(
+            docker,
+            settings.storage_root,
+            management_state(settings.storage_root),
+            selected,
+            dry_run=dry_run,
+        )
     elif action == "status":
         docker.run("ps", "--all")
     elif action == "config":
@@ -94,30 +107,14 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
 def menu() -> None:
     while True:
         choices = [
-            questionary.Separator("── Models ──"),
-            questionary.Choice("1. Browse catalog / select downloads", value="select"),
-            questionary.Choice("2. Download selected models", value="download"),
-            questionary.Choice("3. Upload downloaded models (files only)", value="stage"),
-            questionary.Choice("4. Assign uploaded models to aliases", value="assign"),
-            questionary.Choice("5. Enable / disable a service", value="toggle"),
-            questionary.Choice("6. Review / apply assignments", value="apply"),
+            questionary.Separator("── Guided Setup ──"),
+            questionary.Choice("1. Choose and configure a model", value="guided"),
             questionary.Separator(" "),
-            questionary.Separator("── Manual Tests ──"),
-            questionary.Choice("7. Test endpoints", value="manual-tests"),
+            questionary.Choice("2. Test endpoints manually", value="manual-tests"),
+            questionary.Choice("3. Live deployment status", value="live"),
+            questionary.Choice("4. Configuration", value="configuration"),
             questionary.Separator(" "),
-            questionary.Separator("── Inventory ──"),
-            questionary.Choice("Deployment table (offline)", value="plan"),
-            questionary.Choice("Live deployment status (fast)", value="live"),
-            questionary.Choice("Verify remote model files (full SHA-256)", value="remote"),
-            questionary.Choice("Download queue", value="queue"),
-            questionary.Choice("Downloaded inventory", value="inventory"),
-            questionary.Separator(" "),
-            questionary.Separator("── Setup ──"),
-            questionary.Choice("Hugging Face login", value="login"),
-            questionary.Choice("Storage status", value="storage"),
-            questionary.Choice("Download runtime image bundle", value="images"),
-            questionary.Choice("Install/update runtime images", value="install"),
-            questionary.Choice("Server status", value="status"),
+            questionary.Choice("Advanced operations", value="advanced"),
             *(
                 [questionary.Choice("Record and provision default TTS voice", value="voice")]
                 if voice_cloning_available()
@@ -130,20 +127,50 @@ def menu() -> None:
         if action in (None, "exit"):
             return
         try:
-            if (
-                action != "install"
-                or questionary.confirm(
-                    "Install/update runtime on the configured target?", default=False
-                ).ask()
-            ):
+            if action == "guided":
+                from inference_runtime_manager import workflow
+
+                workflow.guided_models()
+            elif action == "configuration":
+                from inference_runtime_manager import workflow
+
+                workflow.configuration_menu()
+            elif action == "advanced":
+                advanced_menu()
+            else:
                 execute(action)
         except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             # Pydantic validation can include input values. Never print it here.
             print(
-                "Invalid settings; check .env."
+                "Invalid or incomplete settings; use Configuration."
                 if isinstance(exc, ValidationError)
                 else f"Failed: {exc}"
             )
+
+
+def advanced_menu() -> None:
+    choices = [
+        questionary.Choice("Browse catalog / edit download queue", value="select"),
+        questionary.Choice("Download queued models", value="download"),
+        questionary.Choice("Upload downloaded models only", value="stage"),
+        questionary.Choice("Assign an uploaded model", value="assign"),
+        questionary.Choice("Enable / disable a service", value="toggle"),
+        questionary.Choice("Review / apply assignments", value="apply"),
+        questionary.Choice("Prepare or update runtime images", value="runtimes"),
+        questionary.Choice("Deployment table (offline)", value="plan"),
+        questionary.Choice("Verify remote model files (full SHA-256)", value="remote"),
+        questionary.Choice("Download queue", value="queue"),
+        questionary.Choice("Downloaded inventory", value="inventory"),
+        questionary.Choice("Hugging Face login", value="login"),
+        questionary.Choice("Storage status", value="storage"),
+        questionary.Choice("Server status", value="status"),
+        questionary.Choice("Back", value="back"),
+    ]
+    while True:
+        action = questionary.select("Advanced operations", choices=choices).ask()
+        if action in (None, "back"):
+            return
+        execute(action)
 
 
 def main() -> None:
@@ -153,6 +180,9 @@ def main() -> None:
         nargs="?",
         choices=[
             "downloads",
+            "guided",
+            "runtimes",
+            "configuration",
             "images",
             "slots",
             "install",
@@ -196,7 +226,7 @@ def main() -> None:
         raise SystemExit(130) from None
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(
-            "Invalid settings; check .env."
+            "Invalid or incomplete settings; use Configuration."
             if isinstance(exc, ValidationError)
             else f"Failed: {exc}"
         )

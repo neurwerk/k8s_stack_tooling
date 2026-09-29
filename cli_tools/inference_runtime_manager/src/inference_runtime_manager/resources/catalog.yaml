@@ -182,6 +182,7 @@ models:
 
   - id: lightonocr-2-1b
     category: ocr
+    menuGroup: image-ocr
     displayName: LightOnOCR-2-1B (private image reader)
     description: Compact end-to-end image and document transcription model qualified for the target Turing GPU.
     recommended: true
@@ -210,6 +211,7 @@ models:
 
   - id: olmocr-2-7b-1025
     category: ocr
+    menuGroup: image-ocr
     displayName: olmOCR-2-7B-1025 Q6_K
     description: Document-page OCR using the olmOCR v4 prompt behind the stable private image-reader API.
     source: allenai/olmOCR-2-7B-1025
@@ -806,6 +808,7 @@ models:
 
   - id: granite-docling-258m
     category: ocr
+    menuGroup: document-parsing
     displayName: Granite-Docling-258M
     description: Compact document parser producing structured DocTags, including tables, equations, and page layout.
     source: ibm-granite/granite-docling-258M
@@ -843,6 +846,7 @@ models:
 
   - id: nanonets-ocr2-3b
     category: ocr
+    menuGroup: image-ocr
     displayName: Nanonets-OCR2-3B
     description: Multilingual document OCR to structured Markdown, HTML tables, equations, and semantic tags.
     source: nanonets/Nanonets-OCR2-3B

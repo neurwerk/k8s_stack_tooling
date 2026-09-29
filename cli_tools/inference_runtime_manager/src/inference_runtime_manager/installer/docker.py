@@ -11,13 +11,23 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import yaml
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from inference_runtime_manager.configuration import load_workstation_config
+
+
+def _configured_docker_context() -> str:
+    value = load_workstation_config().docker_context
+    if value is None:
+        raise ValueError("Missing workstation configuration: docker_context")
+    return value
 
 
 class DeploymentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
     docker_context: str = Field(
+        default_factory=_configured_docker_context,
         validation_alias=AliasChoices(
             "INFERENCE_RUNTIME_MANAGER_DOCKER_CONTEXT", "LOCAL_AI_INSTALLER_DOCKER_CONTEXT"
         ),
@@ -55,6 +65,13 @@ class DeploymentSettings(BaseSettings):
     vllm_nanonets_gpu_memory_utilization: float = Field(
         default=0.65, gt=0, le=1, alias="VLLM_NANONETS_GPU_MEMORY_UTILIZATION"
     )
+
+    @model_validator(mode="after")
+    def apply_workstation_config(self) -> DeploymentSettings:
+        configured = load_workstation_config()
+        if configured.docker_context is not None:
+            self.docker_context = configured.docker_context
+        return self
 
     def api_key_for(self, alias: str) -> str | None:
         """Return the independently configured key for one stable service alias."""
@@ -199,8 +216,8 @@ class Docker:
             for item in parsed
         }
 
-    def image_matches(self, runtime: str, image: str) -> bool:
-        key = {
+    def image_environment_key(self, runtime: str) -> str:
+        return {
             "vllm": "VLLM_IMAGE",
             "vllm-ocr-proxy": "VLLM_OCR_PROXY_IMAGE",
             "llama.cpp": "LLAMACPP_IMAGE",
@@ -210,7 +227,40 @@ class Docker:
             "kokoro-onnx": "KOKORO_IMAGE",
             "kserve": "KSERVE_IMAGE",
         }[runtime]
-        return image.removeprefix("docker.io/") == self.environment[key].removeprefix("docker.io/")
+
+    def image_tag_for(self, runtime: str) -> str:
+        return self.environment[self.image_environment_key(runtime)]
+
+    def image_matches(self, runtime: str, image: str) -> bool:
+        return image.removeprefix("docker.io/") == self.image_tag_for(runtime).removeprefix(
+            "docker.io/"
+        )
+
+    def service_container_image_id(self, service: str) -> str:
+        container = self.run("ps", "-q", service, capture=True, text=True).stdout.strip()
+        if not container:
+            raise ValueError(f"Service has no container: {service}")
+        return subprocess.run(
+            self.docker_command + ["inspect", "--format", "{{.Image}}", container],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def tag_image(self, image: str, tag: str) -> None:
+        subprocess.run(
+            self.docker_command + ["image", "tag", image, tag],
+            env=self.environment,
+            check=True,
+        )
+
+    def run_with_image(self, runtime: str, image: str, *args: str) -> None:
+        subprocess.run(
+            self.command + list(args),
+            env={**self.environment, self.image_environment_key(runtime): image},
+            check=True,
+        )
 
     def active_identity(self, alias: str, service: str) -> tuple[str, str] | None:
         """Read the active model link from an already running service, without a setup container."""
@@ -237,11 +287,11 @@ class Docker:
         )
         return json.loads(result.stdout)
 
-    def install(self, storage: Path) -> None:
-        """Load verified images and remove containers from the superseded Compose definition."""
+    def install(self, settings: Any, names: list[str] | None = None) -> None:
+        """Stream workstation images and remove containers from superseded definitions."""
         from inference_runtime_manager.installer.images import stage_bundle
 
-        stage_bundle(self, storage)
+        stage_bundle(self, settings, names)
         self.worker({"action": "configure"})
         self.run("up", "--pull", "never", "--remove-orphans", "--no-start", "setup")
         self.run("rm", "-f", "setup")
