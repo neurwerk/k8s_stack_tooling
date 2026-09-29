@@ -192,6 +192,104 @@ def test_schema_4_agentgateway_conflict_does_not_advance_and_retry_converges(
     assert operations["agentgatewayPassword"] == canonical
 
 
+def test_studio_database_copy_drift_fails_closed_and_retry_converges(tmp_path: Path) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    state_version = session.secrets[RECONCILIATION_STATE_PATH].version
+    studio = session.secrets["frontend-studio/internal"].values
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    canonical = studio["postgresqlPassword"]
+    del operations["studioPassword"]
+
+    report = reconcile_openbao(api, identity())
+
+    assert report.internal_fields_added == 1
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    assert operations["studioPassword"] == canonical
+    assert session.secrets[RECONCILIATION_STATE_PATH].version == state_version
+    operations["studioPassword"] = "conflict"
+
+    with pytest.raises(
+        OpenBaoError,
+        match=r"credential mismatch.*infra-postgres-operations/internal/studioPassword",
+    ):
+        reconcile_openbao(api, identity())
+
+    assert operations["studioPassword"] == "conflict"
+    assert studio["postgresqlPassword"] == canonical
+    assert session.secrets[RECONCILIATION_STATE_PATH].version == state_version
+    operations["studioPassword"] = canonical
+    assert reconcile_openbao(api, identity()).internal_fields_added == 0
+
+
+def test_studio_database_source_drift_is_not_copied(tmp_path: Path) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    studio = session.secrets["frontend-studio/internal"].values
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    original_copy = operations["studioPassword"]
+    studio["postgresqlPassword"] = ""
+
+    with pytest.raises(OpenBaoError, match="postgresqlPassword is not a nonblank string"):
+        reconcile_openbao(api, identity())
+
+    assert operations["studioPassword"] == original_copy
+
+
+def test_bridge_database_copy_drift_fails_closed_and_retry_converges(tmp_path: Path) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    state_version = session.secrets[RECONCILIATION_STATE_PATH].version
+    bridge = session.secrets["auth-keycloak-api-key-bridge/internal"].values
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    canonical = bridge["postgresqlPassword"]
+    assert isinstance(canonical, str)
+    del operations["apiKeyBridgePassword"]
+
+    report = reconcile_openbao(api, identity())
+
+    assert report.internal_fields_added == 1
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    assert operations["apiKeyBridgePassword"] == canonical
+    assert session.secrets[RECONCILIATION_STATE_PATH].version == state_version
+    operations["apiKeyBridgePassword"] = "conflict"
+
+    with pytest.raises(
+        OpenBaoError,
+        match=r"credential mismatch.*infra-postgres-operations/internal/apiKeyBridgePassword",
+    ) as error:
+        reconcile_openbao(api, identity())
+
+    assert canonical not in str(error.value)
+    assert operations["apiKeyBridgePassword"] == "conflict"
+    assert bridge["postgresqlPassword"] == canonical
+    assert session.secrets[RECONCILIATION_STATE_PATH].version == state_version
+    operations["apiKeyBridgePassword"] = canonical
+    assert reconcile_openbao(api, identity()).internal_fields_added == 0
+
+
+def test_bridge_database_source_drift_is_not_copied(tmp_path: Path) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    bridge = session.secrets["auth-keycloak-api-key-bridge/internal"].values
+    operations = session.secrets["infra-postgres-operations/internal"].values
+    original_copy = operations["apiKeyBridgePassword"]
+    bridge["postgresqlPassword"] = ""
+
+    with pytest.raises(OpenBaoError, match="postgresqlPassword is not a nonblank string"):
+        reconcile_openbao(api, identity())
+
+    assert operations["apiKeyBridgePassword"] == original_copy
+
+
 def test_schema_3_adds_only_agentgateway_database_credentials(tmp_path: Path) -> None:
     session = FakeSession()
     source(session)

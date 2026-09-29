@@ -84,6 +84,10 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         "agentgatewayPassword": session.secrets["infra-agentgateway/internal"].values[
             "postgresqlPassword"
         ],
+        "apiKeyBridgePassword": session.secrets["auth-keycloak-api-key-bridge/internal"].values[
+            "postgresqlPassword"
+        ],
+        "studioPassword": session.secrets["frontend-studio/internal"].values["postgresqlPassword"],
         "documentdbPassword": session.secrets["frontend-librechat/internal"].values[
             "documentdbPassword"
         ],

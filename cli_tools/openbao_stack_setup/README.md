@@ -174,6 +174,13 @@ correction. Fresh Studio records no longer receive Langfuse project credentials;
 Langfuse fields remain untouched during this additive transition, and the canonical project
 credentials remain in `monitor-langfuse/internal`.
 
+For the API-key bridge PostgreSQL transition, bootstrap and reconciliation add
+`auth-keycloak-api-key-bridge/internal:postgresqlPassword` and copy it to
+`infra-postgres-operations/internal:apiKeyBridgePassword`. The bridge-owned password is
+generated only when missing; existing values are preserved. A conflicting operations copy
+fails reconciliation without overwriting either value, and a corrected run can be retried.
+This prepares credentials only; database provisioning and bridge runtime adoption are separate.
+
 `reconcile` requires exactly two distinct, cluster-bound custodian packages and a completed local
 recovery kit. It creates a temporary recovery root, applies only cataloged additive changes,
 verifies the restricted secret operator, and revokes the root before refreshing any Kubernetes
