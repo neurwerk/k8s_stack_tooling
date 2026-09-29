@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
+from inference_runtime_manager.configuration import management_state
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.api_tests import request, validate_wav
 from inference_runtime_manager.installer.assignments import assigned_recipe, compose_services
@@ -254,7 +255,10 @@ def provision(docker: Docker, recording: Path, output: Path) -> None:
 
 def require_voice_cloning(settings: DeploymentSettings | None = None) -> dict[str, Any]:
     settings = settings or DeploymentSettings()
-    preset = assigned_recipe(Settings().storage_root, settings.docker_context, "tts-german")
+    download_settings = Settings()
+    preset = assigned_recipe(
+        management_state(download_settings.storage_root), settings.docker_context, "tts-german"
+    )
     if (
         preset is None
         or not preset["enabled"]

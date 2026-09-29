@@ -17,6 +17,7 @@ from typing import Any
 
 import questionary
 
+from inference_runtime_manager.configuration import management_state
 from inference_runtime_manager.downloader.catalog import load_catalog
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.assignments import assigned_recipe, load_deployment
@@ -165,7 +166,10 @@ def request(
     audio: bytes | None = None,
     timing: dict[str, float] | None = None,
 ) -> bytes:
-    preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
+    settings = Settings()
+    preset = assigned_recipe(
+        management_state(settings.storage_root), docker.settings.docker_context, alias
+    )
     if preset is None or not preset["enabled"]:
         raise ValueError(f"{alias} is not enabled")
     service = preset["service"]
@@ -361,7 +365,10 @@ def synthesize_tts(docker: Docker, text: str) -> bytes:
 def test_service(
     docker: Docker, alias: str, speech: bytes | None, running: set[str] | None = None
 ) -> bytes | None:
-    preset = assigned_recipe(Settings().storage_root, docker.settings.docker_context, alias)
+    settings = Settings()
+    preset = assigned_recipe(
+        management_state(settings.storage_root), docker.settings.docker_context, alias
+    )
     if preset is None:
         raise ValueError(f"{alias} has no saved assignment")
     describe_assignment(docker, alias, preset, running)
@@ -453,7 +460,8 @@ def test_service(
 
 
 def enabled_docker(alias: str) -> Docker:
-    root = Settings().storage_root
+    settings = Settings()
+    root = management_state(settings.storage_root)
     docker = Docker(DeploymentSettings())
     deployment = load_deployment(root, docker.settings.docker_context)
     assignment = deployment.assignments.get(alias)
@@ -500,8 +508,11 @@ def tts_menu() -> None:
             continue
 
         docker = enabled_docker("tts-german")
+        settings = Settings()
         preset = assigned_recipe(
-            Settings().storage_root, docker.settings.docker_context, "tts-german"
+            management_state(settings.storage_root),
+            docker.settings.docker_context,
+            "tts-german",
         )
         if preset is None:
             raise ValueError("tts-german has no saved assignment")
@@ -546,7 +557,8 @@ def manual_menu() -> None:
 
 
 def menu() -> None:
-    root = Settings().storage_root
+    settings = Settings()
+    root = management_state(settings.storage_root)
     docker = Docker(DeploymentSettings())
     deployment = load_deployment(root, docker.settings.docker_context)
     enabled_set = {
