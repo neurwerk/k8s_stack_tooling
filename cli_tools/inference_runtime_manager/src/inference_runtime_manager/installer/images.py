@@ -30,6 +30,7 @@ class ImageSpec:
     name: str
     source: str | None = None
     build: str | None = None
+    dockerfile: str = "Dockerfile"
 
     @property
     def build_directory(self) -> Path:
@@ -41,15 +42,23 @@ class ImageSpec:
     def identity(self) -> str:
         if self.source is not None:
             return self.source
-        return f"build:{self.build}@{self.digest}"
+        return f"build:{self.build}/{self.dockerfile}@{self.digest}"
 
     @property
     def digest(self) -> str:
         if self.source is not None:
             return self.source.rsplit("@", 1)[1]
         digest = hashlib.sha256()
+        digest.update(self.dockerfile.encode())
         root = self.build_directory
-        for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        candidates = (
+            candidate
+            for candidate in root.rglob("*")
+            if candidate.is_file()
+            and "__pycache__" not in candidate.parts
+            and candidate.suffix not in {".pyc", ".pyo"}
+        )
+        for path in sorted(candidates):
             if path.is_symlink():
                 raise ValueError(f"Image build context contains a symlink: {path}")
             relative = path.relative_to(root).as_posix().encode()
@@ -83,7 +92,12 @@ def image_specs() -> list[ImageSpec]:
     specs = [
         ImageSpec(name, source=value)
         if isinstance(value, str)
-        else ImageSpec(name, source=value.get("source"), build=value.get("build"))
+        else ImageSpec(
+            name,
+            source=value.get("source"),
+            build=value.get("build"),
+            dockerfile=value.get("dockerfile", "Dockerfile"),
+        )
         for name, value in runtime.items()
     ]
     for spec in specs:
@@ -97,7 +111,9 @@ def image_specs() -> list[ImageSpec]:
             raise ValueError(f"Image {spec.name} must have an immutable manifest digest")
         if spec.build is not None and not re.fullmatch(r"[a-z0-9_]+", spec.build):
             raise ValueError(f"Image {spec.name} has an invalid build context")
-        if spec.build is not None and not (spec.build_directory / "Dockerfile").is_file():
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", spec.dockerfile):
+            raise ValueError(f"Image {spec.name} has an invalid Dockerfile name")
+        if spec.build is not None and not (spec.build_directory / spec.dockerfile).is_file():
             raise ValueError(f"Image {spec.name} has no packaged Dockerfile")
     if len({s.name for s in specs}) != len(specs):
         raise ValueError("Duplicate runtime image name")
@@ -311,6 +327,8 @@ def download_images(settings: Settings) -> None:
                         "--platform",
                         "linux/amd64",
                         "--pull",
+                        "--file",
+                        str(spec.build_directory / spec.dockerfile),
                         "--tag",
                         spec.tag,
                         "--output",

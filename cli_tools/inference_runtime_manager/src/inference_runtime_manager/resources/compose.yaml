@@ -170,6 +170,90 @@ services:
       start_period: 180s
       retries: 12
 
+  vlm-images-olmocr:
+    <<: [*common, *gpu]
+    image: ${LLAMACPP_OCR_PROXY_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - --profile
+      - olmocr
+      - --
+      - /app/llama-server
+      - --model
+      - /models/active/vlm-images/allenai_olmOCR-2-7B-1025-Q6_K.gguf
+      - --mmproj
+      - /models/active/vlm-images/mmproj-allenai_olmOCR-2-7B-1025-f16.gguf
+      - --alias
+      - vlm-images
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8001"
+      - --ctx-size
+      - "16384"
+      - --n-gpu-layers
+      - "999"
+      - --jinja
+      - --parallel
+      - "1"
+      - --offline
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_IMAGES_PORT:-8007}:8000"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VLM_IMAGES_API_KEY: ${VLM_IMAGES_API_KEY-}
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 240s
+      retries: 16
+
+  vlm-images-nanonets:
+    <<: [*common, *gpu]
+    image: ${VLLM_OCR_PROXY_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - --profile
+      - nanonets
+      - --
+      - vllm
+      - serve
+      - /models/active/vlm-images
+      - --served-model-name
+      - vlm-images
+      - --dtype
+      - float16
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8001"
+      - --limit-mm-per-prompt.image
+      - "1"
+      - --mm-processor-cache-gb
+      - "0"
+      - --no-enable-prefix-caching
+      - --max-num-seqs
+      - "1"
+      - --max-model-len
+      - "8192"
+      - --gpu-memory-utilization
+      - ${VLLM_NANONETS_GPU_MEMORY_UTILIZATION:-0.65}
+      - --enforce-eager
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${VLM_IMAGES_PORT:-8007}:8000"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VLM_IMAGES_API_KEY: ${VLM_IMAGES_API_KEY-}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 300s
+      retries: 20
+
   stt-general:
     <<: [*common, *gpu]
     image: ${SPEACHES_IMAGE:?Run inference-runtime-manager images and install first}

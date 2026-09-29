@@ -52,6 +52,9 @@ class DeploymentSettings(BaseSettings):
     vllm_images_gpu_memory_utilization: float = Field(
         default=0.36, gt=0, le=1, alias="VLLM_IMAGES_GPU_MEMORY_UTILIZATION"
     )
+    vllm_nanonets_gpu_memory_utilization: float = Field(
+        default=0.65, gt=0, le=1, alias="VLLM_NANONETS_GPU_MEMORY_UTILIZATION"
+    )
 
     def api_key_for(self, alias: str) -> str | None:
         """Return the independently configured key for one stable service alias."""
@@ -120,9 +123,14 @@ class Docker:
                 settings.vllm_granite_gpu_memory_utilization
             ),
             "VLLM_IMAGES_GPU_MEMORY_UTILIZATION": str(settings.vllm_images_gpu_memory_utilization),
+            "VLLM_NANONETS_GPU_MEMORY_UTILIZATION": str(
+                settings.vllm_nanonets_gpu_memory_utilization
+            ),
             "SETUP_IMAGE": images["setup"],
             "VLLM_IMAGE": images["vllm"],
             "LLAMACPP_IMAGE": images["llamacpp"],
+            "VLLM_OCR_PROXY_IMAGE": images["vllm-ocr-proxy"],
+            "LLAMACPP_OCR_PROXY_IMAGE": images["llamacpp-ocr-proxy"],
             "SPEACHES_IMAGE": images["speaches"],
             "CHATTERBOX_IMAGE": images["chatterbox"],
             "KOKORO_IMAGE": images["kokoro"],
@@ -194,7 +202,9 @@ class Docker:
     def image_matches(self, runtime: str, image: str) -> bool:
         key = {
             "vllm": "VLLM_IMAGE",
+            "vllm-ocr-proxy": "VLLM_OCR_PROXY_IMAGE",
             "llama.cpp": "LLAMACPP_IMAGE",
+            "llama.cpp-ocr-proxy": "LLAMACPP_OCR_PROXY_IMAGE",
             "speaches": "SPEACHES_IMAGE",
             "chatterbox": "CHATTERBOX_IMAGE",
             "kokoro-onnx": "KOKORO_IMAGE",

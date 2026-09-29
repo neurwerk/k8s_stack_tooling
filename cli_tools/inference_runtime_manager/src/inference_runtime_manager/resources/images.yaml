@@ -4,6 +4,13 @@ setup: python@sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130
 vllm: vllm/vllm-openai@sha256:3e10e8189823e0f7ae4620c271bcdaaf64127ec7d0edc351591a508498b7684a
 # ghcr.io/ggml-org/llama.cpp:server-cuda, build b11096 / revision c550d2f60bde
 llamacpp: ghcr.io/ggml-org/llama.cpp@sha256:d309d9f3584e0a2429e13fbb2ad836bdf2f3201f6618ee63c538e310476fbec3
+# Package-owned prompt adapters keep model-specific OCR behavior behind vlm-images.
+vllm-ocr-proxy:
+  build: ocr_proxy
+  dockerfile: vllm.Dockerfile
+llamacpp-ocr-proxy:
+  build: ocr_proxy
+  dockerfile: llamacpp.Dockerfile
 # ghcr.io/speaches-ai/speaches:0.8.3-cuda
 speaches: ghcr.io/speaches-ai/speaches@sha256:f34388613f5414d8e7e1df70ddedb0c4ac55d707733a2c657812fd13e6d1c2f2
 # ghcr.io/devnen/chatterbox-tts-server:main, inspected after upstream v2.0.0

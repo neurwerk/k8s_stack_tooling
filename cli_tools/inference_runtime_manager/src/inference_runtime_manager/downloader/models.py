@@ -67,7 +67,16 @@ class ModelVariant(BaseModel):
     include: list[str] = Field(default_factory=list)
     runtime_notes: str = Field(default="", alias="runtimeNotes")
     runtimes: list[
-        Literal["vllm", "llama.cpp", "speaches", "chatterbox", "kokoro-onnx", "kserve"]
+        Literal[
+            "vllm",
+            "vllm-ocr-proxy",
+            "llama.cpp",
+            "llama.cpp-ocr-proxy",
+            "speaches",
+            "chatterbox",
+            "kokoro-onnx",
+            "kserve",
+        ]
     ] = Field(default_factory=list)
     compatibility_notes: str = Field(
         default="Not assessed against our backend bundle.", alias="compatibilityNotes"

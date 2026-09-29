@@ -8,7 +8,7 @@ import subprocess
 import tarfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
@@ -22,6 +22,12 @@ from inference_runtime_manager.installer.assignments import (
 )
 from inference_runtime_manager.installer.docker import Docker
 from inference_runtime_manager.installer.worker import safe
+
+
+class ActivationDocker(Protocol):
+    def worker(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+
+    def run(self, *args: str, **kwargs: Any) -> Any: ...
 
 
 def prepare_artifact(
@@ -136,6 +142,71 @@ def transfer(docker: Docker, source: Path, manifest: dict[str, Any]) -> None:
             process.wait()
 
 
+def activate_with_rollback(
+    docker: ActivationDocker,
+    application: dict[str, Any],
+    states: dict[str, tuple[str, str, str]],
+) -> None:
+    """Activate one recipe and restore the previous running service on failure."""
+    alias = application["alias"]
+    service = application["service"]
+    services = compose_services(alias)
+    previous_services = [
+        name for name in services if states.get(name, ("", "", ""))[0] == "running"
+    ]
+    if len(previous_services) > 1:
+        raise ValueError(f"{alias}: multiple mutually exclusive services are running")
+    previous_destination = docker.worker({"action": "active_destination", "alias": alias})[
+        "destination"
+    ]
+    alternatives = set(services) - {service}
+    try:
+        if alternatives:
+            docker.run("stop", *sorted(alternatives))
+        started = time.monotonic()
+        docker.worker(application)
+        print(f"{service}: activation {time.monotonic() - started:.1f}s")
+        started = time.monotonic()
+        docker.run(
+            "up",
+            "--pull",
+            "never",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "300",
+            service,
+        )
+        print(f"{service}: startup/health {time.monotonic() - started:.1f}s")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        try:
+            docker.run("stop", service)
+            docker.worker(
+                {
+                    "action": "restore_active",
+                    "alias": alias,
+                    "destination": previous_destination,
+                }
+            )
+            for previous_service in previous_services:
+                docker.run(
+                    "up",
+                    "--pull",
+                    "never",
+                    "-d",
+                    "--no-deps",
+                    "--wait",
+                    "--wait-timeout",
+                    "300",
+                    previous_service,
+                )
+        except (OSError, subprocess.SubprocessError, ValueError) as rollback_exc:
+            raise RuntimeError(f"{alias}: activation and rollback failed") from rollback_exc
+        raise RuntimeError(f"{alias}: activation failed; previous service restored") from exc
+
+
 def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bool = False) -> None:
     if docker is not None:
         load_deployment(root, docker.settings.docker_context)
@@ -202,26 +273,7 @@ def provision(docker: Docker | None, root: Path, aliases: list[str], dry_run: bo
         transfer(docker, source, manifest)
         print(f"Remote bundle check/upload: {time.monotonic() - started:.1f}s")
     for _, _, application in prepared:
-        service = application["service"]
-        alternatives = set(compose_services(application["alias"])) - {service}
-        if alternatives:
-            docker.run("stop", *sorted(alternatives))
-        started = time.monotonic()
-        docker.worker(application)
-        print(f"{service}: activation {time.monotonic() - started:.1f}s")
-        started = time.monotonic()
-        docker.run(
-            "up",
-            "--pull",
-            "never",
-            "-d",
-            "--force-recreate",
-            "--wait",
-            "--wait-timeout",
-            "300",
-            service,
-        )
-        print(f"{service}: startup/health {time.monotonic() - started:.1f}s")
+        activate_with_rollback(docker, application, states)
     for alias in disabled:
         docker.run("stop", *compose_services(alias))
     if not prepared and not disabled:

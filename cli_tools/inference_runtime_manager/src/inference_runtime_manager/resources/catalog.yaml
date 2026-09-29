@@ -208,6 +208,39 @@ models:
         compatibilityNotes: Qualified with the pinned vLLM release using FP32 compute because FP16 produces non-finite probabilities on the target compute-capability 7.5 GPU.
         runtimeNotes: "One request at a time, 4096 context and a 2048 output cap. Preserve native text output; the receiver owns application result formatting."
 
+  - id: olmocr-2-7b-1025
+    category: ocr
+    displayName: olmOCR-2-7B-1025 Q6_K
+    description: Document-page OCR using the olmOCR v4 prompt behind the stable private image-reader API.
+    source: allenai/olmOCR-2-7B-1025
+    revision: e52d6f090b7a9007afffbbd6ce510876222fea93
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/allenai/olmOCR-2-7B-1025/blob/e52d6f090b7a9007afffbbd6ce510876222fea93/README.md#license-and-use
+      commercialUse: true
+      noticeRequired: true
+      notes: The selected GGUF conversion is published separately by bartowski; retain the canonical AllenAI license and provenance.
+    metadata:
+      architecture: qwen2.5-vl-document-image-to-text
+      parameterCount: 8B
+      contextLength: 16384
+      languages: [multilingual]
+      intendedUse: document-ocr
+    variants:
+      - id: gguf-q6-k
+        source: bartowski/allenai_olmOCR-2-7B-1025-GGUF
+        revision: 42654d7abfe9a19d3cdb90b9a855ce26d265fd93
+        format: gguf
+        quantization: Q6_K
+        estimatedDownloadBytes: 7608500000
+        include:
+          - allenai_olmOCR-2-7B-1025-Q6_K.gguf
+          - mmproj-allenai_olmOCR-2-7B-1025-f16.gguf
+          - README.md
+        runtimes: [llama.cpp-ocr-proxy]
+        compatibilityNotes: Reviewed for the pinned llama.cpp multimodal server and package-owned olmOCR prompt adapter; target Turing inference remains to be exercised.
+        runtimeNotes: "F16 vision projector plus Q6_K model, one request at a time, 16384 context and a 2048 output cap. The Docker-side adapter injects the v4 prompt and removes validated YAML front matter."
+
   - id: ai4privacy-multilingual-pii
     category: ner
     displayName: AI4Privacy Multilingual Categorical Anonymiser OpenPII
@@ -831,7 +864,9 @@ models:
         quantization: none
         precision: bf16
         estimatedDownloadBytes: 7525304372
-        runtimeNotes: "16 GB candidate with FP16 loading and SDPA/eager on Turing. Start with one page and moderate resolution/output length; BF16/FlashAttention 2 defaults need overriding."
+        runtimes: [vllm-ocr-proxy]
+        compatibilityNotes: Reviewed for pinned vLLM with FP16 loading and the package-owned Nanonets prompt adapter; target Turing inference remains to be exercised.
+        runtimeNotes: "One request at a time with FP16 compute, 8192 context and a 2048 output cap. The Docker-side adapter injects the fixed Nanonets document extraction prompt. Commercial permission remains unconfirmed."
       - id: gguf-q2-k
         source: mradermacher/Nanonets-OCR2-3B-GGUF
         revision: 4cc951ca0f8740b57580fb6d6c72bcf056b0f0d8
