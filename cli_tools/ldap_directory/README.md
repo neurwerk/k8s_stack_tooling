@@ -7,16 +7,20 @@ From this directory, install and run:
 
 ```bash
 uv sync --frozen --dev
-uv run --frozen ldap-directory \
-  --image ghcr.io/neurwerk/k8s-stack-tooling:<published-version>@sha256:<verified-digest>
+uv run --frozen ldap-directory
 ```
 
 Use `--context <kube-context>` to skip the context menu. Without it, only
 reachable contexts with `authKeycloak.activeDirectory.enabled: true` in the
 live `auth-keycloak/keycloak-product-values` ConfigMap are offered. Choose
-Users, Groups or Both in the next menu. The image must contain
-`ldap-directory-worker` (Tooling 0.7.3 or later). An image build or PR alone
-does not make the image available; publish and verify the version first.
+an eligible published Tooling image (newest first), then Users, Groups or Both.
+Image choices come from the exact version and digest recorded in published
+Tooling GitHub Releases; the CLI never guesses an image from an unverified tag.
+The image must contain `ldap-directory-worker` (Tooling 0.7.3 or later). When
+no such image has been published, the CLI explains what is missing instead of
+creating a Pod. An image build or PR alone does not make the image available;
+publish and verify the version first. The workstation must be able to read
+public GitHub Releases.
 
 The workstation needs `kubectl` and access to read ConfigMaps in `flux-system`
 and `auth-keycloak`, and to create/get/exec/delete Pods and create/delete
