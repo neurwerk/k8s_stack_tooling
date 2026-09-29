@@ -100,6 +100,9 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     )
     assert code_interpreter["jwtPublicKey"] == librechat["codeInterpreterJwtPublicKey"]
     assert code_interpreter["valkeyPassword"] != librechat["valkeyPassword"]
+    bridge = original["auth-keycloak-api-key-bridge/internal"]
+    assert isinstance(bridge["postgresqlPassword"], str)
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", bridge["postgresqlPassword"])
     agentgateway = original["infra-agentgateway/internal"]
     assert set(agentgateway) == {"postgresqlPassword"}
     agentgateway_password = agentgateway["postgresqlPassword"]
@@ -119,13 +122,18 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     query_encryption_key = opensearch["queryDatasourceEncryptionKey"]
     assert isinstance(query_encryption_key, str)
     assert len(query_encryption_key) == 32
-    assert set(original["frontend-studio/internal"]) == {"opensearchPassword"}
+    studio = original["frontend-studio/internal"]
+    assert set(studio) == {"opensearchPassword", "postgresqlPassword"}
+    assert isinstance(studio["postgresqlPassword"], str)
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", studio["postgresqlPassword"])
     postgres_auth = original["infra-postgres-auth/internal"]
     postgres_operations = original["infra-postgres-operations/internal"]
     assert set(postgres_auth) == {"adminPassword", "keycloakPassword"}
     assert set(postgres_operations) == {
         "adminPassword",
         "agentgatewayPassword",
+        "apiKeyBridgePassword",
+        "studioPassword",
         "documentdbPassword",
         "difyPassword",
         "langfusePassword",
@@ -134,6 +142,8 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert postgres_auth["adminPassword"]
     assert postgres_operations["adminPassword"]
     assert postgres_operations["agentgatewayPassword"] == agentgateway_password
+    assert postgres_operations["apiKeyBridgePassword"] == bridge["postgresqlPassword"]
+    assert postgres_operations["studioPassword"] == studio["postgresqlPassword"]
     assert postgres_auth["keycloakPassword"] == original["auth-keycloak/internal"]["dbPassword"]
     assert postgres_operations["documentdbPassword"] == librechat["documentdbPassword"]
     assert (
@@ -194,6 +204,9 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
         "opensearchPassword": session.secrets["monitor-opensearch/internal"].values[
             "studioPassword"
         ],
+        "postgresqlPassword": session.secrets["infra-postgres-operations/internal"].values[
+            "studioPassword"
+        ],
     }
 
 
@@ -202,6 +215,8 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
     [
         ("infra-postgres-auth/internal", "keycloakPassword"),
         ("infra-postgres-operations/internal", "agentgatewayPassword"),
+        ("infra-postgres-operations/internal", "apiKeyBridgePassword"),
+        ("infra-postgres-operations/internal", "studioPassword"),
         ("infra-postgres-operations/internal", "documentdbPassword"),
         ("infra-postgres-operations/internal", "difyPassword"),
         ("infra-postgres-operations/internal", "langfusePassword"),

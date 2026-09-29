@@ -158,7 +158,7 @@ def reconcile_internal_credentials(
     if secondary_verifier is None:
         bridge_fixed["difyAgentgatewaySecondaryVerifierSha256"] = ""
 
-    _, count = _upsert(client, bridge_path, {}, bridge_fixed)
+    bridge, count = _upsert(client, bridge_path, _random_fields("postgresqlPassword"), bridge_fixed)
     _record_change(changed, bridge_path, count)
     added += count
 
@@ -243,14 +243,16 @@ def reconcile_internal_credentials(
     _record_change(changed, "monitor-opensearch/internal", count)
     added += count
 
+    studio, count = _upsert(
+        client,
+        "frontend-studio/internal",
+        _random_fields("postgresqlPassword"),
+        {"opensearchPassword": _required_text(opensearch, "studioPassword")},
+    )
+    _record_change(changed, "frontend-studio/internal", count)
+    added += count
+
     remaining_records: tuple[tuple[str, dict[str, Generator], dict[str, str]], ...] = (
-        (
-            "frontend-studio/internal",
-            {},
-            {
-                "opensearchPassword": _required_text(opensearch, "studioPassword"),
-            },
-        ),
         (
             "monitor-fluent-bit/internal",
             {},
@@ -296,6 +298,8 @@ def reconcile_internal_credentials(
                 "documentdbPassword": _required_text(librechat, "documentdbPassword"),
                 "difyPassword": _required_text(dify, "postgresPassword"),
                 "agentgatewayPassword": _required_text(agentgateway, "postgresqlPassword"),
+                "apiKeyBridgePassword": _required_text(bridge, "postgresqlPassword"),
+                "studioPassword": _required_text(studio, "postgresqlPassword"),
                 "langfusePassword": _required_text(langfuse, "postgresqlPassword"),
                 "librechatRagPassword": _required_text(librechat, "ragPostgresqlPassword"),
             },
