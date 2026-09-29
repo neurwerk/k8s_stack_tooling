@@ -7,6 +7,14 @@ files.
 
 ## Setup
 
+### Dify Agent Credentials
+
+Package `0.2.23` adds the Agent API token, Agent Stub encryption key, and local
+sandbox authentication token to `frontend-dify/internal`. `reconcile` generates
+only missing fields and retains the existing Dify, database, and Keycloak
+credentials. Reconcile with the reviewed package before selecting the platform
+release that enables Dify Agent; never re-bootstrap an existing installation.
+
 ### Image Inspection Credential
 
 The `image-inspection` managed credential writes only
