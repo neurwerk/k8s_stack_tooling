@@ -2,7 +2,7 @@
 
 Python runtime utilities and trusted-workstation command-line tools used to
 operate the neurwerk Kubernetes stack. This repository contains one container
-package and seven independently locked CLI projects.
+package and eight independently locked CLI projects.
 
 ## Projects
 
@@ -16,9 +16,10 @@ package and seven independently locked CLI projects.
 | [`openbao-stack-setup`](cli_tools/openbao_stack_setup/) | Bootstraps, reconciles, verifies, and updates supported OpenBao state | Trusted operator workstation only |
 | [`openrouter-catalog-sync`](cli_tools/openrouter_catalog_sync/) | Selects reviewed OpenRouter models and generates client Helm values and a complete model cost catalog | Developer or operator workstation |
 | [`keycloak-users`](cli_tools/keycloak_users/) | Guides manual browser-login setup and creates local users with group membership and seven-day onboarding invitations | Authorized operator workstation |
+| [`ldap-directory`](cli_tools/ldap_directory/) | Lists directory usernames and groups via an explicitly selected Kubernetes context | Authorized operator workstation and short-lived diagnostic Pod |
 
 The CLI projects under `cli_tools/` are not bundled into the Kubernetes image.
-Each has its own `pyproject.toml`, `uv.lock`, environment, tests, and README.
+Each has its own `pyproject.toml`, `uv.lock`, environment, and README. Most have tests.
 
 ## Requirements
 
@@ -37,7 +38,7 @@ uv sync --frozen --dev
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen ty check
-uv run --frozen pytest
+uv run --frozen pytest  # where the project has a test suite
 uv build
 ```
 
@@ -72,6 +73,7 @@ these commands on `PATH`:
 - `send-user-actions-email`
 - `upsert-composite-roles`
 - `upsert-opensearch-user`
+- `ldap-directory-worker` (used only by the workstation LDAP diagnostic CLI)
 - `maintenance-server`
 
 Build locally without publishing:
