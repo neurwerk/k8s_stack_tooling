@@ -25,6 +25,7 @@ from inference_runtime_manager.installer.audio import play
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 
 LIMIT = 16 * 1024 * 1024
+MAX_OCR_PROMPT_CHARS = 4096
 SENTENCE = "Guten Tag. Dies ist ein kurzer Test."
 
 ORDER = [
@@ -79,6 +80,35 @@ def read_sample(path: str) -> bytes:
     return data
 
 
+def read_image(path: str) -> bytes:
+    with Path(path).expanduser().open("rb") as stream:
+        data = stream.read(LIMIT + 1)
+    if not data or len(data) > LIMIT:
+        raise ValueError("Choose a nonempty PNG or JPEG of at most 16 MiB")
+    if not data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")):
+        raise ValueError("Image OCR requires PNG or JPEG input")
+    return data
+
+
+def read_ocr_prompt(path: str) -> str:
+    with Path(path).expanduser().open("rb") as stream:
+        data = stream.read(MAX_OCR_PROMPT_CHARS * 4 + 1)
+    if len(data) > MAX_OCR_PROMPT_CHARS * 4:
+        raise ValueError("olmOCR prompt file is too large")
+    try:
+        prompt = data.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("olmOCR prompt file must be UTF-8") from exc
+    return validate_ocr_prompt(prompt)
+
+
+def validate_ocr_prompt(prompt: str) -> str:
+    prompt = prompt.strip()
+    if not 1 <= len(prompt) <= MAX_OCR_PROMPT_CHARS:
+        raise ValueError(f"olmOCR prompt must contain 1–{MAX_OCR_PROMPT_CHARS} characters")
+    return prompt
+
+
 def sample_image() -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return pack("!I", len(data)) + kind + data + pack("!I", zlib.crc32(kind + data))
@@ -111,8 +141,10 @@ def sample_image() -> bytes:
     )
 
 
-def image_ocr_payload(alias: str, image: bytes, max_tokens: int = 2048) -> dict[str, Any]:
-    """Build the model's native image-only transcription request."""
+def image_ocr_payload(
+    alias: str, image: bytes, max_tokens: int = 2048, *, prompt: str | None = None
+) -> dict[str, Any]:
+    """Build an image transcription request with an optional olmOCR prompt."""
     if image.startswith(b"\x89PNG\r\n\x1a\n"):
         media_type = "image/png"
     elif image.startswith(b"\xff\xd8\xff"):
@@ -120,19 +152,17 @@ def image_ocr_payload(alias: str, image: bytes, max_tokens: int = 2048) -> dict[
     else:
         raise ValueError("Image OCR requires PNG or JPEG input")
     encoded = base64.b64encode(image).decode()
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+        }
+    ]
+    if prompt is not None:
+        content.append({"type": "text", "text": prompt})
     return {
         "model": alias,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{media_type};base64,{encoded}"},
-                    }
-                ],
-            }
-        ],
+        "messages": [{"role": "user", "content": content}],
         "temperature": 0.2,
         "top_p": 0.9,
         "max_tokens": max_tokens,
@@ -363,7 +393,13 @@ def synthesize_tts(docker: Docker, text: str) -> bytes:
 
 
 def test_service(
-    docker: Docker, alias: str, speech: bytes | None, running: set[str] | None = None
+    docker: Docker,
+    alias: str,
+    speech: bytes | None,
+    running: set[str] | None = None,
+    *,
+    image: bytes | None = None,
+    prompt: str | None = None,
 ) -> bytes | None:
     settings = Settings()
     preset = assigned_recipe(
@@ -375,25 +411,37 @@ def test_service(
     request(docker, alias, preset["health_path"])
     if alias in {"llm-general", "vlm-general", "vlm-images", "vlm-documents"}:
         if alias == "vlm-images":
+            if prompt is not None and preset["runtime"] != "llama.cpp-ocr-proxy":
+                raise ValueError("Custom prompts are supported only for olmOCR")
             value = json.loads(
                 request(
                     docker,
                     alias,
                     "/v1/chat/completions",
-                    payload=image_ocr_payload(alias, sample_image()),
+                    payload=image_ocr_payload(
+                        alias, image if image is not None else sample_image(), prompt=prompt
+                    ),
                 )
             )
-            if chat_completion_text(value) != "TEST 123":
+            output = chat_completion_text(value)
+            if image is None and output != "TEST 123":
                 raise ValueError("Image OCR did not exactly transcribe the control text")
             if isinstance(value.get("model"), str):
                 print(f"{alias}: response-reported model: {value['model']} (may be an alias)")
-            print(f"PASS {alias} — exact printed-text transcription; receiver owns formatting.")
+            if image is None:
+                print(f"PASS {alias} — exact printed-text transcription; receiver owns formatting.")
+            else:
+                print(f"{alias} output:\n{output}")
+                print(f"PASS {alias} — complete response; review the output quality manually.")
             return speech
         content: str | list[dict[str, Any]] = "Say hello briefly."
         if alias != "llm-general":
-            image = base64.b64encode(sample_image()).decode()
+            encoded_image = base64.b64encode(sample_image()).decode()
             content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded_image}"},
+                },
                 {
                     "type": "text",
                     "text": "Convert this page to docling."
@@ -473,6 +521,8 @@ def enabled_docker(alias: str) -> Docker:
 def test_individual(alias: str) -> None:
     docker = enabled_docker(alias)
     speech = None
+    image = None
+    prompt = None
     if alias in {"stt-general", "vad-general"}:
         sample = questionary.path("Local WAV to test:").ask()
         if sample is None:
@@ -480,8 +530,52 @@ def test_individual(alias: str) -> None:
         if not sample:
             raise ValueError(f"A local WAV is required to test {alias} individually")
         speech = read_sample(sample)
+    elif alias == "vlm-images":
+        choice = questionary.select(
+            "Image OCR test",
+            choices=[
+                questionary.Choice("Standard TEST 123 image", value="standard"),
+                questionary.Choice("Transcribe a local PNG or JPEG", value="local"),
+            ],
+        ).ask()
+        if choice is None:
+            return
+        if choice == "local":
+            path = questionary.path("Local PNG or JPEG to test:").ask()
+            if path is None:
+                return
+            if not path:
+                raise ValueError("A local PNG or JPEG is required")
+            image = read_image(path)
+            settings = Settings()
+            preset = assigned_recipe(
+                management_state(settings.storage_root), docker.settings.docker_context, alias
+            )
+            if preset is not None and preset["runtime"] == "llama.cpp-ocr-proxy":
+                source = questionary.select(
+                    "olmOCR prompt for this image",
+                    choices=[
+                        questionary.Choice("Built-in default", value="default"),
+                        questionary.Choice("Enter custom text", value="text"),
+                        questionary.Choice("Load UTF-8 text file", value="file"),
+                    ],
+                ).ask()
+                if source is None:
+                    return
+                if source == "text":
+                    answer = questionary.text("Prompt for this image:").ask()
+                    if answer is None:
+                        return
+                    prompt = validate_ocr_prompt(answer)
+                elif source == "file":
+                    prompt_path = questionary.path("Local UTF-8 prompt file:").ask()
+                    if prompt_path is None:
+                        return
+                    if not prompt_path:
+                        raise ValueError("A local prompt file is required")
+                    prompt = read_ocr_prompt(prompt_path)
     print("The request executes inside the remote service container against its loopback port.")
-    test_service(docker, alias, speech)
+    test_service(docker, alias, speech, image=image, prompt=prompt)
 
 
 def tts_menu() -> None:

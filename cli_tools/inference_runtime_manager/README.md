@@ -19,6 +19,12 @@ interactive choices are stored under the workstation config directory. The old
 `LOCAL_AI_INSTALLER_STORAGE_ROOT` and `LOCALAI_BIND_ADDRESS` names remain accepted
 for migration.
 
+Model staging storage may be a mounted external volume or a directory under
+`~/.storage`, such as `~/.storage/inference-runtime-manager`. Select the directory
+under **Configuration → Select model staging storage**; this also places `HF_HOME`
+in its `huggingface` subdirectory. Other paths on the system volume are rejected
+so an unmounted external drive cannot silently redirect downloads to the system disk.
+
 For an SSH target:
 
 ```bash
@@ -154,13 +160,15 @@ staging storage. The pinned Martin ONNX model, voice and German normalization fi
 remain a separately verified model artifact mounted at runtime. Existing Chatterbox
 voice recordings remain preserved when Martin is selected.
 
-All image-reader recipes expose the same image-only OpenAI-compatible API as
-`vlm-images`. LightOnOCR consumes that request directly. The package-owned olmOCR
-and Nanonets images keep their inference backend on container loopback and inject
-the fixed model-specific OCR prompt before forwarding. Caller text, remote image
-URLs, multiple images and streaming are rejected at that adapter boundary. olmOCR
-YAML front matter is validated and removed from completed transcriptions; truncated
-completions retain `finish_reason: length` for the caller's fail-closed handling.
+All image-reader recipes expose the `vlm-images` OpenAI-compatible API.
+LightOnOCR consumes the image directly. The package-owned olmOCR and Nanonets
+images keep their inference backend on container loopback and inject a model-specific
+OCR prompt before forwarding. olmOCR accepts one optional per-image text prompt in
+place of its built-in default; Nanonets still rejects caller text. Remote image URLs,
+multiple images and streaming are rejected at that adapter boundary. olmOCR YAML
+front matter is validated and removed from completed default-prompt transcriptions;
+custom prompts return the model's text as-is. Truncated completions retain
+`finish_reason: length` for the caller's fail-closed handling.
 The Nanonets checkpoint publishes no model license; its catalog entry keeps
 commercial permission explicitly unconfirmed for operator review.
 
@@ -175,6 +183,16 @@ The flow checks health first, then exercises chat/vision, document parsing, TTS,
 STT, VAD or NER as applicable. TTS output can feed the speech checks, or the
 operator can select a local WAV. A successful response proves endpoint structure,
 not model quality or GPU fit.
+
+For an individual **vlm-images** check, choose the standard `TEST 123` image or a
+local PNG/JPEG (up to 16 MiB). The local-image check prints the complete OCR output
+for review. When olmOCR is assigned, choose its built-in document prompt or provide
+a prompt for this image as text or a UTF-8 file (up to 4096 characters). The default
+still validates and removes olmOCR's YAML front matter; a custom prompt returns the
+model's text without requiring that document-specific metadata. Other image-reader
+recipes accept custom images but keep their own built-in prompts. After updating
+the packaged olmOCR adapter, prepare and apply its runtime image before sending
+custom prompts to an existing deployment.
 
 Each manual check prints the assigned catalog model name, model ID, variant,
 runtime, Docker context and service. For running services it reads the active

@@ -22,6 +22,7 @@ LISTEN_ADDRESS = ("0.0.0.0", 8000)
 BACKEND_URL = "http://127.0.0.1:8001"
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_RESPONSE_BYTES = 512 * 1024
+MAX_PROMPT_CHARS = 4096
 BACKEND_TIMEOUT_SECONDS = 80
 CLIENT_TIMEOUT_SECONDS = 15
 MODEL_ALIAS = "vlm-images"
@@ -94,7 +95,7 @@ class BackendError(Exception):
     """The private backend failed or returned an invalid response."""
 
 
-def _image_url(payload: object) -> str:
+def _image_request(payload: object, profile: str) -> tuple[str, str | None]:
     if not isinstance(payload, dict):
         raise RequestError("Request body must be a JSON object")
     if payload.get("model") != MODEL_ALIAS:
@@ -109,11 +110,25 @@ def _image_url(payload: object) -> str:
     if not isinstance(message, dict) or message.get("role") != "user":
         raise RequestError("Exactly one user message is required")
     content = message.get("content")
-    if not isinstance(content, list) or len(content) != 1:
-        raise RequestError("The user message must contain exactly one image and no text")
-    image_part = content[0]
-    if not isinstance(image_part, dict) or image_part.get("type") != "image_url":
-        raise RequestError("The user message must contain exactly one image and no text")
+    if not isinstance(content, list) or len(content) not in {1, 2}:
+        raise RequestError("The user message must contain one image and at most one prompt")
+    images = [
+        part for part in content if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    if len(images) != 1:
+        raise RequestError("The user message must contain exactly one image")
+    image_part = images[0]
+    prompt = None
+    if len(content) == 2:
+        text_parts = [
+            part for part in content if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        if profile != "olmocr" or len(text_parts) != 1:
+            raise RequestError("A custom prompt is supported only for olmOCR")
+        value: object = text_parts[0].get("text")
+        if not isinstance(value, str) or not value.strip() or len(value) > MAX_PROMPT_CHARS:
+            raise RequestError(f"Prompt must contain 1–{MAX_PROMPT_CHARS} characters")
+        prompt = value.strip()
     image = image_part.get("image_url")
     if not isinstance(image, dict):
         raise RequestError("A base64 image data URL is required")
@@ -127,12 +142,12 @@ def _image_url(payload: object) -> str:
         base64.b64decode(match.group(1), validate=True)
     except (binascii.Error, ValueError) as exc:
         raise RequestError("A valid base64 image data URL is required") from exc
-    return url
+    return url, prompt
 
 
-def rewrite_request(payload: object, profile: str) -> dict[str, Any]:
-    """Validate a public request and produce the only backend request shape allowed."""
-    image_url = _image_url(payload)
+def rewrite_request(payload: object, profile: str) -> tuple[dict[str, Any], bool]:
+    """Validate a public request and return the backend request and prompt-override flag."""
+    image_url, prompt = _image_request(payload, profile)
     assert isinstance(payload, dict)
     requested_max = payload.get("max_tokens", 2048)
     if isinstance(requested_max, bool) or not isinstance(requested_max, int) or requested_max < 1:
@@ -143,7 +158,7 @@ def rewrite_request(payload: object, profile: str) -> dict[str, Any]:
         content = [image, {"type": "text", "text": NANONETS_PROMPT}]
         temperature = 0.0
     elif profile == "olmocr":
-        content = [{"type": "text", "text": OLMOCR_PROMPT}, image]
+        content = [{"type": "text", "text": prompt or OLMOCR_PROMPT}, image]
         temperature = 0.1
     else:
         raise ValueError("Unknown OCR profile")
@@ -155,7 +170,7 @@ def rewrite_request(payload: object, profile: str) -> dict[str, Any]:
         "temperature": temperature,
         "n": 1,
         "stream": False,
-    }
+    }, prompt is not None
 
 
 def _yaml_scalar(value: str, key: str) -> object:
@@ -202,7 +217,7 @@ def strip_olmocr_front_matter(content: str) -> str:
     return markdown
 
 
-def rewrite_response(raw: bytes, profile: str) -> bytes:
+def rewrite_response(raw: bytes, profile: str, *, custom_prompt: bool = False) -> bytes:
     """Validate one backend completion and replace its internal model identity."""
     try:
         payload = json.loads(raw)
@@ -221,7 +236,7 @@ def rewrite_response(raw: bytes, profile: str) -> bytes:
         raise BackendError("Backend returned malformed completion")
     content = message["content"]
     if choice["finish_reason"] == "stop":
-        if profile == "olmocr":
+        if profile == "olmocr" and not custom_prompt:
             content = strip_olmocr_front_matter(content)
         elif not content.strip():
             raise BackendError("Backend returned empty OCR output")
@@ -339,7 +354,7 @@ def make_handler(profile: str) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 public_payload = json.loads(body)
-                backend_payload = rewrite_request(public_payload, profile)
+                backend_payload, custom_prompt = rewrite_request(public_payload, profile)
             except (UnicodeDecodeError, json.JSONDecodeError, RequestError) as exc:
                 message = (
                     str(exc) if isinstance(exc, RequestError) else "Request body must be valid JSON"
@@ -352,7 +367,9 @@ def make_handler(profile: str) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 try:
-                    response = rewrite_response(forward_to_backend(backend_payload), profile)
+                    response = rewrite_response(
+                        forward_to_backend(backend_payload), profile, custom_prompt=custom_prompt
+                    )
                 except BackendError:
                     self._error(502, "OCR backend returned an invalid response", "backend_error")
                     return
