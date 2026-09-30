@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from inference_runtime_manager.configuration import management_state
 from inference_runtime_manager.downloader.config import Settings
+from inference_runtime_manager.downloader.errors import StorageUnavailableError
 from inference_runtime_manager.downloader.main import main as downloads
 from inference_runtime_manager.installer.api_tests import manual_menu as manual_tests
 from inference_runtime_manager.installer.api_tests import menu as api_tests
@@ -139,7 +140,7 @@ def menu() -> None:
                 advanced_menu()
             else:
                 execute(action)
-        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        except (OSError, ValueError, StorageUnavailableError, subprocess.CalledProcessError) as exc:
             # Pydantic validation can include input values. Never print it here.
             print(
                 "Invalid or incomplete settings; use Configuration."
@@ -224,7 +225,7 @@ def main() -> None:
             menu()
     except KeyboardInterrupt:
         raise SystemExit(130) from None
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, StorageUnavailableError, subprocess.CalledProcessError) as exc:
         print(
             "Invalid or incomplete settings; use Configuration."
             if isinstance(exc, ValidationError)

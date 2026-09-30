@@ -27,6 +27,7 @@ from inference_runtime_manager.downloader.catalog import (
     write_queue,
 )
 from inference_runtime_manager.downloader.config import Settings, validate_storage
+from inference_runtime_manager.downloader.errors import StorageUnavailableError
 from inference_runtime_manager.downloader.main import _confirm_gated, download_selections
 from inference_runtime_manager.downloader.models import DownloadQueue, Selection
 from inference_runtime_manager.downloader.presentation import (
@@ -152,7 +153,7 @@ def runtime_family(runtime: str) -> str:
 def configured_storage(settings: Settings) -> bool:
     try:
         validate_storage(settings)
-    except (OSError, ValueError):
+    except (OSError, ValueError, StorageUnavailableError):
         return False
     return True
 

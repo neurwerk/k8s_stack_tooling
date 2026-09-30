@@ -63,7 +63,7 @@ def main(action: str | None = None) -> None:
     try:
         settings = Settings()
         catalog = load_catalog()
-    except (OSError, ValidationError, ValueError, TypeError) as error:
+    except (OSError, ValidationError, ValueError, TypeError, MediaDownloaderError) as error:
         _logger.error("%s", error)  # noqa: TRY400 -- CLI needs concise user-facing output.
         raise SystemExit(1) from error
     if action == "view_queue":
@@ -74,7 +74,7 @@ def main(action: str | None = None) -> None:
         return
     try:
         validate_storage(settings)
-    except (OSError, ValidationError, ValueError, TypeError) as error:
+    except (OSError, ValidationError, ValueError, TypeError, MediaDownloaderError) as error:
         _logger.error("%s", error)  # noqa: TRY400 -- CLI needs concise user-facing output.
         raise SystemExit(1) from error
     client = HuggingFaceClient(huggingface_environment(settings))

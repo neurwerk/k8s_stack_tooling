@@ -1,4 +1,4 @@
-"""Load local storage configuration and validate external-volume availability."""
+"""Load local storage configuration and validate model storage availability."""
 
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ def _configured_path(name: str) -> Path:
 
 
 class Settings(BaseSettings):
-    """Load external storage and Hugging Face cache paths from `.env`.
+    """Load model storage and Hugging Face cache paths from `.env`.
 
     Args:
-        storage_root: Existing mount or directory on the external storage volume.
+        storage_root: Existing directory on an external volume or under ~/.storage.
         hf_home: Hugging Face cache and authenticated-user configuration directory.
     """
 
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
 
 
 def validate_storage(settings: Settings) -> None:
-    """Require an existing writable non-root mounted volume for all media data.
+    """Require writable model storage on a mount or in the user's ~/.storage.
 
     Args:
         settings: Local application configuration.
@@ -90,13 +90,18 @@ def validate_storage(settings: Settings) -> None:
         raise StorageUnavailableError(
             f"Configured storage root is not an available directory: {root}"
         )
-    mount = _mount_root(root)
-    if mount == Path("/"):
-        raise StorageUnavailableError(
-            f"Configured storage root must be on a non-root mounted volume: {root}"
-        )
+    storage_boundary = _mount_root(root)
+    if storage_boundary == Path("/"):
+        local_storage = (Path.home() / ".storage").resolve()
+        if root == local_storage or not root.is_relative_to(local_storage):
+            raise StorageUnavailableError(
+                f"Configured storage root must be on a non-root mounted volume "
+                f"or inside ~/.storage: {root}"
+            )
+        # Keep the Hugging Face cache beneath this root, not elsewhere on the system disk.
+        storage_boundary = root
     _require_writable(root)
-    _require_within_mount(settings.hf_home.resolve(), mount, "HF_HOME")
+    _require_within_storage(settings.hf_home.resolve(), storage_boundary, "HF_HOME")
     settings.hf_home.mkdir(parents=True, exist_ok=True)
     _require_writable(settings.hf_home)
 
@@ -147,20 +152,20 @@ def _require_writable(path: Path) -> None:
         raise StorageUnavailableError(f"Configured directory is not writable: {path}") from error
 
 
-def _require_within_mount(path: Path, mount: Path, setting_name: str) -> None:
-    """Require an auxiliary path to remain on the verified external volume.
+def _require_within_storage(path: Path, boundary: Path, setting_name: str) -> None:
+    """Require an auxiliary path to remain in the verified storage location.
 
     Args:
         path: Auxiliary configured path.
-        mount: Validated external-volume mount root.
+        boundary: Validated external-volume mount or local storage root.
         setting_name: Configuration key for error reporting.
 
     Raises:
-        StorageUnavailableError: If the path is outside the external volume.
+        StorageUnavailableError: If the path is outside the storage location.
     """
     try:
-        path.relative_to(mount)
+        path.relative_to(boundary)
     except ValueError as error:
         raise StorageUnavailableError(
-            f"{setting_name} must be inside external storage mount {mount}: {path}"
+            f"{setting_name} must be inside storage location {boundary}: {path}"
         ) from error
