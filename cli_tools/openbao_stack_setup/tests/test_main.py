@@ -187,6 +187,7 @@ def test_main_dispatches(command: str, target: str) -> None:
         client="client",
         custody_root=Path("custody"),
         custodian_package=[Path("one"), Path("two")],
+        confirm="client",
         provider="brave",
     )
     with (
@@ -195,7 +196,12 @@ def test_main_dispatches(command: str, target: str) -> None:
     ):
         arguments.return_value.parse_args.return_value = args
         main()
-    operation.assert_called_once()
+    if command == "reconcile":
+        operation.assert_called_once_with(
+            "ctx", "client", Path("custody"), [Path("one"), Path("two")], "client"
+        )
+    else:
+        operation.assert_called_once()
 
 
 def test_main_redacts_expected_failures(capsys: pytest.CaptureFixture[str]) -> None:
@@ -221,6 +227,43 @@ def test_confirmation_uses_exact_text() -> None:
         pytest.raises(SetupError, match="did not match"),
     ):
         _confirm("ctx", "client", "Action")
+
+
+def test_reconcile_confirmation_argument_requires_exact_client_without_prompt() -> None:
+    args = _arguments().parse_args(
+        [
+            "reconcile",
+            "--context",
+            "ctx",
+            "--client",
+            "client",
+            "--custodian-package",
+            "one.zip",
+            "--custodian-package",
+            "two.zip",
+            "--confirm",
+            "client",
+        ]
+    )
+    with patch("openbao_stack_setup.main._ask_text") as prompt:
+        _confirm(args.context, args.client, "Reconcile OpenBao", args.confirm)
+        prompt.assert_not_called()
+        with pytest.raises(SetupError, match="did not match"):
+            _confirm(args.context, args.client, "Reconcile OpenBao", "CLIENT")
+        prompt.assert_not_called()
+
+
+def test_reconcile_rejects_wrong_confirmation_before_custody() -> None:
+    cluster = MagicMock()
+    cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main.prepare_custody_paths") as custody,
+        pytest.raises(SetupError, match="did not match"),
+    ):
+        _reconcile("ctx", "client", None, [Path("one"), Path("two")], "other")
+    cluster.require_openbao_release.assert_not_called()
+    custody.assert_not_called()
 
 
 @pytest.mark.parametrize("helper", [_ask_text, _ask_password])

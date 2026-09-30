@@ -94,7 +94,10 @@ parent contains at least two direct child Git worktrees. When running outside th
 An invalid or missing configured path fails closed. Repository ignores provide defense in depth for
 the exact seal checkpoint, recovery share, private-key, and custodian-package artifacts, but ignored
 paths inside a repository or recognized workspace remain prohibited. Mutating and privileged
-commands require typing the exact client name; managed credential values use hidden prompts.
+commands require exact client-name confirmation. `reconcile` accepts `--confirm <client>`
+instead of the interactive prompt. The value must exactly match `--client`; the cluster identity,
+two-custodian package checks, and root-token revocation still apply. Managed credential
+values use hidden prompts.
 
 Each client must declare its fixed K3s API endpoint in the namespace-local
 `openbao-product-values` ConfigMap. `preflight` and `bootstrap` require that endpoint to match a
@@ -118,6 +121,7 @@ uv run stack-setup bootstrap --context <context> --client <client>
 uv run stack-setup reconcile --context <context> --client <client> \
   --custodian-package /secure/custodian-1.zip \
   --custodian-package /secure/custodian-2.zip
+# For noninteractive reconciliation, add --confirm <client> to the command above.
 uv run stack-setup status --context <context> --client <client>
 uv run stack-setup recovery verify --context <context> --client <client> \
   --custodian-package /secure/custodian-1.zip \

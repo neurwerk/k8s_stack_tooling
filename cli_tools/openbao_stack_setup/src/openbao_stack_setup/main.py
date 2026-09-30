@@ -100,6 +100,7 @@ def _arguments() -> argparse.ArgumentParser:
     reconcile = _guarded(commands.add_parser("reconcile"))
     reconcile.add_argument("--custody-root", type=Path)
     reconcile.add_argument("--custodian-package", action="append", type=Path, required=True)
+    reconcile.add_argument("--confirm", metavar="CLIENT")
     status = _guarded(commands.add_parser("status"))
     status.add_argument("--custody-root", type=Path)
     recovery = commands.add_parser("recovery")
@@ -134,6 +135,7 @@ def main() -> None:
                 args.client,
                 args.custody_root,
                 args.custodian_package,
+                args.confirm,
             )
         elif args.command == "status":
             _status(args.context, args.client, args.custody_root)
@@ -146,10 +148,13 @@ def main() -> None:
         raise SystemExit(1) from None
 
 
-def _confirm(context: str, client: str, action: str) -> None:
-    answer = _ask_text(
-        f"{action} for client {client!r} on context {context!r}? Type the client name to continue:"
-    )
+def _confirm(context: str, client: str, action: str, confirmation: str | None = None) -> None:
+    answer = confirmation
+    if answer is None:
+        answer = _ask_text(
+            f"{action} for client {client!r} on context {context!r}? "
+            "Type the client name to continue:"
+        )
     if answer != client:
         raise SetupError("Confirmation did not match the requested client")
 
@@ -365,6 +370,7 @@ def _reconcile(
     client: str,
     custody_root: Path | None,
     package_paths: list[Path] | None,
+    confirmation: str | None = None,
 ) -> None:
     cluster = Cluster(context)
     identity = cluster.identity(client)
@@ -372,7 +378,7 @@ def _reconcile(
     forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
-    _confirm(context, client, "Reconcile OpenBao")
+    _confirm(context, client, "Reconcile OpenBao", confirmation)
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
     kit = _bound_kit(paths.seal_file, identity)
