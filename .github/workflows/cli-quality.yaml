@@ -45,6 +45,9 @@ jobs:
           - name: LDAP Directory
             project: cli_tools/ldap_directory
             needs_base: false
+          - name: OpenSearch Logs
+            project: cli_tools/opensearch_logs
+            needs_base: false
     defaults:
       run:
         working-directory: ${{ matrix.project }}
@@ -101,7 +104,7 @@ jobs:
         run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
 
       - name: Test
-        if: matrix.project != 'cli_tools/inference_runtime_manager' && matrix.project != 'cli_tools/ldap_directory'
+        if: matrix.project != 'cli_tools/inference_runtime_manager' && matrix.project != 'cli_tools/ldap_directory' && matrix.project != 'cli_tools/opensearch_logs'
         run: uv run --frozen pytest
 
       - name: Build
