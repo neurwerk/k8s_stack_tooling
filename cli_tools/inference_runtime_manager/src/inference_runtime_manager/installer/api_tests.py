@@ -178,13 +178,27 @@ def chat_completion_text(value: object) -> str:
     if not isinstance(choices, list) or len(choices) != 1:
         raise ValueError("Chat response must contain one choice")
     choice = choices[0]
-    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+    if not isinstance(choice, dict):
         raise ValueError("Chat response is incomplete")
+    if choice.get("finish_reason") != "stop":
+        raise ValueError(
+            f"Chat response is incomplete (finish_reason={choice.get('finish_reason')!r})"
+        )
     message: object = choice.get("message")
     content: object = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str) or not content.strip():
         raise ValueError("Chat response has no text")
     return content.strip()
+
+
+def show_failure_logs(docker: Docker, service: str) -> None:
+    print(f"Recent Docker logs for {service} on {docker.settings.docker_context}:")
+    try:
+        logs = docker.service_logs(service)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Could not read service logs: {exc}")
+    else:
+        print(logs.rstrip() if logs.strip() else "(no recent logs)")
 
 
 def request(
@@ -392,7 +406,7 @@ def synthesize_tts(docker: Docker, text: str) -> bytes:
     return speech
 
 
-def test_service(
+def _test_service(
     docker: Docker,
     alias: str,
     speech: bytes | None,
@@ -423,6 +437,13 @@ def test_service(
                     ),
                 )
             )
+            choices = value.get("choices") if isinstance(value, dict) else None
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            if isinstance(choice, dict) and choice.get("finish_reason") != "stop":
+                message = choice.get("message")
+                partial = message.get("content") if isinstance(message, dict) else None
+                if isinstance(partial, str) and partial:
+                    print(f"{alias} partial output (requested max_tokens=2048):\n{partial}")
             output = chat_completion_text(value)
             if image is None and output != "TEST 123":
                 raise ValueError("Image OCR did not exactly transcribe the control text")
@@ -505,6 +526,27 @@ def test_service(
             raise ValueError("NER response has no predictions list")
     print(f"PASS {alias} — assigned model: {model_label(preset)}; review output quality manually.")
     return speech
+
+
+def test_service(
+    docker: Docker,
+    alias: str,
+    speech: bytes | None,
+    running: set[str] | None = None,
+    *,
+    image: bytes | None = None,
+    prompt: str | None = None,
+) -> bytes | None:
+    """Run a manual check and show the assigned service's logs on failure."""
+    preset = assigned_recipe(
+        management_state(Settings().storage_root), docker.settings.docker_context, alias
+    )
+    try:
+        return _test_service(docker, alias, speech, running, image=image, prompt=prompt)
+    except (OSError, ValueError, wave.Error, subprocess.SubprocessError):
+        if preset is not None:
+            show_failure_logs(docker, preset["service"])
+        raise
 
 
 def enabled_docker(alias: str) -> Docker:
@@ -610,9 +652,13 @@ def tts_menu() -> None:
         )
         if preset is None:
             raise ValueError("tts-german has no saved assignment")
-        describe_assignment(docker, "tts-german", preset)
-        request(docker, "tts-german", preset["health_path"])
-        speech = synthesize_tts(docker, text)
+        try:
+            describe_assignment(docker, "tts-german", preset)
+            request(docker, "tts-german", preset["health_path"])
+            speech = synthesize_tts(docker, text)
+        except (OSError, ValueError, wave.Error, subprocess.SubprocessError):
+            show_failure_logs(docker, preset["service"])
+            raise
         output_directory = Path("runtime")
         output_directory.mkdir(exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")

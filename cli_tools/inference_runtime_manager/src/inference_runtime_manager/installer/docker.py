@@ -183,6 +183,18 @@ class Docker:
             ).stdout.splitlines()
         )
 
+    def service_logs(self, service: str) -> str:
+        """Read a bounded tail of one service's logs from the configured target."""
+        result = subprocess.run(
+            self.command + ["logs", "--no-color", "--tail", "100", service],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        return result.stdout[-32768:]
+
     def service_status(self) -> dict[str, tuple[str, str, str]]:
         """Return Compose service state, health and image in a single remote query."""
         output = self.run("ps", "--all", "--format", "json", capture=True, text=True).stdout
