@@ -214,6 +214,11 @@ it is model-only inference time. Use **Prepare or update runtime images** to dep
 an updated packaged Kokoro adapter, then accept the prompt to recreate affected
 enabled services.
 
+Failed manual endpoint checks show the last 100 lines (up to 32 KiB) of logs from
+the assigned service on the configured Docker context. If image OCR stops before
+completion, the check also prints its partial output (up to the requested 2048
+tokens) and reports the response's `finish_reason`.
+
 ## GPU Notes
 
 GPU services use `gpus: all` and `NVIDIA_DRIVER_CAPABILITIES=compute,utility`.

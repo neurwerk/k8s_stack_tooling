@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from inference_runtime_manager.installer import api_tests
 from inference_runtime_manager.installer.api_tests import (
@@ -91,6 +91,86 @@ class ImageOCRTests(TestCase):
         self.assertEqual(output["choices"][0]["finish_reason"], "length")
         with self.assertRaisesRegex(ValueError, "incomplete"):
             chat_completion_text(output)
+
+    def test_incomplete_image_check_shows_partial_text_and_service_logs(self) -> None:
+        partial = "partial transcription " * 500
+        logs = "backend reported context limit"
+        service_logs = Mock(return_value=logs)
+        docker = cast(
+            Docker,
+            SimpleNamespace(
+                settings=SimpleNamespace(docker_context="ai-server"),
+                service_logs=service_logs,
+            ),
+        )
+        preset = {
+            "runtime": "llama.cpp-ocr-proxy",
+            "health_path": "/health",
+            "service": "vlm-images-olmocr",
+        }
+        with (
+            patch.object(api_tests, "Settings"),
+            patch.object(api_tests, "management_state", return_value=Path("state")),
+            patch.object(api_tests, "assigned_recipe", return_value=preset),
+            patch.object(api_tests, "describe_assignment"),
+            patch.object(api_tests, "request", side_effect=[b"{}", completion(partial, "length")]),
+            patch("builtins.print") as display,
+        ):
+            with self.assertRaisesRegex(ValueError, "finish_reason='length'"):
+                api_tests.test_service(docker, "vlm-images", None, image=sample_image())
+
+        display.assert_any_call(
+            f"vlm-images partial output (requested max_tokens=2048):\n{partial}"
+        )
+        display.assert_any_call("Recent Docker logs for vlm-images-olmocr on ai-server:")
+        display.assert_any_call(logs)
+        service_logs.assert_called_once_with("vlm-images-olmocr")
+
+    def test_log_fetch_failure_preserves_original_error(self) -> None:
+        docker = cast(
+            Docker,
+            SimpleNamespace(
+                settings=SimpleNamespace(docker_context="ai-server"),
+                service_logs=Mock(side_effect=OSError("connection lost")),
+            ),
+        )
+        preset = {"service": "vlm-images-olmocr"}
+        with (
+            patch.object(api_tests, "Settings"),
+            patch.object(api_tests, "management_state", return_value=Path("state")),
+            patch.object(api_tests, "assigned_recipe", return_value=preset),
+            patch.object(api_tests, "_test_service", side_effect=ValueError("inference failed")),
+            patch("builtins.print") as display,
+        ):
+            with self.assertRaisesRegex(ValueError, "inference failed"):
+                api_tests.test_service(docker, "vlm-images", None)
+        display.assert_any_call("Could not read service logs: connection lost")
+
+    def test_service_logs_uses_configured_context_and_bounded_tail(self) -> None:
+        docker = Docker.__new__(Docker)
+        docker.command = [
+            "docker",
+            "--context",
+            "ai-server",
+            "compose",
+            "--project-name",
+            "local-ai",
+        ]
+        docker.environment = {}
+        with patch(
+            "inference_runtime_manager.installer.docker.subprocess.run",
+            return_value=SimpleNamespace(stdout="x" * 40000),
+        ) as run:
+            logs = docker.service_logs("vlm-images-olmocr")
+        self.assertEqual(len(logs), 32768)
+        run.assert_called_once_with(
+            docker.command + ["logs", "--no-color", "--tail", "100", "vlm-images-olmocr"],
+            env={},
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
 
     def test_custom_image_and_prompt_file(self) -> None:
         with TemporaryDirectory() as directory:
