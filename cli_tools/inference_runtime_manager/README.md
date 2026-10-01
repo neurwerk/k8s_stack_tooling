@@ -240,6 +240,13 @@ context. Nanonets uses FP16 vLLM computation, an 8192-token context and the sepa
 until their exact recipes are exercised on the target GPU; select only one image
 reader at a time.
 
+The image-reader recipes use a mild repetition penalty (1.1) to reduce runaway
+OCR line repetition; the llama.cpp olmOCR recipe checks the last 256 tokens.
+These settings change the service configuration, so recreate the active image
+reader using **Prepare or update runtime images**, then retry the same image in
+**Test endpoints manually** and compare the transcription. Changing the output
+token limit alone does not resolve a repeated-line loop.
+
 ## Validation
 
 Automated validation uses linting, formatting, type checking, Compose rendering
