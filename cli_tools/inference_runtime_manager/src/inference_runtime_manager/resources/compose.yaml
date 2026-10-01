@@ -151,6 +151,8 @@ services:
       - "1"
       - --max-model-len
       - "4096"
+      - --override-generation-config
+      - '{"repetition_penalty":1.1}'
       - --gpu-memory-utilization
       - ${VLLM_IMAGES_GPU_MEMORY_UTILIZATION:-0.36}
       - --enforce-eager
@@ -190,6 +192,10 @@ services:
       - "8001"
       - --ctx-size
       - "16384"
+      - --repeat-penalty
+      - "1.1"
+      - --repeat-last-n
+      - "256"
       - --n-gpu-layers
       - "999"
       - --jinja
@@ -235,6 +241,8 @@ services:
       - "1"
       - --max-model-len
       - "8192"
+      - --override-generation-config
+      - '{"repetition_penalty":1.1}'
       - --gpu-memory-utilization
       - ${VLLM_NANONETS_GPU_MEMORY_UTILIZATION:-0.65}
       - --enforce-eager
