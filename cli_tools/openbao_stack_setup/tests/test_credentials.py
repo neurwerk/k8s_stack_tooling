@@ -142,7 +142,15 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert isinstance(query_encryption_key, str)
     assert len(query_encryption_key) == 32
     studio = original["frontend-studio/internal"]
-    assert set(studio) == {"opensearchPassword", "postgresqlPassword"}
+    assert set(studio) == {
+        "opensearchPassword",
+        "postgresqlPassword",
+        "llmLogsPublicKey",
+        "llmLogsSecretKey",
+    }
+    langfuse = original["monitor-langfuse/internal"]
+    assert studio["llmLogsPublicKey"] == langfuse["initProjectPublicKey"]
+    assert studio["llmLogsSecretKey"] == langfuse["initProjectSecretKey"]
     assert isinstance(studio["postgresqlPassword"], str)
     assert re.fullmatch(r"[A-Za-z0-9_-]+", studio["postgresqlPassword"])
     postgres_auth = original["infra-postgres-auth/internal"]
@@ -184,6 +192,12 @@ def test_internal_fixed_value_mismatch_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(OpenBaoError, match="Internal credential mismatch"):
         reconcile_internal_credentials(api, {})
+    session.secrets["frontend-studio/internal"].values["opensearchPassword"] = session.secrets[
+        "monitor-opensearch/internal"
+    ].values["studioPassword"]
+    session.secrets["frontend-studio/internal"].values["llmLogsPublicKey"] = "stale"
+    with pytest.raises(OpenBaoError, match="Internal credential mismatch"):
+        reconcile_internal_credentials(api, {})
 
 
 def test_invalid_opensearch_query_encryption_key_is_rejected_without_rotation(
@@ -220,6 +234,12 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
     assert session.secrets["frontend-studio/internal"].values == {
         "langfusePublicKey": "legacy-public-key",
         "langfuseSecretKey": "legacy-secret-key",
+        "llmLogsPublicKey": session.secrets["monitor-langfuse/internal"].values[
+            "initProjectPublicKey"
+        ],
+        "llmLogsSecretKey": session.secrets["monitor-langfuse/internal"].values[
+            "initProjectSecretKey"
+        ],
         "opensearchPassword": session.secrets["monitor-opensearch/internal"].values[
             "studioPassword"
         ],

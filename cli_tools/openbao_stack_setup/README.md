@@ -176,7 +176,12 @@ Schema version 4 adds `infra-agentgateway/internal:postgresqlPassword` and copie
 while a conflicting operations copy prevents schema advancement and remains safe to retry after
 correction. Fresh Studio records no longer receive Langfuse project credentials; existing Studio
 Langfuse fields remain untouched during this additive transition, and the canonical project
-credentials remain in `monitor-langfuse/internal`.
+credentials remain in `monitor-langfuse/internal`. Starting in the planned
+`0.2.24` catalog, reconciliation copies the canonical project's keys into
+new `frontend-studio/internal:llmLogsPublicKey` and `llmLogsSecretKey` fields,
+checking for exact matches before accepting existing copies. The legacy Studio
+Langfuse fields remain untouched. Base syncs these new fields into the Studio
+API Pod only when the separate LLM activity feature is enabled.
 
 For the API-key bridge PostgreSQL transition, bootstrap and reconciliation add
 `auth-keycloak-api-key-bridge/internal:postgresqlPassword` and copy it to
