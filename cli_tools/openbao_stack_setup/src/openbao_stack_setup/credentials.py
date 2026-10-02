@@ -250,7 +250,11 @@ def reconcile_internal_credentials(
         client,
         "frontend-studio/internal",
         _random_fields("postgresqlPassword"),
-        {"opensearchPassword": _required_text(opensearch, "studioPassword")},
+        {
+            "opensearchPassword": _required_text(opensearch, "studioPassword"),
+            "llmLogsPublicKey": _required_text(langfuse, "initProjectPublicKey"),
+            "llmLogsSecretKey": _required_text(langfuse, "initProjectSecretKey"),
+        },
     )
     _record_change(changed, "frontend-studio/internal", count)
     added += count
