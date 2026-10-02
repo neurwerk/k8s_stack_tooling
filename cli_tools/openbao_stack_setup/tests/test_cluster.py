@@ -760,6 +760,19 @@ def test_external_secret_refresh_operations() -> None:
         target.wait_external_secret_refresh("secret", "namespace", "old", 10)
 
 
+def test_external_secret_presence_distinguishes_missing_from_api_failure() -> None:
+    target = cluster()
+    assert target.external_secret_exists("secret", "namespace") is True
+    target.custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    assert target.external_secret_exists("secret", "namespace") is False
+    target.custom.get_namespaced_custom_object.side_effect = ApiException(
+        status=403, reason="private controller detail"
+    )
+    with pytest.raises(ClusterError, match=r"ExternalSecret namespace/secret: HTTP 403") as exc:
+        target.external_secret_exists("secret", "namespace")
+    assert "private controller detail" not in str(exc.value)
+
+
 def test_ensure_secret_store_ready_skips_ready_store() -> None:
     target = cluster()
     target.custom.get_namespaced_custom_object.return_value = {

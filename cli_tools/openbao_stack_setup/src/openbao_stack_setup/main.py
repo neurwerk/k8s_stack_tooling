@@ -29,6 +29,7 @@ from openbao_stack_setup.catalog import (
     BOOTSTRAP_SECRET_STORES,
     DOCLING_EXTERNAL_SECRETS,
     DOCLING_SECRET_STORES,
+    FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET,
     FORGEJO_EXTERNAL_SECRETS,
     FORGEJO_SECRET_STORE,
     PROVIDER_REFRESH_TARGETS,
@@ -665,7 +666,13 @@ def _refresh_bootstrap_external_secrets(
     if active_directory_required:
         targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,)
     if forgejo_enabled:
-        targets += FORGEJO_EXTERNAL_SECRETS
+        postgres = FORGEJO_EXTERNAL_SECRETS[1]
+        addon_postgres = FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET
+        if cluster.external_secret_exists(addon_postgres.name, addon_postgres.namespace):
+            postgres = addon_postgres
+        elif not cluster.external_secret_exists(postgres.name, postgres.namespace):
+            raise ClusterError("Selected Forgejo PostgreSQL ExternalSecret is missing")
+        targets += (FORGEJO_EXTERNAL_SECRETS[0], postgres, FORGEJO_EXTERNAL_SECRETS[2])
     if wireguard_enabled:
         targets += (WIREGUARD_EXTERNAL_SECRET,)
     if docling_enabled:
