@@ -728,6 +728,19 @@ def test_bootstrap_refreshes_every_declared_external_secret() -> None:
         ),
     ]
 
+    cluster.reset_mock()
+    _refresh_bootstrap_external_secrets(cluster, False, dify_enabled=True)
+    assert cluster.force_external_secret_refresh.call_args_list == [
+        *[call(name, namespace, target_secret) for name, namespace, target_secret in expected],
+        call("frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"),
+        call("frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"),
+        call(
+            "dify-managed-key-verifiers",
+            "auth-keycloak-api-key-bridge",
+            "dify-managed-key-verifiers",
+        ),
+    ]
+
 
 def test_bootstrap_converges_every_declared_secret_store(
     capsys: pytest.CaptureFixture[str],

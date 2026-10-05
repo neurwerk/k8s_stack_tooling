@@ -196,6 +196,11 @@ DIFY_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
     ExternalSecretTarget(
         "frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"
     ),
+    ExternalSecretTarget(
+        "dify-managed-key-verifiers",
+        "auth-keycloak-api-key-bridge",
+        "dify-managed-key-verifiers",
+    ),
 )
 DIFY_SECRET_STORE = SecretStoreTarget("frontend-dify-openbao-secret-store", "frontend-dify")
 

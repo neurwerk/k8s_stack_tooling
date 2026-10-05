@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -69,6 +70,10 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "difyAgentgatewayPrimaryVerifierSha256"
         not in session.secrets["auth-keycloak-api-key-bridge/internal"].values
     )
+    assert (
+        "difyAgentgatewaySecondaryVerifierSha256"
+        not in session.secrets["auth-keycloak-api-key-bridge/internal"].values
+    )
     assert "difyPassword" not in session.secrets["infra-postgres-operations/internal"].values
 
     planned = plan_bootstrap_passwords(api, dify_enabled=True)
@@ -135,6 +140,13 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert code_interpreter["jwtPublicKey"] == librechat["codeInterpreterJwtPublicKey"]
     assert code_interpreter["valkeyPassword"] != librechat["valkeyPassword"]
     bridge = original["auth-keycloak-api-key-bridge/internal"]
+    dify_key = dify["agentgatewayApiKey"]
+    assert isinstance(dify_key, str)
+    assert (
+        bridge["difyAgentgatewayPrimaryVerifierSha256"]
+        == hashlib.sha256(dify_key.encode()).hexdigest()
+    )
+    assert bridge["difyAgentgatewaySecondaryVerifierSha256"] == ""
     assert isinstance(bridge["postgresqlPassword"], str)
     assert re.fullmatch(r"[A-Za-z0-9_-]+", bridge["postgresqlPassword"])
     agentgateway = original["infra-agentgateway/internal"]
