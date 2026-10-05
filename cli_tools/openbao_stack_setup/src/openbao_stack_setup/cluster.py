@@ -170,6 +170,21 @@ class Cluster:
                 raise ClusterError("Enabled Forgejo requires a nonblank hostname in client-values")
         return enabled
 
+    def dify_enabled(self) -> bool:
+        """Read the optional Dify selection from client values without touching credentials."""
+        values = self._product_values("client-values", "auth-keycloak", "Client")
+        if not isinstance(values, dict):
+            raise ClusterError("Client values contain an invalid Dify contract")
+        dify = values.get("dify", {})
+        if not isinstance(dify, dict):
+            raise ClusterError("Client values contain an invalid Dify contract")
+        enabled = dify.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("Dify enabled value must be a boolean")
+        if enabled and (not isinstance(dify.get("hostname"), str) or not dify["hostname"].strip()):
+            raise ClusterError("Enabled Dify requires a nonblank hostname in client-values")
+        return enabled
+
     def wireguard_enabled(self) -> bool:
         """Read the optional gateway's canonical product values, without reading keys."""
         values = self._product_values(

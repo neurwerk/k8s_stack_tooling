@@ -13,8 +13,6 @@ from fake import FakeSession, StoredSecret
 
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 from openbao_stack_setup.credentials import (
-    BOOTSTRAP_PASSWORDS,
-    INTERNAL_PATHS,
     plan_bootstrap_passwords,
     reconcile_internal_credentials,
 )
@@ -61,14 +59,31 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     session = FakeSession()
     api = client(tmp_path, session)
 
-    planned = plan_bootstrap_passwords(api)
-    first = reconcile_internal_credentials(api, planned)
+    base_passwords = plan_bootstrap_passwords(api)
+    assert "dify" not in base_passwords
+    reconcile_internal_credentials(api, base_passwords)
+    assert "frontend-dify/internal" not in session.secrets
+    assert "difyOidcClientSecret" not in session.secrets["auth-keycloak/internal"].values
+    assert "difyAgentgatewayClientSecret" not in session.secrets["auth-keycloak/internal"].values
+    assert (
+        "difyAgentgatewayPrimaryVerifierSha256"
+        not in session.secrets["auth-keycloak-api-key-bridge/internal"].values
+    )
+    assert "difyPassword" not in session.secrets["infra-postgres-operations/internal"].values
+
+    planned = plan_bootstrap_passwords(api, dify_enabled=True)
+    first = reconcile_internal_credentials(api, planned, dify_enabled=True)
     original = {path: dict(record.values) for path, record in session.secrets.items()}
     second = reconcile_internal_credentials(api, {})
 
-    assert set(first.changed_paths) == set(INTERNAL_PATHS)
-    assert first.added_fields > len(INTERNAL_PATHS)
-    assert set(planned) == {password.key for password in BOOTSTRAP_PASSWORDS}
+    assert set(first.changed_paths) == {
+        "frontend-dify/internal",
+        "auth-keycloak/internal",
+        "auth-keycloak-api-key-bridge/internal",
+        "infra-postgres-operations/internal",
+    }
+    assert first.added_fields > 0
+    assert set(planned) == {"dify"}
     assert second.changed_paths == ()
     assert second.added_fields == 0
     assert {path: record.values for path, record in session.secrets.items()} == original
@@ -265,12 +280,14 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
 def test_postgres_consumer_conflicts_are_rejected(tmp_path: Path, path: str, field: str) -> None:
     session = FakeSession()
     api = client(tmp_path, session)
-    reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
+    reconcile_internal_credentials(
+        api, plan_bootstrap_passwords(api, dify_enabled=True), dify_enabled=True
+    )
     session.secrets[path].values[field] = "conflict"
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match=rf"credential mismatch at {path}/{field}"):
-        reconcile_internal_credentials(api, {})
+        reconcile_internal_credentials(api, {}, dify_enabled=True)
 
     assert session.secrets[path].values == existing
 
@@ -286,7 +303,9 @@ def test_bridge_verifier_must_match_managed_key(tmp_path: Path) -> None:
     )
 
     with pytest.raises(OpenBaoError, match="managed verifier slot"):
-        reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
+        reconcile_internal_credentials(
+            api, plan_bootstrap_passwords(api, dify_enabled=True), dify_enabled=True
+        )
 
 
 @pytest.mark.parametrize(

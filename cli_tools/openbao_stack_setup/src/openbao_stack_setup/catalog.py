@@ -10,7 +10,6 @@ ACTIVE_DIRECTORY_FIELDS = ("activeDirectoryBindDn", "activeDirectoryBindCredenti
 ROLE_NAMESPACES: tuple[str, ...] = (
     "auth-keycloak",
     "auth-keycloak-api-key-bridge",
-    "frontend-dify",
     "frontend-librechat",
     "frontend-studio",
     "infra-agentgateway",
@@ -152,12 +151,6 @@ BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
         "auth-keycloak-api-key-bridge-openbao-secret",
     ),
     ExternalSecretTarget(
-        "frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"
-    ),
-    ExternalSecretTarget(
-        "frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"
-    ),
-    ExternalSecretTarget(
         "frontend-librechat-runtime-secret",
         "frontend-librechat",
         "frontend-librechat-runtime-secret",
@@ -196,12 +189,21 @@ BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
     ),
 )
 
+DIFY_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
+    ExternalSecretTarget(
+        "frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"
+    ),
+    ExternalSecretTarget(
+        "frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"
+    ),
+)
+DIFY_SECRET_STORE = SecretStoreTarget("frontend-dify-openbao-secret-store", "frontend-dify")
+
 BOOTSTRAP_SECRET_STORES: tuple[SecretStoreTarget, ...] = (
     SecretStoreTarget("auth-keycloak-openbao-secret-store", "auth-keycloak"),
     SecretStoreTarget(
         "auth-keycloak-api-key-bridge-openbao-secret-store", "auth-keycloak-api-key-bridge"
     ),
-    SecretStoreTarget("frontend-dify-openbao-secret-store", "frontend-dify"),
     SecretStoreTarget("frontend-librechat-openbao-secret-store", "frontend-librechat"),
     SecretStoreTarget(
         "librechat-code-interpreter-openbao-secret-store", "librechat-code-interpreter"
@@ -296,7 +298,13 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
-    if namespace not in (*ROLE_NAMESPACES, "forgejo", "wireguard", *DOCLING_NAMESPACES):
+    if namespace not in (
+        *ROLE_NAMESPACES,
+        "frontend-dify",
+        "forgejo",
+        "wireguard",
+        *DOCLING_NAMESPACES,
+    ):
         raise ValueError("Namespace is not present in the reconciliation catalog")
     return f"""path "secret/data/{namespace}/*" {{
   capabilities = ["read"]

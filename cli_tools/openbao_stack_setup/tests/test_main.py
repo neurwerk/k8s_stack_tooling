@@ -446,6 +446,12 @@ def test_prepare_bootstrap_passwords_redisplays_pending_values_on_resume(tmp_pat
     deliver.assert_called_once_with({"keycloak": "keycloak-password"})
     update.assert_called_once_with(tmp_path / "recovery", prepared)
 
+    pending_dify = replace(
+        kit(), pending_bootstrap_passwords={"dify": "undelivered-synthetic-password"}
+    )
+    with pytest.raises(SetupError, match="Dify selection changed"):
+        _prepare_bootstrap_passwords(MagicMock(), pending_dify, tmp_path / "recovery")
+
 
 def test_preflight_reports_identity(capsys: pytest.CaptureFixture[str]) -> None:
     cluster = MagicMock()
@@ -540,7 +546,16 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     write_packages.assert_called_once_with(paths, staged)
     assert update.call_args_list == [call(seal_file, staged), call(seal_file, initialized)]
     finish.assert_called_once_with(
-        cluster, api, "root", initialized, seal_file, True, True, True, True
+        cluster,
+        api,
+        "root",
+        initialized,
+        seal_file,
+        True,
+        True,
+        True,
+        True,
+        cluster.dify_enabled.return_value,
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -570,7 +585,16 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
     ):
         _bootstrap("ctx", "client", tmp_path)
     finish.assert_called_once_with(
-        cluster, api, "temporary", existing, recovery_file, False, False, False, True
+        cluster,
+        api,
+        "temporary",
+        existing,
+        recovery_file,
+        False,
+        False,
+        False,
+        True,
+        cluster.dify_enabled.return_value,
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -613,7 +637,16 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     write_packages.assert_called_once_with(paths, staged)
     update.assert_called_once_with(seal_file, initialized)
     finish.assert_called_once_with(
-        cluster, api, "initial-root", initialized, seal_file, False, False, False, False
+        cluster,
+        api,
+        "initial-root",
+        initialized,
+        seal_file,
+        False,
+        False,
+        False,
+        False,
+        cluster.dify_enabled.return_value,
     )
 
 
@@ -627,8 +660,6 @@ def test_bootstrap_refreshes_every_declared_external_secret() -> None:
             "auth-keycloak-api-key-bridge",
             "auth-keycloak-api-key-bridge-openbao-secret",
         ),
-        ("frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"),
-        ("frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"),
         (
             "frontend-librechat-runtime-secret",
             "frontend-librechat",
@@ -704,7 +735,6 @@ def test_bootstrap_converges_every_declared_secret_store(
     expected = (
         ("auth-keycloak-openbao-secret-store", "auth-keycloak"),
         ("auth-keycloak-api-key-bridge-openbao-secret-store", "auth-keycloak-api-key-bridge"),
-        ("frontend-dify-openbao-secret-store", "frontend-dify"),
         ("frontend-librechat-openbao-secret-store", "frontend-librechat"),
         ("librechat-code-interpreter-openbao-secret-store", "librechat-code-interpreter"),
         ("frontend-studio-openbao-secret-store", "frontend-studio"),
@@ -727,8 +757,8 @@ def test_bootstrap_converges_every_declared_secret_store(
         call(name, namespace) for name, namespace in expected
     ]
     output = capsys.readouterr().out
-    assert "(1/15)" in output
-    assert "(15/15)" in output
+    assert "(1/14)" in output
+    assert "(14/14)" in output
 
 
 def test_bootstrap_force_reconciles_blocked_helm_releases() -> None:
@@ -991,6 +1021,7 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
         forgejo_enabled=False,
         wireguard_enabled=False,
         docling_enabled=False,
+        dify_enabled=False,
     )
     prompt.assert_not_called()
     seed.assert_not_called()
@@ -1123,9 +1154,12 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         forgejo_enabled=forgejo_enabled,
         wireguard_enabled=True,
         docling_enabled=True,
+        dify_enabled=cluster.dify_enabled.return_value,
     )
     assert events == ["revoke", "converge"]
-    converge.assert_called_once_with(cluster, False, forgejo_enabled, True, True)
+    converge.assert_called_once_with(
+        cluster, False, forgejo_enabled, True, True, cluster.dify_enabled.return_value
+    )
 
 
 def test_reconcile_requires_complete_bootstrap(tmp_path: Path) -> None:

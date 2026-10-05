@@ -219,6 +219,31 @@ def test_forgejo_selector_uses_existing_client_values(values: str, expected: boo
 
 
 @pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ("{}", False),
+        ("dify: {enabled: false}", False),
+        ("dify: {enabled: true, hostname: dify.example.test}", True),
+        ("dify: null", None),
+        ('dify: {enabled: "true", hostname: dify.example.test}', None),
+        ("dify: {enabled: true}", None),
+        ("dify: {enabled: true, hostname: '  '}", None),
+    ],
+)
+def test_dify_selector_fails_closed(values: str, expected: bool | None) -> None:
+    target = cluster()
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": values}
+    )
+    if expected is None:
+        with pytest.raises(ClusterError, match="Dify"):
+            target.dify_enabled()
+    else:
+        assert target.dify_enabled() is expected
+    target.core.read_namespaced_config_map.assert_called_once_with("client-values", "auth-keycloak")
+
+
+@pytest.mark.parametrize(
     "values",
     [
         "[]",

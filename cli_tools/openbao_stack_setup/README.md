@@ -9,6 +9,16 @@ files.
 
 ### Dify Agent Credentials
 
+The Dify catalog is selected by `dify.enabled: true` in the
+`auth-keycloak/client-values` ConfigMap. An enabled selection also requires a
+nonblank `dify.hostname`; missing selection defaults to disabled, while invalid
+values stop the CLI before credentials are accessed. Base-only bootstrap creates
+no Dify credentials, Keycloak Dify client fields, bridge Dify verifiers, or
+PostgreSQL Dify password, and does not refresh Dify consumers. Selecting Dify
+later requires staging its namespace and secret-sync resources before authorized
+two-custodian reconciliation. Disabling it retains existing credentials without
+rotating or deleting them. Kubernetes identities remain `frontend-dify`.
+
 Package `0.2.23` adds the Agent API token, Agent Stub encryption key, and local
 sandbox authentication token to `frontend-dify/internal`. `reconcile` generates
 only missing fields and retains the existing Dify, database, and Keycloak

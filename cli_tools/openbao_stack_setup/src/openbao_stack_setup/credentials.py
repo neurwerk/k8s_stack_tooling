@@ -25,7 +25,6 @@ type Generator = Callable[[], str]
 
 INTERNAL_PATHS: tuple[str, ...] = (
     "auth-keycloak/internal",
-    "frontend-dify/internal",
     "auth-keycloak-api-key-bridge/internal",
     "frontend-librechat/internal",
     "librechat-code-interpreter/internal",
@@ -87,10 +86,14 @@ BOOTSTRAP_PASSWORDS: tuple[BootstrapPassword, ...] = (
 )
 
 
-def plan_bootstrap_passwords(client: OpenBaoClient) -> dict[str, str]:
+def plan_bootstrap_passwords(
+    client: OpenBaoClient, *, dify_enabled: bool = False
+) -> dict[str, str]:
     """Generate values only for human passwords that are absent from OpenBao."""
     planned: dict[str, str] = {}
     for password in BOOTSTRAP_PASSWORDS:
+        if password.key == "dify" and not dify_enabled:
+            continue
         current = client.read_secret(password.path)
         if current is None or password.field not in current.values:
             planned[password.key] = _random_secret()
@@ -104,62 +107,40 @@ def reconcile_internal_credentials(
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
+    dify_enabled: bool = False,
 ) -> InternalResult:
     """Add every missing internal field while preserving all existing values."""
     _validate_bootstrap_passwords(bootstrap_passwords)
     changed: list[str] = []
     added = 0
 
+    keycloak_generators = _random_fields(
+        "dbPassword", "bridgeOidcClientSecret", "librechatOidcClientSecret"
+    )
+    if dify_enabled:
+        keycloak_generators.update(
+            _random_fields("difyOidcClientSecret", "difyAgentgatewayClientSecret")
+        )
     keycloak, count = _upsert(
         client,
         "auth-keycloak/internal",
-        _random_fields(
-            "dbPassword",
-            "difyOidcClientSecret",
-            "difyAgentgatewayClientSecret",
-            "bridgeOidcClientSecret",
-            "librechatOidcClientSecret",
-        ),
+        keycloak_generators,
         _bootstrap_password_fields("auth-keycloak/internal", bootstrap_passwords),
     )
     _record_change(changed, "auth-keycloak/internal", count)
     added += count
 
-    dify, count = _upsert(
-        client,
-        "frontend-dify/internal",
-        _random_fields(
-            "secretKey",
-            "postgresPassword",
-            "redisPassword",
-            "sandboxApiKey",
-            "pluginDaemonKey",
-            "agentgatewayApiKey",
-            "difyAgentApiToken",
-            "difyAgentServerSecretKey",
-            "difyAgentSandboxAuthToken",
-        ),
-        {
-            **_bootstrap_password_fields("frontend-dify/internal", bootstrap_passwords),
-            "keycloakOidcClientSecret": _required_text(keycloak, "difyOidcClientSecret"),
-        },
-    )
-    _record_change(changed, "frontend-dify/internal", count)
-    added += count
-
     bridge_path = "auth-keycloak-api-key-bridge/internal"
     bridge_current = client.read_secret(bridge_path)
     bridge_values = dict(bridge_current.values) if bridge_current else {}
-    dify_verifier = hashlib.sha256(_required_text(dify, "agentgatewayApiKey").encode()).hexdigest()
-    primary_verifier = bridge_values.get("difyAgentgatewayPrimaryVerifierSha256")
-    secondary_verifier = bridge_values.get("difyAgentgatewaySecondaryVerifierSha256")
-    if primary_verifier not in (None, dify_verifier) and secondary_verifier != dify_verifier:
-        raise OpenBaoError("Dify AgentGateway key does not match either managed verifier slot")
     bridge_fixed = {"keycloakClientSecret": _required_text(keycloak, "bridgeOidcClientSecret")}
-    if primary_verifier is None:
-        bridge_fixed["difyAgentgatewayPrimaryVerifierSha256"] = dify_verifier
-    if secondary_verifier is None:
-        bridge_fixed["difyAgentgatewaySecondaryVerifierSha256"] = ""
+    dify: dict[str, JsonValue] = {}
+    if dify_enabled:
+        dify, count = _reconcile_dify(
+            client, keycloak, bridge_values, bridge_fixed, bootstrap_passwords
+        )
+        _record_change(changed, "frontend-dify/internal", count)
+        added += count
 
     bridge, count = _upsert(client, bridge_path, _random_fields("postgresqlPassword"), bridge_fixed)
     _record_change(changed, bridge_path, count)
@@ -303,7 +284,6 @@ def reconcile_internal_credentials(
             "infra-postgres-operations/internal",
             {
                 "documentdbPassword": _required_text(librechat, "documentdbPassword"),
-                "difyPassword": _required_text(dify, "postgresPassword"),
                 "agentgatewayPassword": _required_text(agentgateway, "postgresqlPassword"),
                 "apiKeyBridgePassword": _required_text(bridge, "postgresqlPassword"),
                 "studioPassword": _required_text(studio, "postgresqlPassword"),
@@ -312,6 +292,8 @@ def reconcile_internal_credentials(
             },
         ),
     )
+    if dify_enabled:
+        postgres_records[1][1]["difyPassword"] = _required_text(dify, "postgresPassword")
     for path, fixed in postgres_records:
         _, count = _upsert(client, path, _random_fields("adminPassword"), fixed)
         _record_change(changed, path, count)
@@ -358,6 +340,44 @@ def reconcile_internal_credentials(
         _record_change(changed, path, count)
         added += count
     return InternalResult(tuple(changed), added)
+
+
+def _reconcile_dify(
+    client: OpenBaoClient,
+    keycloak: dict[str, JsonValue],
+    bridge_values: dict[str, JsonValue],
+    bridge_fixed: dict[str, str],
+    bootstrap_passwords: dict[str, str],
+) -> tuple[dict[str, JsonValue], int]:
+    dify, count = _upsert(
+        client,
+        "frontend-dify/internal",
+        _random_fields(
+            "secretKey",
+            "postgresPassword",
+            "redisPassword",
+            "sandboxApiKey",
+            "pluginDaemonKey",
+            "agentgatewayApiKey",
+            "difyAgentApiToken",
+            "difyAgentServerSecretKey",
+            "difyAgentSandboxAuthToken",
+        ),
+        {
+            **_bootstrap_password_fields("frontend-dify/internal", bootstrap_passwords),
+            "keycloakOidcClientSecret": _required_text(keycloak, "difyOidcClientSecret"),
+        },
+    )
+    dify_verifier = hashlib.sha256(_required_text(dify, "agentgatewayApiKey").encode()).hexdigest()
+    primary_verifier = bridge_values.get("difyAgentgatewayPrimaryVerifierSha256")
+    secondary_verifier = bridge_values.get("difyAgentgatewaySecondaryVerifierSha256")
+    if primary_verifier not in (None, dify_verifier) and secondary_verifier != dify_verifier:
+        raise OpenBaoError("Dify AgentGateway key does not match either managed verifier slot")
+    if primary_verifier is None:
+        bridge_fixed["difyAgentgatewayPrimaryVerifierSha256"] = dify_verifier
+    if secondary_verifier is None:
+        bridge_fixed["difyAgentgatewaySecondaryVerifierSha256"] = ""
+    return dify, count
 
 
 def _docling_api_key(values: dict[str, JsonValue]) -> str:

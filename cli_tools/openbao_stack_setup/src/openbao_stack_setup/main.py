@@ -27,6 +27,8 @@ from openbao_stack_setup.catalog import (
     BOOTSTRAP_EXTERNAL_SECRETS,
     BOOTSTRAP_HELM_RELEASES,
     BOOTSTRAP_SECRET_STORES,
+    DIFY_EXTERNAL_SECRETS,
+    DIFY_SECRET_STORE,
     DOCLING_EXTERNAL_SECRETS,
     DOCLING_SECRET_STORES,
     FORGEJO_EXTERNAL_SECRETS,
@@ -167,6 +169,7 @@ def _preflight(context: str, client: str) -> None:
     forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
+    dify_enabled = cluster.dify_enabled()
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(
         "Preflight passed for "
@@ -177,6 +180,7 @@ def _preflight(context: str, client: str) -> None:
     print(f"Forgejo generated credential catalog selected={forgejo_enabled}")
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
+    print(f"Dify credential catalog selected={dify_enabled}")
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
     print("Verify K3s --secrets-encryption on the control-plane node before bootstrap.")
 
@@ -194,6 +198,7 @@ def _bootstrap(
     forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
+    dify_enabled = cluster.dify_enabled()
     _confirm(context, client, "Bootstrap OpenBao")
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
@@ -257,6 +262,7 @@ def _bootstrap(
                 forgejo_enabled,
                 wireguard_enabled,
                 docling_enabled,
+                dify_enabled,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -280,6 +286,7 @@ def _bootstrap(
                 forgejo_enabled,
                 wireguard_enabled,
                 docling_enabled,
+                dify_enabled,
             )
             return
         if kit.checkpoint == "complete":
@@ -297,6 +304,7 @@ def _bootstrap(
             forgejo_enabled,
             wireguard_enabled,
             docling_enabled,
+            dify_enabled,
         )
 
 
@@ -310,6 +318,7 @@ def _seed_and_finish(
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
+    dify_enabled: bool = False,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -318,7 +327,9 @@ def _seed_and_finish(
             providers, smtp, active_directory = _prompt_bootstrap_credentials(
                 cluster.smtp_required(), active_directory_required
             )
-            kit, bootstrap_passwords = _prepare_bootstrap_passwords(root, kit, recovery_file)
+            kit, bootstrap_passwords = _prepare_bootstrap_passwords(
+                root, kit, recovery_file, dify_enabled=dify_enabled
+            )
             report = seed_bootstrap(
                 root,
                 providers,
@@ -329,6 +340,7 @@ def _seed_and_finish(
                 forgejo_enabled=forgejo_enabled,
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
+                dify_enabled=dify_enabled,
             )
             kit = with_checkpoint(kit, "seeded")
             update(recovery_file, kit)
@@ -345,6 +357,7 @@ def _seed_and_finish(
                 forgejo_enabled=forgejo_enabled,
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
+                dify_enabled=dify_enabled,
             )
             print(
                 "Reconciled OpenBao catalog "
@@ -358,7 +371,12 @@ def _seed_and_finish(
     finally:
         root.revoke_self()
     _converge_runtime(
-        cluster, active_directory_required, forgejo_enabled, wireguard_enabled, docling_enabled
+        cluster,
+        active_directory_required,
+        forgejo_enabled,
+        wireguard_enabled,
+        docling_enabled,
+        dify_enabled,
     )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
@@ -378,6 +396,7 @@ def _reconcile(
     forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
+    dify_enabled = cluster.dify_enabled()
     _confirm(context, client, "Reconcile OpenBao", confirmation)
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -403,6 +422,7 @@ def _reconcile(
                 forgejo_enabled=forgejo_enabled,
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
+                dify_enabled=dify_enabled,
             )
             _verify_secret_operator(cluster, unauthenticated)
             _revoke_other_root_tokens(root)
@@ -415,17 +435,22 @@ def _reconcile(
         f"replicated_records={report.replicated_records}; temporary root token revoked."
     )
     _converge_runtime(
-        cluster, active_directory_required, forgejo_enabled, wireguard_enabled, docling_enabled
+        cluster,
+        active_directory_required,
+        forgejo_enabled,
+        wireguard_enabled,
+        docling_enabled,
+        dify_enabled,
     )
     print("OpenBao reconciliation completed.")
 
 
 def _prepare_bootstrap_passwords(
-    client: OpenBaoClient, kit: RecoveryKit, recovery_file: Path
+    client: OpenBaoClient, kit: RecoveryKit, recovery_file: Path, *, dify_enabled: bool = False
 ) -> tuple[RecoveryKit, dict[str, str]]:
     if kit.pending_bootstrap_passwords is None:
         client.ensure_kv_v2_mount()
-        planned = plan_bootstrap_passwords(client)
+        planned = plan_bootstrap_passwords(client, dify_enabled=dify_enabled)
         if not planned:
             return kit, {}
         kit = with_pending_bootstrap_passwords(kit, planned)
@@ -433,6 +458,8 @@ def _prepare_bootstrap_passwords(
     passwords = kit.pending_bootstrap_passwords
     if passwords is None:
         raise SetupError("Bootstrap password delivery state is invalid")
+    if "dify" in passwords and not dify_enabled:
+        raise SetupError("Dify selection changed during pending bootstrap password delivery")
     if not kit.bootstrap_passwords_acknowledged:
         _deliver_bootstrap_passwords(passwords)
         kit = with_bootstrap_passwords_acknowledged(kit)
@@ -519,6 +546,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
+    dify_enabled = cluster.dify_enabled()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
     checkpoint = _bound_kit(paths.seal_file, identity).checkpoint
     with _openbao(cluster) as api:
@@ -527,6 +555,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     print(f"Forgejo generated credential catalog selected={forgejo_enabled}")
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
+    print(f"Dify credential catalog selected={dify_enabled}")
 
 
 def _verify_recovery(
@@ -660,6 +689,7 @@ def _refresh_bootstrap_external_secrets(
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
+    dify_enabled: bool = False,
 ) -> None:
     targets = _BOOTSTRAP_EXTERNAL_SECRETS
     if active_directory_required:
@@ -670,6 +700,8 @@ def _refresh_bootstrap_external_secrets(
         targets += (WIREGUARD_EXTERNAL_SECRET,)
     if docling_enabled:
         targets += DOCLING_EXTERNAL_SECRETS
+    if dify_enabled:
+        targets += DIFY_EXTERNAL_SECRETS
     total = len(targets)
     for index, target in enumerate(targets, start=1):
         print(f"Refreshing ExternalSecret {target.namespace}/{target.name} ({index}/{total})...")
@@ -682,10 +714,13 @@ def _converge_runtime(
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
+    dify_enabled: bool = False,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
     _converge_bootstrap_secret_stores(cluster)
+    if dify_enabled:
+        cluster.ensure_secret_store_ready(DIFY_SECRET_STORE.name, DIFY_SECRET_STORE.namespace)
     if forgejo_enabled:
         cluster.ensure_secret_store_ready(FORGEJO_SECRET_STORE.name, FORGEJO_SECRET_STORE.namespace)
     if wireguard_enabled:
@@ -696,7 +731,12 @@ def _converge_runtime(
         for store in DOCLING_SECRET_STORES:
             cluster.ensure_secret_store_ready(store.name, store.namespace)
     _refresh_bootstrap_external_secrets(
-        cluster, active_directory_required, forgejo_enabled, wireguard_enabled, docling_enabled
+        cluster,
+        active_directory_required,
+        forgejo_enabled,
+        wireguard_enabled,
+        docling_enabled,
+        dify_enabled,
     )
     print(
         "Reconciling infrastructure releases blocked on generated Secrets; "
