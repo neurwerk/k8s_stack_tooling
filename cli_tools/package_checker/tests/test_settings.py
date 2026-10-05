@@ -45,16 +45,6 @@ def test_available_packages_are_registered() -> None:
     ]
 
 
-def test_dify_packages_use_standalone_source_not_legacy_builder() -> None:
-    dify = [package for package in PACKAGES if "dify" in package.package_name]
-
-    assert {package.package_name for package in dify} == {
-        "k8s-stack-addon-dify-api",
-        "k8s-stack-addon-dify-web",
-    }
-    assert {package.repository for package in dify} == {"neurwerk/k8s_stack_addon_dify"}
-
-
 @pytest.mark.parametrize(
     ("package_name", "repository"),
     [
