@@ -76,6 +76,18 @@ these commands on `PATH`:
 - `ldap-directory-worker` (used only by the workstation LDAP diagnostic CLI)
 - `maintenance-server`
 
+`upsert-realm-roles` normally replaces all realm-role children of each parent in
+`KC_REALM_ROLE_COMPOSITES` (a JSON object mapping parent names to desired child
+lists). For independent reconcilers, set `KC_REALM_ROLE_COMPOSITE_OWNERSHIP` to a
+non-empty JSON object mapping selected parent names to non-empty lists of owned
+realm-role names. Every desired child of a scoped parent must be owned. Only
+owned children are removed when absent from the desired list; other children
+are left alone. Parents not listed in the ownership object retain full-replacement
+behavior. Owned roles must already exist, including roles being removed, and
+readback must match their realm-role IDs. The caller must coordinate disjoint
+ownership lists across releases; the API cannot infer ownership from role names.
+Removing a release or omitting its scope does not revoke its existing grants.
+
 Build locally without publishing:
 
 ```bash
