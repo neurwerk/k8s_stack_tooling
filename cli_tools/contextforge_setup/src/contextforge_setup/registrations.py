@@ -36,9 +36,10 @@ def reconcile_registrations(
         operator.get("email") != config.owner_email
         or operator.get("is_active") is not True
         or operator.get("is_admin") is not True
+        or operator.get("email_verified") is not True
     ):
         raise SetupError(
-            "Use the configured active native registration administrator "
+            "Use the configured active, email-verified native registration administrator "
             "with unscoped catalog visibility"
         )
     team = object_value(api.request("GET", f"/teams/{config.team_id}"))

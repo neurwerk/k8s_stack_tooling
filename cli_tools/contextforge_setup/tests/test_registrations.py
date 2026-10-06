@@ -71,6 +71,7 @@ class Native(Client):
         self.calls = []
         self.lost_response = ""
         self.ignore_update = False
+        self.email_verified = True
 
     @override
     def require_registration_session(self):
@@ -102,7 +103,12 @@ class Native(Client):
 
     def _read(self, path, query):
         if path == "/auth/email/me":
-            return {"email": OWNER, "is_active": True, "is_admin": True}
+            return {
+                "email": OWNER,
+                "is_active": True,
+                "is_admin": True,
+                "email_verified": self.email_verified,
+            }
         if path == f"/teams/{TEAM}":
             return {"id": TEAM, "is_active": True, "is_personal": False}
         if path in {"/gateways", "/servers", "/tools"}:
@@ -330,6 +336,7 @@ def test_failed_membership_write_is_not_reported_as_success(tmp_path):
         "wrong-id",
         "gateway-path",
         "tool-path",
+        "unverified-operator",
     ],
 )
 def test_conflicts_preflight_before_any_mutations_and_hide_payloads(tmp_path, change):
@@ -338,6 +345,8 @@ def test_conflicts_preflight_before_any_mutations_and_hide_payloads(tmp_path, ch
     row = api.gateways[text(mappings[0]["gateway_id"])]
     if change == "owner":
         row["ownerEmail"] = "foreign@example.com"
+    elif change == "unverified-operator":
+        api.email_verified = False
     elif change == "marker":
         row["description"] = "not managed by this CLI"
     elif change == "credentials":

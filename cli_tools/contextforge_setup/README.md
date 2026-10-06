@@ -291,13 +291,13 @@ privately. Do not run competing reconcilers or concurrent native management.
 
 ### Native operator and Base consumer contract
 
-- Use an active existing native `is_admin=true` registration owner and an active
+- Use an active, email-verified native `is_admin=true` registration owner and an active
   existing non-personal team. This trusted operator is **not** an ordinary caller
   or Studio's limited account-provisioning service. Native session tokens are
   required (`token_use=session` from email login): use `--login` with the same
   hidden/environment credentials as accounts, or a native email-login session in
   `CONTEXTFORGE_ADMIN_TOKEN`; scoped API tokens are rejected. Native verification
-  and `/auth/email/me` establish the active DB administrator, not local JWT parsing.
+  and `/auth/email/me` establish the active, email-verified DB administrator, not local JWT parsing.
   After proxy activation use the explicit fixed operator mode below, not Studio's identity.
 - The APIs used require `teams.read`, `gateways.read/create`, `tools.read`,
   `servers.read/create`, and `servers.update` only for explicit membership updates;
@@ -369,7 +369,7 @@ privately. Do not run competing reconcilers or concurrent native management.
    The server must enforce active DB users, proxy trust and private operator access.
    The CLI checks `/rbac/my/roles` for the server-resolved operator email,
    `/rbac/my/permissions` for registration authority, and the RBAC-protected
-   `/auth/email/admin/users/<owner-email>` for active DB admin status. This endpoint
+   `/auth/email/admin/users/<owner-email>` for active, email-verified DB admin status. This endpoint
    works in native proxy mode; JWT-only `/auth/email/me` does not. Prepare at least
    one native role assignment for the operator. No Studio service identity fallback
    or shared CF signing key is supported. Native-session/token environment and
