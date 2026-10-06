@@ -28,6 +28,7 @@ def main() -> None:
     realm: str = os.environ["KC_REALM"]
     role_names_raw: str = os.environ["KC_REALM_ROLES"]
     role_composites_raw: str = os.environ.get("KC_REALM_ROLE_COMPOSITES", "{}")
+    owned_roles_raw: str | None = os.environ.get("KC_REALM_ROLE_COMPOSITE_OWNERSHIP")
     groups_raw: str = os.environ.get("KC_ACCESS_GROUPS", "{}")
 
     log("=== Realm roles init started ===")
@@ -41,6 +42,7 @@ def main() -> None:
     role_names = [r.strip() for r in role_names_raw.split(",") if r.strip()]
     try:
         role_composites = json.loads(role_composites_raw)
+        owned_roles = json.loads(owned_roles_raw) if owned_roles_raw is not None else None
         groups = json.loads(groups_raw)
     except json.JSONDecodeError as exc:
         log(f"ERROR: Keycloak authorization configuration is not valid JSON: {exc}")
@@ -53,6 +55,9 @@ def main() -> None:
     ):
         log("ERROR: KC_REALM_ROLE_COMPOSITES must be a JSON object of role-name arrays.")
         raise SystemExit(1)
+    if owned_roles_raw is not None and (not isinstance(owned_roles, dict) or not owned_roles):
+        log("ERROR: KC_REALM_ROLE_COMPOSITE_OWNERSHIP must be a non-empty JSON object.")
+        raise SystemExit(1)
     if not isinstance(groups, dict) or not all(
         isinstance(path, str) and isinstance(definition, dict)
         for path, definition in groups.items()
@@ -63,7 +68,7 @@ def main() -> None:
     wait_for_service(health_url, prefix="keycloak-realm-roles")
     token = get_admin_token(base_url, admin_user, admin_pass)
     upsert_realm_roles_api(base_url, token, realm, role_names)
-    upsert_realm_role_composites_api(base_url, token, realm, role_composites)
+    upsert_realm_role_composites_api(base_url, token, realm, role_composites, owned_roles)
     upsert_groups_api(base_url, token, realm, groups, set(role_names))
 
     log(f"=== Realm roles init complete: {', '.join(role_names)} ===")
