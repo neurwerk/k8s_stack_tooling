@@ -138,6 +138,9 @@ FORGEJO_EXTERNAL_SECRETS = (
     ),
     ExternalSecretTarget("forgejo-oidc-values", "auth-keycloak", "forgejo-oidc-values"),
 )
+FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET = ExternalSecretTarget(
+    "addon-postgres-values", "infra-postgres-operations", "addon-postgres-values"
+)
 
 BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
     ExternalSecretTarget(

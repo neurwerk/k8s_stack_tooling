@@ -701,6 +701,20 @@ class Cluster:
         value = resource.get("status", {}).get("refreshTime")
         return value if isinstance(value, str) else None
 
+    def external_secret_exists(self, name: str, namespace: str) -> bool:
+        """Check only resource presence, without reading its target Secret."""
+        try:
+            self.custom.get_namespaced_custom_object(
+                "external-secrets.io", "v1", namespace, "externalsecrets", name
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return False
+            raise ClusterError(
+                f"Could not inspect ExternalSecret {namespace}/{name}: HTTP {exc.status}"
+            ) from None
+        return True
+
     def force_external_secret_refresh(
         self,
         name: str,

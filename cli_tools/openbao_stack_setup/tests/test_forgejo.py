@@ -15,6 +15,7 @@ from fake import FakeSession
 
 from openbao_stack_setup.catalog import (
     BOOTSTRAP_SECRET_STORES,
+    FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET,
     FORGEJO_EXTERNAL_SECRETS,
     FORGEJO_SECRET_STORE,
     RECONCILIATION_STATE_PATH,
@@ -167,6 +168,9 @@ def test_runtime_convergence_is_selected_and_orders_credentials_before_postgres(
     enabled: bool,
 ) -> None:
     cluster = MagicMock()
+    cluster.external_secret_exists.return_value = False
+    if enabled:
+        cluster.external_secret_exists.side_effect = [False, True]
     _converge_runtime(cluster, False, enabled)
     stores = list(BOOTSTRAP_SECRET_STORES) + ([FORGEJO_SECRET_STORE] if enabled else [])
     assert cluster.ensure_secret_store_ready.call_args_list == [
@@ -191,6 +195,33 @@ def test_runtime_convergence_is_selected_and_orders_credentials_before_postgres(
             )
         else:
             assert refresh not in cluster.mock_calls
+
+
+def test_addon_postgres_external_secret_is_refreshed_before_postgres() -> None:
+    cluster = MagicMock()
+    cluster.external_secret_exists.return_value = True
+    _converge_runtime(cluster, False, True)
+    target = FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET
+    refresh = call.force_external_secret_refresh(
+        target.name, target.namespace, target.target_secret
+    )
+    assert cluster.mock_calls.index(refresh) < cluster.mock_calls.index(
+        call.force_reconcile("postgres-operations", "infra-postgres-operations")
+    )
+    legacy = FORGEJO_EXTERNAL_SECRETS[1]
+    assert (
+        call.force_external_secret_refresh(legacy.name, legacy.namespace, legacy.target_secret)
+        not in cluster.mock_calls
+    )
+
+
+def test_selected_forgejo_without_postgres_delivery_fails_before_refresh() -> None:
+    cluster = MagicMock()
+    cluster.external_secret_exists.return_value = False
+    with pytest.raises(ClusterError, match="Forgejo PostgreSQL ExternalSecret is missing"):
+        _converge_runtime(cluster, False, True)
+    cluster.force_external_secret_refresh.assert_not_called()
+    cluster.force_reconcile.assert_not_called()
 
 
 def test_selected_missing_runtime_resource_fails_visibly_and_can_retry() -> None:

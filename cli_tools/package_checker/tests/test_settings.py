@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
@@ -42,25 +39,10 @@ def test_available_packages_are_registered() -> None:
             "k8s-stack-opensearch-reporting-cli",
             "neurwerk/k8s_stack_opensearch_reporting_cli",
         ),
-        ("addon-dify-ce-builder-api", "neurwerk/addon_dify_ce_builder"),
+        ("k8s-stack-addon-dify-api", "neurwerk/k8s_stack_addon_dify"),
         ("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
-        ("addon-dify-ce-builder-web", "neurwerk/addon_dify_ce_builder"),
+        ("k8s-stack-addon-dify-web", "neurwerk/k8s_stack_addon_dify"),
     ]
-
-
-def test_package_inventory_matches_base_chart_references() -> None:
-    workspace = next(
-        parent for parent in Path(__file__).resolve().parents if (parent / "base/charts").is_dir()
-    )
-    pattern = re.compile(r"ghcr\.io/neurwerk/([a-z0-9-]+):")
-    referenced = {
-        match.group(1)
-        for values_file in (workspace / "base/charts").rglob("values.yaml")
-        for match in pattern.finditer(values_file.read_text(encoding="utf-8"))
-    }
-    configured = {package.package_name for package in PACKAGES}
-
-    assert configured == referenced
 
 
 @pytest.mark.parametrize(

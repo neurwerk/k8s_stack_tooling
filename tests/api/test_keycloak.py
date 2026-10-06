@@ -377,6 +377,57 @@ def test_upsert_realm_role_composites_replaces_stale_realm_composites() -> None:
     assert request.call_args_list[3].kwargs["body"] == [child]
 
 
+def test_upsert_realm_role_composites_scoped_ownership_preserves_foreign_grants() -> None:
+    """Independent reconcilers remove only their own stale grants."""
+    parent = {"id": "parent", "name": "platform-admin"}
+    owned = {"id": "owned", "name": "addon-admin"}
+    foreign = {"id": "foreign", "name": "other-admin"}
+    current = [
+        {**owned, "clientRole": False, "containerId": "realm"},
+        {**foreign, "clientRole": False, "containerId": "realm"},
+    ]
+    with patch("k8s_stack_tooling.api.keycloak.request") as request:
+        request.side_effect = [(200, [parent, owned, foreign]), (200, current), (204, {})]
+        upsert_realm_role_composites_api(
+            "http://keycloak",
+            "token",
+            "realm",
+            {"platform-admin": []},
+            {"platform-admin": ["addon-admin"]},
+        )
+    assert len(request.call_args_list) == 3
+    assert request.call_args_list[2].kwargs["body"] == [current[0]]
+
+    with patch("k8s_stack_tooling.api.keycloak.request") as request, pytest.raises(SystemExit):
+        upsert_realm_role_composites_api(
+            "http://keycloak",
+            "token",
+            "realm",
+            {"platform-admin": ["other-admin"]},
+            {"platform-admin": ["addon-admin"]},
+        )
+    request.assert_not_called()
+
+    with patch("k8s_stack_tooling.api.keycloak.request") as request, pytest.raises(SystemExit):
+        request.side_effect = [
+            (200, [parent, owned, foreign]),
+            (
+                200,
+                [
+                    {**owned, "clientRole": True, "containerId": "realm"},
+                ],
+            ),
+        ]
+        upsert_realm_role_composites_api(
+            "http://keycloak",
+            "token",
+            "realm",
+            {"platform-admin": []},
+            {"platform-admin": ["addon-admin"]},
+        )
+    assert len(request.call_args_list) == 2
+
+
 def test_upsert_groups_maps_realm_and_agentgateway_roles() -> None:
     """Access groups own both application roles and Gateway permissions."""
     studio_user = {"id": "studio-user-id", "name": "studio-user"}

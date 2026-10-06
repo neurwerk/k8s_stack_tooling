@@ -41,14 +41,19 @@ Build state is derived from these source repositories:
 | `k8s-stack-pii-engine` | `cpu` | `neurwerk/k8s_stack_pii_engine` |
 | `k8s-stack-pii-engine` | `cu124` | `neurwerk/k8s_stack_pii_engine` |
 | `k8s-stack-keycloak-api-key-bridge` | — | `neurwerk/k8s_stack_keycloak_api_key_bridge` |
-| `addon-dify-ce-builder-api` | — | `neurwerk/addon_dify_ce_builder` |
+| `k8s-stack-addon-dify-api` | — | `neurwerk/k8s_stack_addon_dify` |
 | `k8s-stack-tooling` | — | `neurwerk/k8s_stack_tooling` |
-| `addon-dify-ce-builder-web` | — | `neurwerk/addon_dify_ce_builder` |
+| `k8s-stack-addon-dify-web` | — | `neurwerk/k8s_stack_addon_dify` |
 
-The configured inventory is tested against every `ghcr.io/neurwerk/*` image in
-`base/charts/**/values.yaml`. Stack images must use `k8s-stack-*`, addon images
-must use `addon-*`, and source repositories must use the `k8s_stack_*` convention
-or the established `addon_dify_ce_builder` addon repository name.
+The inventory tracks source packages, not the images pinned by Base charts or
+historical signed releases. Dify API and Web are separate packages owned by the
+standalone add-on; old builder images cannot verify them. Both `1.17.1-kc-v1`
+images are publicly readable and independently digest-verified. Failed package
+lookups remain errors and the command exits nonzero. A tag and digest reported by
+this checker indicate package availability, not independent provenance verification
+or approval to install it.
+
+Packages use `k8s-stack-*` and source repositories use `neurwerk/k8s_stack_*`.
 
 ## Quality gates
 

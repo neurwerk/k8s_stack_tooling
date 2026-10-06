@@ -862,8 +862,25 @@ def upsert_realm_role_composites_api(
     token: str,
     realm: str,
     role_composites: dict[str, list[str]],
+    owned_roles: dict[str, list[str]] | None = None,
 ) -> None:
-    """Reconcile realm-role composites declared by the stack."""
+    """Reconcile composites; optionally replace only explicitly owned realm children."""
+    if owned_roles is not None:
+        if not isinstance(owned_roles, dict) or any(
+            not isinstance(parent, str)
+            or parent not in role_composites
+            or not isinstance(names, list)
+            or not names
+            or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != len(names)
+            or not set(role_composites[parent]).issubset(names)
+            for parent, names in owned_roles.items()
+        ):
+            log(
+                "ERROR: Composite ownership must list unique roles for declared parents "
+                "and include every desired child."
+            )
+            raise SystemExit(1)
     token_header = {"Authorization": f"Bearer {token}"}
     roles_url = f"{admin_url}/admin/realms/{realm}/roles"
     status, data = request(roles_url, method="GET", headers=token_header)
@@ -872,6 +889,13 @@ def upsert_realm_role_composites_api(
         raise SystemExit(1)
 
     role_map = {role["name"]: role for role in data if "name" in role and "id" in role}
+    if owned_roles is not None:
+        missing_owned = {
+            name for names in owned_roles.values() for name in names if name not in role_map
+        }
+        if missing_owned:
+            log("ERROR: Composite ownership references a missing realm role.")
+            raise SystemExit(1)
     for parent_name, child_names in role_composites.items():
         parent = role_map.get(parent_name)
         if parent is None:
@@ -898,7 +922,22 @@ def upsert_realm_role_composites_api(
             for role in current
             if role.get("clientRole") is False and role.get("containerId") == realm
         ]
-        stale = [role for role in current_realm_roles if role.get("name") not in desired_names]
+        parent_owned = owned_roles.get(parent_name) if owned_roles is not None else None
+        if parent_owned is not None and any(
+            role.get("clientRole") is not False
+            or role.get("containerId") != realm
+            or role.get("id") != role_map[role["name"]]["id"]
+            for role in current
+            if role.get("name") in parent_owned
+        ):
+            log("ERROR: Owned composite readback does not match the declared realm role.")
+            raise SystemExit(1)
+        stale = [
+            role
+            for role in current_realm_roles
+            if role.get("name") not in desired_names
+            and (parent_owned is None or role.get("name") in parent_owned)
+        ]
         if stale:
             status, response = request(
                 composites_url,

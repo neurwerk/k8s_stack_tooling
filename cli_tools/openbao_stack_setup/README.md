@@ -367,18 +367,21 @@ to the namespace-local runtime Secret. Human break-glass access requires a separ
 secure recovery procedure under the existing recovery-custody controls; these commands do not
 print or export the password, and do not log Secret contents.
 
-Base must provide the following optional resources before runtime convergence can complete:
+The selected Base release or Knowledge Center add-on must provide these optional
+resources before runtime convergence can complete:
 
 | Namespace | SecretStore | ExternalSecret / target Secret |
 | --- | --- | --- |
 | `forgejo` | `forgejo-openbao-secret-store` | `forgejo-runtime` / `forgejo-runtime` |
-| `infra-postgres-operations` | Existing `infra-postgres-operations-openbao-secret-store` | `forgejo-postgres-values` / `forgejo-postgres-values` |
+| `infra-postgres-operations` | Existing `infra-postgres-operations-openbao-secret-store` | Base: `forgejo-postgres-values` / `forgejo-postgres-values`; add-on: `addon-postgres-values` / `addon-postgres-values` |
 | `auth-keycloak` | Existing `auth-keycloak-openbao-secret-store` | `forgejo-oidc-values` / `forgejo-oidc-values` |
 
 `forgejo-runtime` delivers all seven source fields with unchanged key names. The database
 and OIDC ExternalSecrets consume only their namespace-owned copies. The database Secret
-renders `values.yaml`; the OIDC Secret delivers `oidcClientSecret` directly. Do not create
-shorter replacement names for the stores.
+renders `values.yaml`; the OIDC Secret delivers `oidcClientSecret` directly. Package
+`0.2.25` refreshes the add-on PostgreSQL ExternalSecret when present, falling back to
+the legacy Base name. It fails if neither exists and never reads target Secret data.
+Do not create shorter replacement names for the stores.
 
 For staged onboarding, first make the non-secret selector and optional secret-sync resources
 available. They may be unready until reconciliation generates credentials and authorizes the
