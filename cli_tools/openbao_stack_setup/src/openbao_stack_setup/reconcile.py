@@ -7,6 +7,7 @@ from importlib.metadata import version as distribution_version
 
 from openbao_stack_setup.catalog import (
     ACTIVE_DIRECTORY_FIELDS,
+    CONTEXTFORGE_PROVIDER_APPS_PATH,
     DOCLING_NAMESPACES,
     RECONCILIATION_STATE_PATH,
     ROLE_NAMESPACES,
@@ -90,6 +91,7 @@ def reconcile_openbao(
         "secret-operator",
         secret_operator_policy(
             tuple(path for provider in MANAGED_CREDENTIALS.values() for path in provider.paths)
+            + ((CONTEXTFORGE_PROVIDER_APPS_PATH,) if contextforge_admin_email is not None else ())
         ),
     )
     client._write(

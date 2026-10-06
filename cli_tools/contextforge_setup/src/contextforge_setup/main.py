@@ -14,7 +14,11 @@ from typing import Never, override
 from contextforge_setup.accounts import reconcile_accounts
 from contextforge_setup.client import Client
 from contextforge_setup.config import Config, SetupError, email, load_config
-from contextforge_setup.registration_config import RegistrationConfig, load_registration_config
+from contextforge_setup.registration_config import (
+    RegistrationConfig,
+    load_registration_config,
+    require_supported_registration_apply,
+)
 from contextforge_setup.registrations import reconcile_registrations
 
 
@@ -30,10 +34,15 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main() -> int:
-    """Reconcile approved native accounts or scoped registrations, never credentials."""
+    """Reconcile approved accounts, app registrations and explicitly approved tools."""
     parser = _Parser(description="Reconcile approved native ContextForge resources")
     parser.add_argument("operation", choices=["reconcile-accounts", "reconcile-registrations"])
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--catalog",
+        type=Path,
+        help="Generated registrations.json from Base; config then contains only origin/team/owner",
+    )
     parser.add_argument("--ca-cert", type=Path)
     parser.add_argument("--allow-loopback-http", action="store_true")
     parser.add_argument(
@@ -51,6 +60,11 @@ def main() -> int:
         action="store_true",
         help="Explicitly replace only owned server tool membership; registrations only",
     )
+    parser.add_argument(
+        "--refresh-oauth",
+        action="store_true",
+        help="Refresh after native operator consent; requires --update-owned-tools",
+    )
     args = parser.parse_args()
     api: Client | None = None
     try:
@@ -66,11 +80,20 @@ def main() -> int:
                 "Use --apply for reconciliation."
             )
             return 0
+        if isinstance(config, RegistrationConfig):
+            require_supported_registration_apply(config)
         api = Client(config.origin, args.ca_cert)
-        _authenticate(api, login=args.login)
+        _authenticate_operator(api, config, login=args.login)
         if isinstance(config, RegistrationConfig):
             mappings = reconcile_registrations(
-                api, config, update_owned_tools=args.update_owned_tools
+                api,
+                config,
+                update_owned_tools=args.update_owned_tools,
+                refresh_oauth=args.refresh_oauth,
+                resolve_secret=lambda spec: _secret(
+                    dict(config.oauth_secret_env).get(spec.id, ""),
+                    f"Approved {spec.id} operator app secret (contextforge-oauth-apps:{spec.id}): ",
+                ),
             )
             print(json.dumps({"registrations": mappings}, sort_keys=True))
         else:
@@ -87,6 +110,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    except Exception:  # noqa: BLE001 - Never expose unexpected credential-bearing API errors.
+        print(
+            "Operation failed; details hidden. Keep routes blocked and inspect privately",
+            file=sys.stderr,
+        )
+        return 1
     finally:
         if api is not None:
             api.close()
@@ -95,10 +124,37 @@ def main() -> int:
 
 def _configuration(args: argparse.Namespace) -> Config | RegistrationConfig:
     if args.operation == "reconcile-registrations":
-        return load_registration_config(args.config, allow_loopback_http=args.allow_loopback_http)
-    if args.update_owned_tools:
-        raise SetupError("--update-owned-tools is only supported by reconcile-registrations")
+        if args.refresh_oauth and not args.update_owned_tools:
+            raise SetupError("--refresh-oauth requires explicit --update-owned-tools")
+        return load_registration_config(
+            args.config, allow_loopback_http=args.allow_loopback_http, catalog=args.catalog
+        )
+    if args.update_owned_tools or args.catalog or args.refresh_oauth:
+        raise SetupError(
+            "--catalog/--update-owned-tools/--refresh-oauth require reconcile-registrations"
+        )
     return load_config(args.config, allow_loopback_http=args.allow_loopback_http)
+
+
+def _authenticate_operator(
+    api: Client, config: Config | RegistrationConfig, *, login: bool
+) -> None:
+    if (
+        not isinstance(config, RegistrationConfig)
+        or config.operator_authentication == "native-session"
+    ):
+        _authenticate(api, login=login)
+        return
+    if login or any(
+        os.environ.get(name)
+        for name in (
+            "CONTEXTFORGE_ADMIN_TOKEN",
+            "CONTEXTFORGE_ADMIN_EMAIL",
+            "CONTEXTFORGE_ADMIN_PASSWORD",
+        )
+    ):
+        raise SetupError("Choose fixed trusted-proxy operator identity or native login, not both")
+    api.authenticate_operator_proxy(config.owner_email)
 
 
 def _authenticate(api: Client, *, login: bool) -> None:

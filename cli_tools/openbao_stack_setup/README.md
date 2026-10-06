@@ -37,8 +37,9 @@ database. After root revocation, the existing catalog convergence waits for
 `contextforge-openbao-secret-store` and refreshes those two ExternalSecrets;
 it does not start or wait for the ContextForge application.
 
-The ESO `contextforge` policy reads only `contextforge/internal`, never native
-OAuth records. The separate `contextforge-oauth` policy permits read/create/update/
+The ESO `contextforge` policy reads only `contextforge/internal` and the fixed
+operator app record `contextforge/provider-apps`, never native personal OAuth
+records. The separate `contextforge-oauth` policy permits read/create/update/
 delete under `secret/data/contextforge/oauth/*` and hard deletion under the matching
 metadata prefix, matching upstream v1.0.11 source
 [`077071b`](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/services/token_backends/vault_backend.py).
@@ -49,6 +50,52 @@ Runtime config must use `OAUTH_TOKEN_BACKEND=vault`, HTTPS `VAULT_ADDR`,
 The native paths use team-or-shared, the first 16 hex characters of SHA-256 of the
 MCP URL, and URL-encoded email; the shared path segment is not permission to fall
 back to another user's connection. Do not enable the token-exchange grant.
+
+#### Operator OAuth app secrets (0.2.26 source)
+
+After the operator's authorized two-custodian reconciliation installs the selected
+catalog policies, routine app credentials use the existing short-lived
+`secret-operator` login, not recovery/root access:
+
+```bash
+uv run --frozen stack-setup secret set-contextforge-oauth <integration-id> \
+  --context <context> --client <client>
+```
+
+The command verifies client/context identity and ContextForge selection, then reads
+the fixed `infra-agentgateway/infra-agentgateway-mcp-catalog:registrations.json`.
+Only approved `individual-authentication` IDs with
+`client_secret_ref: {name: contextforge-oauth-apps, key: <integration-id>}` may be
+updated. IDs are integration IDs, not a provider-name allowlist. Input is a hidden
+operator app **client secret**, never a PAT, personal connection or raw file/argument.
+There is no arbitrary record path. CAS preserves all sibling fields in
+`contextforge/provider-apps`; the first write may create that exact record.
+Base must supply the `contextforge/contextforge-oauth-apps` ExternalSecret and
+same-named Secret, using reviewed exact ID-field selections from the single record.
+After writing, the command requests ESO refresh and waits for Secret readiness;
+refresh failure does not roll back an already successful OpenBao write.
+Future approved providers need only client configuration and this command.
+
+The compiled ESO policy can read this exact record; the compiled operator policy
+can create/read/update it only when ContextForge is selected. The native token
+policy cannot read it and retains only `contextforge/oauth/*`. No wildcard provider
+namespace, personal-token read/export, new broker, root shortcut or native patch is
+introduced. Kubernetes/operator access must keep the app Secret private.
+The CLI does not deliver credentials to ContextForge itself: the separately pinned
+`contextforge-setup` 0.1.1 resolves the approved Secret field through explicit private
+environment custody or hidden input and sends supported native app registration.
+See [native app preparation and consent](../contextforge_setup/README.md#operator-app-preparation-and-native-consent).
+An OpenBao/ESO update alone does not rotate an existing native PostgreSQL app copy.
+
+The authorized temporary per-email database token backend is separate from this app
+record. Native owns personal PKCE/token refresh; the app-secret command does not
+require a runtime Vault token or change its backend. The existing full catalog
+reconciliation still prepares/verifies the selected foundation's Vault token; no
+database-mode skip or new token-lifetime gate is added here. Actual encryption/restart
+checks and the later Vault token-scope fix remain supervisor-owned rollout steps.
+Both CLIs are independent workstation packages, not commands inside root Tooling
+image 0.7.4. Pin a reviewed source commit/install their verified standalone artifacts;
+no root image bump or publication is performed by this source patch.
 
 Selected bootstrap and reconciliation now issue a missing `vaultToken` only in
 `contextforge/internal`; ESO must deliver it as `contextforge-runtime:VAULT_TOKEN`.

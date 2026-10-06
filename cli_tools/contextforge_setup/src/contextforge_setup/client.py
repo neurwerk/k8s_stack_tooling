@@ -7,6 +7,7 @@ import binascii
 import json
 from pathlib import Path
 from typing import cast
+from urllib.parse import quote
 
 import requests
 
@@ -26,6 +27,7 @@ class Client:
     def close(self) -> None:
         """Drop in-memory admin credentials and close connections."""
         self.session.headers.pop("Authorization", None)
+        self.session.headers.pop("x-contextforge-account-email", None)
         self.session.close()
 
     def authenticate(self, token: str) -> None:
@@ -65,6 +67,43 @@ class Client:
             raise SetupError(
                 "Registrations require a native email-login session, not a scoped API token"
             )
+
+    def authenticate_operator_proxy(self, owner_email: str) -> None:
+        """Use only the approved fixed identity on an operator-controlled private connection."""
+        self.session.headers.pop("Authorization", None)
+        self.session.headers["x-contextforge-account-email"] = owner_email
+
+    def registration_operator(self, owner_email: str, authentication: str) -> Object:
+        """Verify DB admin status and, for proxy mode, the server-resolved current principal."""
+        if authentication == "native-session":
+            self.require_registration_session()
+            return object_value(self.request("GET", "/auth/email/me"))
+        roles = self.request("GET", "/rbac/my/roles")
+        if (
+            not isinstance(roles, list)
+            or not roles
+            or any(object_value(role).get("user_email") != owner_email for role in roles)
+        ):
+            raise SetupError("Trusted proxy resolved a different or unprepared operator principal")
+        permissions = self.request("GET", "/rbac/my/permissions")
+        required = {
+            "admin.user_management",
+            "teams.read",
+            "gateways.read",
+            "gateways.create",
+            "gateways.update",
+            "tools.read",
+            "servers.read",
+            "servers.create",
+            "servers.update",
+        }
+        if not isinstance(permissions, list) or (
+            "*" not in permissions and not required <= set(permissions)
+        ):
+            raise SetupError("Use the registration operator, not Studio's limited service")
+        return object_value(
+            self.request("GET", f"/auth/email/admin/users/{quote(owner_email, safe='')}")
+        )
 
     def request(
         self,

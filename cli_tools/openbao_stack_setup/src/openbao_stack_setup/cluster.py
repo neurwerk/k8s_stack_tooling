@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
+import re
 import time
 from dataclasses import dataclass
 from typing import cast
@@ -55,6 +57,40 @@ def _monitoring_email_enabled(values: object) -> bool:
     if not isinstance(enabled, bool):
         raise ClusterError("Monitoring email alerting enabled value must be a boolean")
     return enabled
+
+
+def _contextforge_oauth_ids(rows: object) -> set[str]:
+    """Validate the fixed app Secret boundary without provider-name branches."""
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 200:
+        raise ClusterError("Approved MCP registrations catalog is invalid")
+    ids: set[str] = set()
+    approved: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ClusterError("Approved MCP registrations catalog is invalid")
+        platform_id = row.get("id")
+        if (
+            not isinstance(platform_id, str)
+            or len(platform_id) > 50
+            or not re.fullmatch(
+                r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*", platform_id
+            )
+            or platform_id in ids
+        ):
+            raise ClusterError("Approved MCP catalog has invalid or duplicate integration IDs")
+        ids.add(platform_id)
+        if row.get("authentication_model") != "individual-authentication":
+            continue
+        oauth = row.get("oauth")
+        if not isinstance(oauth, dict) or oauth.get("client_secret_ref") != {
+            "name": "contextforge-oauth-apps",
+            "key": platform_id,
+        }:
+            raise ClusterError(
+                "Approved OAuth app requires the fixed Secret and integration-ID key"
+            )
+        approved.add(platform_id)
+    return approved
 
 
 class Cluster:
@@ -222,6 +258,25 @@ class Cluster:
         ):
             raise ClusterError("Selected ContextForge requires an explicit platformAdminEmail")
         return email
+
+    def contextforge_oauth_integration(self, integration_id: str) -> str:
+        """Select only an approved individual app from the fixed generated catalog."""
+        if self.contextforge_admin_email() is None:
+            raise ClusterError("ContextForge is not selected for this client")
+        try:
+            config_map = self.core.read_namespaced_config_map(
+                "infra-agentgateway-mcp-catalog", "infra-agentgateway"
+            )
+        except ApiException as exc:
+            raise ClusterError(f"Approved MCP catalog is unavailable: HTTP {exc.status}") from None
+        try:
+            rows = json.loads((config_map.data or {}).get("registrations.json", ""))
+        except (TypeError, ValueError):
+            raise ClusterError("Approved MCP registrations catalog is invalid") from None
+        approved = _contextforge_oauth_ids(rows)
+        if integration_id not in approved:
+            raise ClusterError("Integration is not approved for individual OAuth app credentials")
+        return integration_id
 
     def require_contextforge_stopped(self) -> None:
         """Refuse token rotation unless reconciliation and every workload are stopped."""

@@ -15,7 +15,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TextIO
+from typing import Never, TextIO, override
 
 import questionary
 import requests
@@ -28,6 +28,7 @@ from openbao_stack_setup.catalog import (
     BOOTSTRAP_HELM_RELEASES,
     BOOTSTRAP_SECRET_STORES,
     CONTEXTFORGE_EXTERNAL_SECRETS,
+    CONTEXTFORGE_PROVIDER_APPS_PATH,
     CONTEXTFORGE_SECRET_STORE,
     DIFY_EXTERNAL_SECRETS,
     DIFY_SECRET_STORE,
@@ -97,8 +98,17 @@ class SetupError(RuntimeError):
     """Raised for a redacted setup failure."""
 
 
+class _Parser(argparse.ArgumentParser):
+    @override
+    def error(self, message: str) -> Never:
+        # Unknown argv can contain accidentally supplied credentials.
+        self.exit(
+            2, "Invalid arguments; use stack-setup --help. Credentials are never arguments.\n"
+        )
+
+
 def _arguments() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="stack-setup")
+    parser = _Parser(prog="stack-setup")
     commands = parser.add_subparsers(dest="command", required=True)
     _guarded(commands.add_parser("preflight"))
     bootstrap = _guarded(commands.add_parser("bootstrap"))
@@ -119,6 +129,8 @@ def _arguments() -> argparse.ArgumentParser:
     secret_commands = secret.add_subparsers(dest="secret_command", required=True)
     set_command = _guarded(secret_commands.add_parser("set"))
     set_command.add_argument("provider", choices=sorted(MANAGED_CREDENTIALS))
+    oauth = _guarded(secret_commands.add_parser("set-contextforge-oauth"))
+    oauth.add_argument("integration_id")
     return parser
 
 
@@ -149,6 +161,8 @@ def main() -> None:
             _status(args.context, args.client, args.custody_root)
         elif args.command == "recovery":
             _verify_recovery(args.context, args.client, args.custody_root, args.custodian_package)
+        elif getattr(args, "secret_command", None) == "set-contextforge-oauth":
+            _set_contextforge_oauth(args.context, args.client, args.integration_id)
         else:
             _set_provider(args.context, args.client, args.provider)
     except (ClusterError, CustodyError, OpenBaoError, RecoveryKitError, SetupError) as exc:
@@ -665,6 +679,39 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
             operator.revoke_self()
     _refresh_provider(cluster, provider)
     print(f"Updated OpenBao paths {', '.join(provider.paths)}; refresh requested.")
+
+
+def _set_contextforge_oauth(context: str, client: str, integration_id: str) -> None:
+    """CAS-update one approved app field using routine scoped operator authority."""
+    cluster = Cluster(context)
+    cluster.identity(client)
+    field = cluster.contextforge_oauth_integration(integration_id)
+    if not cluster.external_secret_exists("contextforge-oauth-apps", "contextforge"):
+        raise SetupError("Approved ContextForge OAuth app ExternalSecret is missing")
+    _confirm(context, client, f"Update approved OAuth app {field}")
+    value = _ask_password("Operator app client secret:")
+    if not value.strip() or len(value) > 16384 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise SetupError("Invalid operator app secret; value is hidden")
+    provider = Provider("contextforge-oauth", (CONTEXTFORGE_PROVIDER_APPS_PATH,), (field,))
+    values = {field: value}
+    value = ""
+    try:
+        with _openbao(cluster) as unauthenticated:
+            jwt = cluster.token_request("secret-operator")
+            token = unauthenticated.kubernetes_login("secret-operator", jwt)
+            operator = OpenBaoClient(
+                _ADDRESS, token, unauthenticated.ca_cert, unauthenticated.session
+            )
+            try:
+                update_provider(operator, provider, values)
+            finally:
+                operator.revoke_self()
+    finally:
+        values.clear()
+    cluster.force_external_secret_refresh(
+        "contextforge-oauth-apps", "contextforge", "contextforge-oauth-apps"
+    )
+    print("Updated approved ContextForge operator app field; Secret refresh requested.")
 
 
 def _prompt_all_providers() -> dict[str, dict[str, str]]:
