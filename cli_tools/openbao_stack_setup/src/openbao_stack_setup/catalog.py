@@ -109,6 +109,13 @@ CERT_MANAGER_ISSUERS_EXTERNAL_SECRET = ExternalSecretTarget(
     "cert-manager-issuers-values", "infra-cert-manager", "cert-manager-issuers-values"
 )
 FORGEJO_SECRET_STORE = SecretStoreTarget("forgejo-openbao-secret-store", "forgejo")
+CONTEXTFORGE_SECRET_STORE = SecretStoreTarget("contextforge-openbao-secret-store", "contextforge")
+CONTEXTFORGE_EXTERNAL_SECRETS = (
+    ExternalSecretTarget("contextforge-runtime", "contextforge", "contextforge-runtime"),
+    ExternalSecretTarget(
+        "contextforge-postgres-values", "infra-postgres-operations", "contextforge-postgres-values"
+    ),
+)
 DOCLING_NAMESPACES = ("docling", "monitor-agentgateway-extproc")
 DOCLING_SECRET_STORES = tuple(
     SecretStoreTarget(f"{namespace}-openbao-secret-store", namespace)
@@ -306,6 +313,16 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
+    if namespace == "contextforge":
+        # Native OAuth records must never be readable through the ESO role.
+        return """path "secret/data/contextforge/internal" {
+  capabilities = ["read"]
+}
+
+path "secret/metadata/contextforge/internal" {
+  capabilities = ["read"]
+}
+"""
     if namespace not in (
         *ROLE_NAMESPACES,
         "frontend-dify",
@@ -352,3 +369,15 @@ path "secret/metadata/{path}" {{
 }}"""
         )
     return "\n\n".join(blocks) + "\n"
+
+
+def contextforge_oauth_policy() -> str:
+    """Limit the native v1.0.11 backend to OAuth KV v2 data and hard deletion."""
+    return """path "secret/data/contextforge/oauth/*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+
+path "secret/metadata/contextforge/oauth/*" {
+  capabilities = ["delete"]
+}
+"""

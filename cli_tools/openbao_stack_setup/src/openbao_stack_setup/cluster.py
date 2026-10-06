@@ -200,6 +200,29 @@ class Cluster:
             raise ClusterError("Selected WireGuard requires serverKeySecret=wireguard-server-key")
         return enabled
 
+    def contextforge_admin_email(self) -> str | None:
+        """Read the optional catalog selector and explicit recovery account email."""
+        values = self._product_values(
+            "contextforge-product-values", "contextforge", "ContextForge", optional=True
+        )
+        if not isinstance(values, dict) or not isinstance(values.get("contextforge", {}), dict):
+            raise ClusterError("ContextForge product values contain an invalid contract")
+        product = values.get("contextforge", {})
+        enabled = product.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("ContextForge enabled value must be a boolean")
+        if not enabled:
+            return None
+        email = product.get("platformAdminEmail")
+        if (
+            not isinstance(email, str)
+            or email.count("@") != 1
+            or any(character.isspace() or ord(character) < 32 for character in email)
+            or not all(email.split("@"))
+        ):
+            raise ClusterError("Selected ContextForge requires an explicit platformAdminEmail")
+        return email
+
     def docling_enabled(self) -> bool:
         """Return whether either Docling inference mode is selected."""
         return self.docling_inference_mode() is not None

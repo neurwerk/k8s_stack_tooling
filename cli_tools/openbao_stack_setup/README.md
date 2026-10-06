@@ -7,6 +7,62 @@ files.
 
 ## Setup
 
+### Staged ContextForge Catalog (Source Only)
+
+The optional selector is `contextforge.enabled: true` with an explicit
+`contextforge.platformAdminEmail` in `contextforge/contextforge-product-values`,
+key `values.yaml`. Missing or disabled selection does nothing; malformed selection
+fails before confirmation or OpenBao access. Stage the namespace and secret-sync
+resources before an authorized bootstrap or two-custodian reconciliation. This
+source change does not publish a package or enable ContextForge for any client.
+
+Reconciliation generates only missing fields in `contextforge/internal` and
+preserves existing values, with conflicting email or PostgreSQL copies rejected:
+
+| Source field | `contextforge-runtime` environment key |
+| --- | --- |
+| `postgresqlPassword` | `DATABASE_URL` (ESO constructs the URL below) |
+| `jwtSecretKey` | `JWT_SECRET_KEY` |
+| `authEncryptionSecret` | `AUTH_ENCRYPTION_SECRET` |
+| `platformAdminEmail` | `PLATFORM_ADMIN_EMAIL` |
+| `platformAdminPassword` | `PLATFORM_ADMIN_PASSWORD` |
+| `defaultUserPassword` | `DEFAULT_USER_PASSWORD` |
+
+The independent secrets use 32 random bytes encoded as unpadded base64url.
+The database URL is `postgresql+psycopg://contextforge:<password>@postgres-operations.infra-postgres-operations.svc.cluster.local:5432/contextforge`;
+only the Secret may contain the expanded value. The exact password copy is
+`infra-postgres-operations/internal:contextforgePassword`. Base must deliver it
+through `contextforge-postgres-values` and provision the `contextforge` role and
+database. After root revocation, the existing catalog convergence waits for
+`contextforge-openbao-secret-store` and refreshes those two ExternalSecrets;
+it does not start or wait for the ContextForge application.
+
+The ESO `contextforge` policy reads only `contextforge/internal`, never native
+OAuth records. The separate `contextforge-oauth` policy permits read/create/update/
+delete under `secret/data/contextforge/oauth/*` and hard deletion under the matching
+metadata prefix, matching upstream v1.0.11 source
+[`077071b`](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/services/token_backends/vault_backend.py).
+Runtime config must use `OAUTH_TOKEN_BACKEND=vault`, HTTPS `VAULT_ADDR`,
+`VAULT_KV_MOUNT=secret`, `VAULT_KV_PATH_PREFIX=contextforge/oauth`,
+`VAULT_TLS_VERIFY=true`, `VAULT_TOKEN_CACHE_ENABLED=false`, and
+`VAULT_TOKEN_CACHE_MAX_SIZE=0`, with the OpenBao CA trusted by the application.
+The native paths use team-or-shared, the first 16 hex characters of SHA-256 of the
+MCP URL, and URL-encoded email; the shared path segment is not permission to fall
+back to another user's connection. Do not enable the token-exchange grant.
+
+**Activation blocker:** this catalog intentionally does not issue `VAULT_TOKEN`.
+The current catalog supports durable generated credentials, not expiring token
+creation, validation, and rotation. Do not supply a root, ESO, indefinitely lived,
+or default-policy token as a shortcut. The smallest follow-up is a catalog-only
+two-custodian operation that issues a finite-TTL orphan token with only the native
+policy, preserves it on ordinary reconciliation, and supports explicit rotation
+with ContextForge stopped, revocation of the old accessor, Secret refresh, and
+restart/health checks before expiry. TTL and rotation timing must be agreed and
+implemented before activation; disabling selection is not revocation.
+Native OAuth application client secrets still remain in PostgreSQL; this is not
+an OpenBao-only provider-secret implementation. Account/team/registration APIs,
+user connection onboarding, Studio and gateway identity are separate changes.
+
 ### Dify Agent Credentials
 
 The Dify catalog is selected by `dify.enabled: true` in the

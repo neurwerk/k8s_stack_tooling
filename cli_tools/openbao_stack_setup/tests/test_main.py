@@ -556,6 +556,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         True,
         True,
         cluster.dify_enabled.return_value,
+        cluster.contextforge_admin_email.return_value,
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -595,6 +596,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         False,
         True,
         cluster.dify_enabled.return_value,
+        cluster.contextforge_admin_email.return_value,
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -647,6 +649,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         False,
         False,
         cluster.dify_enabled.return_value,
+        cluster.contextforge_admin_email.return_value,
     )
 
 
@@ -1035,6 +1038,7 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
         wireguard_enabled=False,
         docling_enabled=False,
         dify_enabled=False,
+        contextforge_admin_email=None,
     )
     prompt.assert_not_called()
     seed.assert_not_called()
@@ -1168,10 +1172,17 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         wireguard_enabled=True,
         docling_enabled=True,
         dify_enabled=cluster.dify_enabled.return_value,
+        contextforge_admin_email=cluster.contextforge_admin_email.return_value,
     )
     assert events == ["revoke", "converge"]
     converge.assert_called_once_with(
-        cluster, False, forgejo_enabled, True, True, cluster.dify_enabled.return_value
+        cluster,
+        False,
+        forgejo_enabled,
+        True,
+        True,
+        cluster.dify_enabled.return_value,
+        cluster.contextforge_admin_email.return_value,
     )
 
 

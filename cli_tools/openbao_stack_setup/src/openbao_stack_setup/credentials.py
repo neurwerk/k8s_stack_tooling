@@ -108,6 +108,7 @@ def reconcile_internal_credentials(
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     dify_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
 ) -> InternalResult:
     """Add every missing internal field while preserving all existing values."""
     _validate_bootstrap_passwords(bootstrap_passwords)
@@ -339,7 +340,38 @@ def reconcile_internal_credentials(
         _, count = _upsert(client, path, {}, {"doclingApiKey": api_key})
         _record_change(changed, path, count)
         added += count
+    contextforge_result = _reconcile_contextforge(client, contextforge_admin_email)
+    changed = list(dict.fromkeys((*changed, *contextforge_result.changed_paths)))
+    added += contextforge_result.added_fields
     return InternalResult(tuple(changed), added)
+
+
+def _reconcile_contextforge(client: OpenBaoClient, admin_email: str | None) -> InternalResult:
+    if admin_email is None:
+        return InternalResult((), 0)
+    fields = _random_fields(
+        "postgresqlPassword",
+        "jwtSecretKey",
+        "authEncryptionSecret",
+        "platformAdminPassword",
+        "defaultUserPassword",
+    )
+    current = client.read_secret("contextforge/internal")
+    for field in fields:
+        if current is not None and field in current.values:
+            value = _required_text(current.values, field)
+            if not value.strip() or "\r" in value or "\n" in value:
+                raise OpenBaoError("ContextForge credential is invalid; refusing to replace it")
+    values, added = _upsert(
+        client, "contextforge/internal", fields, {"platformAdminEmail": admin_email}
+    )
+    changed = ["contextforge/internal"] if added else []
+    path = "infra-postgres-operations/internal"
+    _, count = _upsert(
+        client, path, {}, {"contextforgePassword": _required_text(values, "postgresqlPassword")}
+    )
+    _record_change(changed, path, count)
+    return InternalResult(tuple(changed), added + count)
 
 
 def _reconcile_dify(
