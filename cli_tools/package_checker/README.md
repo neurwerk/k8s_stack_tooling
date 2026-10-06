@@ -47,10 +47,11 @@ Build state is derived from these source repositories:
 
 The inventory tracks source packages, not the images pinned by Base charts or
 historical signed releases. Dify API and Web are separate packages owned by the
-standalone add-on; old builder images cannot verify them. Neither new package is
-published yet: until publication, package lookups report an error and the command
-exits nonzero. A tag and digest reported later indicate package availability, not
-verification of its provenance or approval to install it.
+standalone add-on; old builder images cannot verify them. Both `1.17.1-kc-v1`
+images are publicly readable and independently digest-verified. Failed package
+lookups remain errors and the command exits nonzero. A tag and digest reported by
+this checker indicate package availability, not independent provenance verification
+or approval to install it.
 
 Packages use `k8s-stack-*` and source repositories use `neurwerk/k8s_stack_*`.
 
