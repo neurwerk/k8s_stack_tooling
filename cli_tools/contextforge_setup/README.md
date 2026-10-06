@@ -1,6 +1,6 @@
 # ContextForge Setup (source only)
 
-Small trusted-workstation CLI for **native accounts only**, matching Studio
+Small trusted-workstation CLI for native accounts and scoped registrations, matching Studio
 [PR66](https://github.com/neurwerk/k8s_stack_studio/pull/66) at
 `03570e0e1c52bf4a3f968235172df857a3556187`. It uses native REST APIs pinned at
 `077071bbb43599dd5ab9372ebdbb9a8e686a9816`, not Studio Connect, a broker, database
@@ -10,10 +10,10 @@ API-key-only callers can have native accounts. Use the authoritative Keycloak
 email/subject of the key's principal, including the **service principal**, never
 a managed key's human creator. An operator approves input from Keycloak; this CLI
 does not query Keycloak or grant platform `llm:invoke` or MCP permissions.
-No registrations, virtual servers, tools, provider credentials, personal OAuth or
-Connect operations are supported. Unsupported config fields, including integration
-entries, are rejected **before any API access**. Context7 and shared Brave
-registrations follow separately, not blocked by the personal OAuth issue
+The accounts command never registers providers or changes tools. The separate
+registrations command below supports only no-authentication Context7 and shared
+Brave. Account config still rejects integration entries **before any API access**.
+Personal OAuth and Connect remain blocked by the native team-context issue
 [Base #424](https://github.com/neurwerk/k8s_stack_base/issues/424).
 
 ## Base/operator prerequisites
@@ -140,14 +140,152 @@ tool membership and the existing trusted email on every handshake/list/call.
 No new header layers or policy switches are introduced. Native no-auth/shared
 lookups can read personal headers, so credential writes for those upstream URLs
 must stay unavailable. Brave's key stays in the upstream service; native
-`auth_type=none` may represent platform `shared-authentication`. The next slice
-will reject duplicate URLs crossing authentication models and retain the mapping:
+`auth_type=none` represents platform `shared-authentication` for Brave. The
+registrations command rejects duplicate URLs crossing authentication models and retains the mapping:
 platform ID → approved upstream address, authentication model, native gateway/server,
 public route, permission and PII/content-trace policy. No PAT fallback, plugins,
 Authorization injection or individual OAuth bypass is supported here.
 
 Publication, Base settings/routing, Secret/CA delivery and live health checks need
 separate approval. Source validation is not runtime evidence.
+
+## Scoped registrations (source only)
+
+```bash
+contextforge-setup reconcile-registrations --config /approved/private-registrations.json
+contextforge-setup reconcile-registrations --config /approved/private-registrations.json --apply --login
+# Only when the operator deliberately changes an owned server's approved tools:
+contextforge-setup reconcile-registrations --config /approved/private-registrations.json --apply --login --update-owned-tools
+```
+
+Without `--apply`, validation makes **no API calls and prompts for no credentials**.
+Only an approved operator supplies this local file, never a browser/caller URL or
+Studio request. Unknown fields, credentials, URL query/userinfo/fragment, duplicate
+IDs/routes/URLs, and `individual-authentication` fail before credentials/API access.
+No OAuth/PAT/basic/header fallback, token broker, discovery refresh, or native patch
+is provided. Context7 must work without a provider key. Brave's company key remains
+solely in its existing upstream MCP service, never in this file or native headers.
+
+Exact schema (example addresses and tools are placeholders, not deployment values):
+
+```json
+{
+  "origin": "https://contextforge.example.com",
+  "team_id": "approved-existing-team-id",
+  "owner_email": "registration-admin@example.com",
+  "registrations": [
+    {
+      "id": "context7",
+      "provider": "context7",
+      "authentication_model": "no-authentication",
+      "upstream_url": "https://context7.example.com/mcp",
+      "transport": "STREAMABLEHTTP",
+      "gateway_id": null,
+      "server_id": "cccccccccccccccccccccccccccccccc",
+      "approved_tools": ["resolve-library-id", "query-docs"],
+      "permission": "mcp:context7:invoke",
+      "public_route": "/mcp/context7",
+      "pii_policy": "approved-policy-id",
+      "content_trace": false
+    },
+    {
+      "id": "brave",
+      "provider": "brave",
+      "authentication_model": "shared-authentication",
+      "upstream_url": "http://brave.example.com/sse",
+      "transport": "SSE",
+      "gateway_id": null,
+      "server_id": "dddddddddddddddddddddddddddddddd",
+      "approved_tools": ["brave_web_search"],
+      "permission": "mcp:brave:invoke",
+      "public_route": "/mcp/brave",
+      "pii_policy": "approved-policy-id",
+      "content_trace": false
+    }
+  ]
+}
+```
+
+Select one or both providers, at most one registration each. `id` is the existing
+platform integration ID (lower-case letters/digits/hyphens, max 50 characters),
+not a native UUID. Permission is exactly `mcp:<id>:invoke`. Choose fixed, distinct
+32-character lower-case hex `server_id` UUIDs; native server creation accepts them.
+Use an approved reachable HTTP(S) upstream URL and its exact native `SSE` or
+`STREAMABLEHTTP` protocol. CF's upstream SSRF allowlist/network and CA trust must
+allow those addresses; the CLI never changes those controls or upstream trust.
+Internal HTTP upstream addresses are separate from the private admin-origin TLS
+requirement. `approved_tools` is an explicit nonempty list of upstream **original
+names**, not CF-prefixed display names: missing, ambiguous or disabled tools fail.
+Use the exact native-stored endpoint path: approval distinguishes `/mcp` from
+`/mcp/`, even though duplicate detection rejects both spellings across registrations.
+
+Native gateway creation does **not** accept an ID. For first creation only, set
+`gateway_id=null`: lookup uses deterministic `neurwerk-contextforge-<id>` names.
+The native description binds provider/platform ID/auth model; server description
+also binds the resolved gateway ID. Team, visibility, owner and creator must match
+this exact ceremony. A foreign same-name/ID/URL registration is rejected, never
+adopted, renamed or overwritten. Success prints a non-secret JSON mapping; copy
+its resolved `gateway_id` into the operator file and approved consumers before
+opening routes. Later runs with that ID must find it; they never replace it. An
+unset ID still permits retry after a lost first-create response using the owned
+alias, with no local mapping store or invented API ID support.
+
+Existing valid resources are read-only. `--update-owned-tools` alone permits a
+PUT of `associated_tools` on a verified owned server, leaving IDs/profile/other
+settings untouched. Even then, a foreign gateway/team/auth/header association
+fails rather than being removed. Disabled extra tool associations are inspected
+through `/servers/<id>/tools?include_inactive=true`, not hidden by server detail.
+After every write, native gateway state and exact approved membership are read
+again; missing persistence is failure, not success. CF may create a `pending`
+gateway asynchronously: keep routes blocked, let native registration finish,
+then retry the same mapping; no polling loop or automatic re-registration runs.
+The command is not a multi-integration transaction and does not roll back/delete
+partially created resources. Keep routes blocked on **any** error and repair
+privately. Do not run competing reconcilers or concurrent native management.
+
+### Native operator and Base consumer contract
+
+- Use an active existing native `is_admin=true` registration owner and an active
+  existing non-personal team. This trusted operator is **not** an ordinary caller
+  or Studio's limited account-provisioning service. Native session tokens are
+  required (`token_use=session` from email login): use `--login` with the same
+  hidden/environment credentials as accounts, or a native email-login session in
+  `CONTEXTFORGE_ADMIN_TOKEN`; scoped API tokens are rejected. Native verification
+  and `/auth/email/me` establish the active DB administrator, not local JWT parsing.
+- The APIs used require `teams.read`, `gateways.read/create`, `tools.read`,
+  `servers.read/create`, and `servers.update` only for explicit membership updates;
+  the registration administrator needs native unscoped catalog visibility. No
+  team/role creation, account grants, platform permissions or offboarding occurs.
+- Read operations use `limit=0&include_inactive=true` for native unpaginated catalogs,
+  plus server tools/resources/prompts including inactive associations. Reject active
+  A2A associations; this pinned API has no inactive per-server A2A association read.
+  Operators must keep A2A associations absent and ordinary management unavailable.
+  Native visibility still hides **other owners' private registrations**, and there
+  is no complete saved-personal-header audit API here. An approved operator inventory
+  must exclude hidden duplicate upstream URLs/aliases and personal headers before
+  enabling traffic; a visible URL already owned by any other authentication model
+  fails. Do not claim this CLI audits hidden registrations or credentials.
+- Native gateways use `auth_type=none`, `gateway_mode=cache`, no credentials,
+  passthrough or identity injection. Servers are team-visible, OAuth-disabled, with
+  only approved tools and no resources/prompts/A2A. Ordinary callers retain the
+  exact limited account role above; no credential-write/registration/discovery
+  management routes may be exposed, even for no-auth/shared providers.
+- Output `registrations[]` contains `id`, `provider`, `authentication_model`,
+  `upstream_url`, `transport`, resolved `gateway_id`, fixed `server_id`,
+  `native_mcp_path`, exact `tool_ids`, `permission`, `public_route`, `pii_policy`,
+  and `content_trace`. Routing/permission/PII/content-trace values are declared
+  operator metadata, **not CF enforcement settings or platform grants**. Base
+  must preserve the approved platform ID/public route and policies while replacing
+  its upstream with the private native origin plus `/servers/<server_id>/mcp`;
+  Studio's backend catalog uses the same gateway/server/auth-model IDs and team.
+- Route only normal `/servers/<id>/mcp` with tool membership enforced on list/call,
+  including cached tool calls. Keep `MCPGATEWAY_DIRECT_PROXY_ENABLED=false`,
+  `MCP_REQUIRE_AUTH=true`, `REQUIRE_USER_IN_DB=true`; never route global `/mcp` or a
+  direct-proxy bypass. AgentGateway must require `llm:invoke` **and** the matching
+  `mcp:<platform-id>:invoke`, preserve PII/trace policy and forward the existing
+  trusted account email on every handshake/list/call. Neither Connect nor native
+  admin endpoints are public. Registration preparation alone does not establish
+  runtime isolation or remove publication/trust/account/routing prerequisites.
 
 ## Validation and evidence
 
@@ -170,3 +308,11 @@ Pinned native sources:
 [RBAC](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/routers/rbac.py),
 [membership API](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/routers/teams.py),
 [unpaginated membership](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/services/team_management_service.py).
+
+Registration source contracts:
+[gateway/server/tool REST](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/main.py),
+[native schemas](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/schemas.py),
+[gateway discovery and generated IDs](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/services/gateway_service.py),
+[server IDs and hidden inactive detail associations](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/services/server_service.py),
+[full server tool membership](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/services/tool_service.py),
+[native session scope](https://github.com/IBM/mcp-context-forge/blob/077071bbb43599dd5ab9372ebdbb9a8e686a9816/mcpgateway/auth.py).

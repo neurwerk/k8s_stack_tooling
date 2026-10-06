@@ -110,9 +110,9 @@ def load_config(path: Path, *, allow_loopback_http: bool = False) -> Config:
             "Account config requires origin, team_id, global_role_id, team_role_id and accounts; "
             "registrations are unsupported"
         )
-    team_id = _identifier(raw["team_id"])
-    global_role_id = _identifier(raw["global_role_id"])
-    team_role_id = _identifier(raw["team_role_id"])
+    team_id = identifier(raw["team_id"])
+    global_role_id = identifier(raw["global_role_id"])
+    team_role_id = identifier(raw["team_role_id"])
     if global_role_id == team_role_id:
         raise SetupError("Global and team role IDs must differ")
     accounts = tuple(_account(item) for item in objects(raw["accounts"]))
@@ -131,10 +131,11 @@ def load_config(path: Path, *, allow_loopback_http: bool = False) -> Config:
     )
 
 
-def _identifier(value: Json) -> str:
+def identifier(value: Json) -> str:
+    """Require a safe native identifier without changing its spelling."""
     result = text(value)
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", result):
-        raise SetupError("Use the approved native role ID")
+        raise SetupError("Use the approved native ID")
     return result
 
 

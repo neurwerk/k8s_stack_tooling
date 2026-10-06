@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from pathlib import Path
 from typing import cast
@@ -46,6 +48,23 @@ class Client:
         if not isinstance(token, str):
             raise SetupError("Native login returned no valid token")
         self.authenticate(token)
+
+    def require_registration_session(self) -> None:
+        """Reject limited API tokens; the API still verifies this session and DB admin status."""
+        token = self.session.headers.get("Authorization", "").removeprefix("Bearer ")
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise SetupError("Registrations require a native email-login session token")
+        try:
+            claims = object_value(
+                json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+            )
+        except (ValueError, binascii.Error, SetupError):
+            raise SetupError("Registrations require a native email-login session token") from None
+        if claims.get("token_use") != "session":
+            raise SetupError(
+                "Registrations require a native email-login session, not a scoped API token"
+            )
 
     def request(
         self,
