@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 RECONCILIATION_STATE_PATH = "stack-setup/reconciliation-state"
+CONTEXTFORGE_PROVIDER_APPS_PATH = "contextforge/provider-apps"
 ACTIVE_DIRECTORY_FIELDS = ("activeDirectoryBindDn", "activeDirectoryBindCredential")
 
 ROLE_NAMESPACES: tuple[str, ...] = (
@@ -322,6 +323,14 @@ def namespace_policy(namespace: str) -> str:
 path "secret/metadata/contextforge/internal" {
   capabilities = ["read"]
 }
+
+path "secret/data/contextforge/provider-apps" {
+  capabilities = ["read"]
+}
+
+path "secret/metadata/contextforge/provider-apps" {
+  capabilities = ["read"]
+}
 """
     if namespace not in (
         *ROLE_NAMESPACES,
@@ -356,6 +365,7 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
                 "frontend-librechat/external",
                 "docling/external",
                 "monitor-agentgateway-extproc/external",
+                CONTEXTFORGE_PROVIDER_APPS_PATH,
             )
             else '["read", "update"]'
         )

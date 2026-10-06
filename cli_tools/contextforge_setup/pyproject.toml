@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "contextforge-setup"
-version = "0.1.0"
+version = "0.1.1"
 description = "Reconcile limited native ContextForge accounts from a trusted workstation."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]

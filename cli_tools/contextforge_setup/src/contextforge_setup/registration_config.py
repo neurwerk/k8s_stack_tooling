@@ -1,4 +1,4 @@
-"""Non-secret, operator-approved mappings for the two supported MCP providers."""
+"""Non-secret, operator-approved mappings, independent of provider names."""
 
 from __future__ import annotations
 
@@ -37,6 +37,8 @@ class Registration:
     public_route: str
     pii_policy: str
     content_trace: bool
+    visibility: str = "team"
+    oauth: Object | None = None
 
     @property
     def alias(self) -> str:
@@ -57,6 +59,8 @@ class RegistrationConfig:
     team_id: str
     owner_email: str
     registrations: tuple[Registration, ...]
+    operator_authentication: str = "native-session"
+    oauth_secret_env: tuple[tuple[str, str], ...] = ()
 
 
 def native_uuid(value: Json) -> str:
@@ -86,36 +90,64 @@ def url_key(value: Json, *, exact_path: bool = False) -> str:
 
 
 def load_registration_config(
-    path: Path, *, allow_loopback_http: bool = False
+    path: Path, *, allow_loopback_http: bool = False, catalog: Path | None = None
 ) -> RegistrationConfig:
-    """Reject blocked models, credentials and ambiguous mappings before any API access."""
+    """Validate non-secret source declarations and mappings before any API access."""
     try:
         raw = object_value(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         raise SetupError("Cannot read valid registration JSON") from None
-    if set(raw) != {"origin", "team_id", "owner_email", "registrations"}:
+    fields = {"origin", "team_id", "owner_email"}
+    if catalog is None:
+        fields.add("registrations")
+    if not fields <= set(raw) or set(raw) - fields - {
+        "operator_authentication",
+        "oauth_secret_env",
+    }:
         raise SetupError(
-            "Registration config requires only origin, team_id, owner_email and registrations"
+            "Use origin, team_id, owner_email and either inline registrations or --catalog"
         )
-    rows = objects(raw["registrations"])
-    if any(row.get("authentication_model") == "individual-authentication" for row in rows):
-        raise SetupError(
-            "Individual authentication is blocked by Base #424; no OAuth, PAT or header fallback"
-        )
+    if catalog is None:
+        rows = objects(raw["registrations"])
+    else:
+        try:
+            rows = objects(json.loads(catalog.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            raise SetupError("Cannot read valid generated registrations catalog JSON") from None
     registrations = tuple(_registration(row) for row in rows)
-    if not registrations or len(registrations) > 2:
-        raise SetupError("Select only Context7 and/or shared Brave, at most one of each")
+    if not registrations or len(registrations) > 200:
+        raise SetupError("Select between 1 and 200 approved MCP registrations")
     _unique(registrations)
+    authentication = text(raw.get("operator_authentication", "native-session"))
+    if authentication not in {"native-session", "trusted-proxy"}:
+        raise SetupError("Use native-session or approved trusted-proxy operator authentication")
+    secret_env = object_value(raw.get("oauth_secret_env", {}))
+    individual_ids = {
+        row.id for row in registrations if row.authentication_model == "individual-authentication"
+    }
+    if (
+        not set(secret_env) <= individual_ids
+        or any(
+            not re.fullmatch(r"CONTEXTFORGE_OAUTH_[A-Z0-9_]+", text(name))
+            for name in secret_env.values()
+        )
+        or len(set(secret_env.values())) != len(secret_env)
+    ):
+        raise SetupError(
+            "Map individual integration IDs to distinct CONTEXTFORGE_OAUTH_* environment names"
+        )
     return RegistrationConfig(
         origin(raw["origin"], allow_loopback_http=allow_loopback_http),
         identifier(raw["team_id"]),
         email(raw["owner_email"]),
         registrations,
+        authentication,
+        tuple((key, text(value)) for key, value in secret_env.items()),
     )
 
 
 def _registration(raw: Object) -> Registration:
-    if set(raw) != {
+    required = {
         "id",
         "provider",
         "authentication_model",
@@ -128,19 +160,28 @@ def _registration(raw: Object) -> Registration:
         "public_route",
         "pii_policy",
         "content_trace",
-    }:
+    }
+    if not required <= set(raw) or set(raw) - required - {"visibility", "oauth"}:
         raise SetupError(
             "Use only the documented non-secret registration fields; "
             "credentials and headers are forbidden"
         )
     platform_id = text(raw["id"])
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,49}", platform_id):
+    if len(platform_id) > 50 or not re.fullmatch(
+        r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*", platform_id
+    ):
         raise SetupError("Use the approved lower-case platform integration ID")
     provider, model = text(raw["provider"]), text(raw["authentication_model"])
-    if {"context7": "no-authentication", "brave": "shared-authentication"}.get(provider) != model:
-        raise SetupError(
-            "Only no-authentication Context7 and shared-authentication Brave are supported"
-        )
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", provider):
+        raise SetupError("Use a generic lower-case provider identifier")
+    if model not in {"no-authentication", "shared-authentication", "individual-authentication"}:
+        raise SetupError("Use a documented MCP authentication model")
+    visibility = text(raw.get("visibility", "team"))
+    if visibility not in {"team", "public"}:
+        raise SetupError("Use team or public native visibility behind private ingress")
+    oauth = _oauth(raw["oauth"]) if "oauth" in raw else None
+    if oauth is not None and model != "individual-authentication":
+        raise SetupError("OAuth metadata requires individual-authentication")
     transport = text(raw["transport"])
     if transport not in {"SSE", "STREAMABLEHTTP"}:
         raise SetupError("Declare the approved native SSE or STREAMABLEHTTP upstream protocol")
@@ -157,6 +198,8 @@ def _registration(raw: Object) -> Registration:
         _route(raw["public_route"]),
         identifier(raw["pii_policy"]),
         _trace(raw["content_trace"]),
+        visibility,
+        oauth,
     )
 
 
@@ -204,7 +247,9 @@ def _permission(value: Json, platform_id: str) -> str:
 
 def _route(value: Json) -> str:
     result = text(value)
-    if not re.fullmatch(r"/mcp/[a-z0-9/_-]+", result):
+    if not re.fullmatch(r"/mcp/[a-z0-9./_-]+", result) or any(
+        part in {".", ".."} for part in result.split("/")
+    ):
         raise SetupError(
             "Declare the approved public /mcp/ route without query, fragment or traversal"
         )
@@ -220,7 +265,6 @@ def _trace(value: Json) -> bool:
 def _unique(registrations: tuple[Registration, ...]) -> None:
     for values in [
         [row.id for row in registrations],
-        [row.provider for row in registrations],
         [row.server_id for row in registrations],
         [row.public_route for row in registrations],
         [url_key(row.upstream_url) for row in registrations],
@@ -228,6 +272,54 @@ def _unique(registrations: tuple[Registration, ...]) -> None:
     ]:
         if len(set(values)) != len(values):
             raise SetupError(
-                "Duplicate integration, provider, route, native ID or upstream URL "
+                "Duplicate integration, route, native ID or upstream URL "
                 "across authentication models"
+            )
+
+
+def _oauth(value: Json) -> Object:
+    """Validate non-secret app metadata; credentials never enter the input file."""
+    raw = object_value(value)
+    if set(raw) != {
+        "authorization_url",
+        "token_url",
+        "client_id",
+        "redirect_uri",
+        "scopes",
+        "client_secret_ref",
+        "pkce",
+    }:
+        raise SetupError("Use only documented OAuth metadata; plaintext secrets are forbidden")
+    for field in ("authorization_url", "token_url", "redirect_uri"):
+        if not upstream_url(raw[field]).startswith("https://"):
+            raise SetupError("OAuth endpoints and approved callback must use HTTPS")
+    text(raw["client_id"])
+    if raw["pkce"] is not True:
+        raise SetupError("OAuth metadata requires PKCE")
+    scopes = raw["scopes"]
+    if not isinstance(scopes, list):
+        raise SetupError("OAuth scopes must be a list")
+    for scope in scopes:
+        text(scope)
+    ref = object_value(raw["client_secret_ref"])
+    if set(ref) != {"name", "key"}:
+        raise SetupError("OAuth client_secret_ref requires only name and key")
+    identifier(ref["name"])
+    if not re.fullmatch(r"[a-zA-Z0-9._-]{1,100}", text(ref["key"])):
+        raise SetupError("Use the approved Kubernetes Secret key")
+    return raw
+
+
+def require_supported_registration_apply(config: RegistrationConfig) -> None:
+    """Require an approved operator app and the fixed ESO reference before credentials."""
+    for row in config.registrations:
+        if row.authentication_model != "individual-authentication":
+            continue
+        if row.oauth is None or row.oauth["client_secret_ref"] != {
+            "name": "contextforge-oauth-apps",
+            "key": row.id,
+        }:
+            raise SetupError(
+                "Individual-authentication apply requires OAuth app metadata and "
+                "client_secret_ref name=contextforge-oauth-apps, key=<integration-id>"
             )
