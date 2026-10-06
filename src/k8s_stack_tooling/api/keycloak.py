@@ -882,6 +882,18 @@ def upsert_realm_role_composites_api(
             )
             raise SystemExit(1)
     token_header = {"Authorization": f"Bearer {token}"}
+    status, realm_data = request(
+        f"{admin_url}/admin/realms/{realm}", method="GET", headers=token_header
+    )
+    if (
+        status != 200
+        or not isinstance(realm_data, dict)
+        or not isinstance(realm_data.get("id"), str)
+        or not realm_data["id"]
+    ):
+        log("ERROR: Could not resolve the realm ID for composite ownership.")
+        raise SystemExit(1)
+    realm_id = realm_data["id"]
     roles_url = f"{admin_url}/admin/realms/{realm}/roles"
     status, data = request(roles_url, method="GET", headers=token_header)
     if status != 200 or not isinstance(data, list):
@@ -920,12 +932,12 @@ def upsert_realm_role_composites_api(
         current_realm_roles = [
             role
             for role in current
-            if role.get("clientRole") is False and role.get("containerId") == realm
+            if role.get("clientRole") is False and role.get("containerId") == realm_id
         ]
         parent_owned = owned_roles.get(parent_name) if owned_roles is not None else None
         if parent_owned is not None and any(
             role.get("clientRole") is not False
-            or role.get("containerId") != realm
+            or role.get("containerId") != realm_id
             or role.get("id") != role_map[role["name"]]["id"]
             for role in current
             if role.get("name") in parent_owned

@@ -356,10 +356,11 @@ def test_upsert_realm_role_composites_replaces_stale_realm_composites() -> None:
         "id": "stale-id",
         "name": "obsolete-role",
         "clientRole": False,
-        "containerId": "realm",
+        "containerId": "realm-id",
     }
     with patch("k8s_stack_tooling.api.keycloak.request") as request:
         request.side_effect = [
+            (200, {"id": "realm-id"}),
             (200, [parent, child, {"id": "stale-id", "name": "obsolete-role"}]),
             (200, [stale]),
             (204, {}),
@@ -373,8 +374,8 @@ def test_upsert_realm_role_composites_replaces_stale_realm_composites() -> None:
             {"platform-admin": ["studio-user"]},
         )
 
-    assert request.call_args_list[2].kwargs["body"] == [stale]
-    assert request.call_args_list[3].kwargs["body"] == [child]
+    assert request.call_args_list[3].kwargs["body"] == [stale]
+    assert request.call_args_list[4].kwargs["body"] == [child]
 
 
 def test_upsert_realm_role_composites_scoped_ownership_preserves_foreign_grants() -> None:
@@ -383,11 +384,16 @@ def test_upsert_realm_role_composites_scoped_ownership_preserves_foreign_grants(
     owned = {"id": "owned", "name": "addon-admin"}
     foreign = {"id": "foreign", "name": "other-admin"}
     current = [
-        {**owned, "clientRole": False, "containerId": "realm"},
-        {**foreign, "clientRole": False, "containerId": "realm"},
+        {**owned, "clientRole": False, "containerId": "realm-id"},
+        {**foreign, "clientRole": False, "containerId": "realm-id"},
     ]
     with patch("k8s_stack_tooling.api.keycloak.request") as request:
-        request.side_effect = [(200, [parent, owned, foreign]), (200, current), (204, {})]
+        request.side_effect = [
+            (200, {"id": "realm-id"}),
+            (200, [parent, owned, foreign]),
+            (200, current),
+            (204, {}),
+        ]
         upsert_realm_role_composites_api(
             "http://keycloak",
             "token",
@@ -395,8 +401,8 @@ def test_upsert_realm_role_composites_scoped_ownership_preserves_foreign_grants(
             {"platform-admin": []},
             {"platform-admin": ["addon-admin"]},
         )
-    assert len(request.call_args_list) == 3
-    assert request.call_args_list[2].kwargs["body"] == [current[0]]
+    assert len(request.call_args_list) == 4
+    assert request.call_args_list[3].kwargs["body"] == [current[0]]
 
     with patch("k8s_stack_tooling.api.keycloak.request") as request, pytest.raises(SystemExit):
         upsert_realm_role_composites_api(
@@ -410,11 +416,12 @@ def test_upsert_realm_role_composites_scoped_ownership_preserves_foreign_grants(
 
     with patch("k8s_stack_tooling.api.keycloak.request") as request, pytest.raises(SystemExit):
         request.side_effect = [
+            (200, {"id": "realm-id"}),
             (200, [parent, owned, foreign]),
             (
                 200,
                 [
-                    {**owned, "clientRole": True, "containerId": "realm"},
+                    {**owned, "clientRole": True, "containerId": "realm-id"},
                 ],
             ),
         ]
@@ -425,7 +432,31 @@ def test_upsert_realm_role_composites_scoped_ownership_preserves_foreign_grants(
             {"platform-admin": []},
             {"platform-admin": ["addon-admin"]},
         )
-    assert len(request.call_args_list) == 2
+    assert len(request.call_args_list) == 3
+
+    with patch("k8s_stack_tooling.api.keycloak.request") as request, pytest.raises(SystemExit):
+        request.side_effect = [
+            (200, {"id": "realm-id"}),
+            (200, [parent, owned, foreign]),
+            (200, [{**owned, "clientRole": False, "containerId": "other-realm-id"}]),
+        ]
+        upsert_realm_role_composites_api(
+            "http://keycloak",
+            "token",
+            "realm",
+            {"platform-admin": []},
+            {"platform-admin": ["addon-admin"]},
+        )
+    assert len(request.call_args_list) == 3
+
+
+def test_upsert_realm_role_composites_requires_realm_id_before_mutating() -> None:
+    with patch("k8s_stack_tooling.api.keycloak.request") as request, pytest.raises(SystemExit):
+        request.return_value = (200, {"realm": "realm"})
+        upsert_realm_role_composites_api(
+            "http://keycloak", "token", "realm", {"platform-admin": ["studio-user"]}
+        )
+    request.assert_called_once()
 
 
 def test_upsert_groups_maps_realm_and_agentgateway_roles() -> None:
