@@ -50,18 +50,60 @@ The native paths use team-or-shared, the first 16 hex characters of SHA-256 of t
 MCP URL, and URL-encoded email; the shared path segment is not permission to fall
 back to another user's connection. Do not enable the token-exchange grant.
 
-**Activation blocker:** this catalog intentionally does not issue `VAULT_TOKEN`.
-The current catalog supports durable generated credentials, not expiring token
-creation, validation, and rotation. Do not supply a root, ESO, indefinitely lived,
-or default-policy token as a shortcut. The smallest follow-up is a catalog-only
-two-custodian operation that issues a finite-TTL orphan token with only the native
-policy, preserves it on ordinary reconciliation, and supports explicit rotation
-with ContextForge stopped, revocation of the old accessor, Secret refresh, and
-restart/health checks before expiry. TTL and rotation timing must be agreed and
-implemented before activation; disabling selection is not revocation.
-Native OAuth application client secrets still remain in PostgreSQL; this is not
-an OpenBao-only provider-secret implementation. Account/team/registration APIs,
-user connection onboarding, Studio and gateway identity are separate changes.
+Selected bootstrap and reconciliation now issue a missing `vaultToken` only in
+`contextforge/internal`; ESO must deliver it as `contextforge-runtime:VAULT_TOKEN`.
+The token is an orphan service token with only `contextforge-oauth`, no default
+or identity policies, no renewal, unlimited uses, and a fixed 30-day TTL and
+explicit maximum TTL (2,592,000 seconds). Its metadata binds it to the selected
+client, cluster and OpenBao namespace UID. Server constraints that shorten the
+initial lifetime are rejected, with cleanup of the new token; fix the server's
+supported TTL configuration through separately authorized operations first.
+The orphan survives the normal revocation of the temporary recovery root.
+Plaintext is never printed, put in the local custody kit, or accepted as an argument.
+
+Normal runs verify the persisted token's exact policy, identity binding, type,
+renewability and lifetime through the privileged token lookup API, and reuse it
+without rotation or renewal. They report only remaining lifetime, warn at seven
+days or less, and reject expired, missing-from-OpenBao or unverifiable tokens with
+rotation instructions. `status` still reports selection, not token health; disabling
+selection retains credentials and does not revoke previously issued access.
+Reserve a maintenance window and rotate at least seven days before expiry:
+
+```bash
+uv run --frozen stack-setup reconcile --context <context> --client <client> \
+  --custodian-package <first-secure-package> \
+  --custodian-package <second-secure-package> --rotate-contextforge-token
+```
+
+This is the existing full-catalog two-custodian ceremony, not a routine provider
+update. Before starting it, separately suspend the ContextForge application stage
+and `HelmRelease/contextforge`, scale every Deployment in its namespace to zero,
+and wait for every active Pod (including migration Jobs) to disappear. The CLI
+checks the suspended HelmRelease, zero desired Deployment replicas and absence of
+active Pods before custody access and again immediately before token preparation;
+it never stops or restarts workloads itself. Operators must keep the stop stable
+through the operation, including against other controllers and manual changes.
+Rotation revokes only the old stored token before issuing and CAS-persisting its
+replacement, then revokes recovery root access before the existing ESO refresh.
+Already absent/expired tokens can be explicitly rotated, but live unrelated or
+overprivileged tokens require authorized repair rather than automatic revocation.
+Keep the application stopped on failure, rerun the explicit rotation after fixing
+the cause, and separately resume and verify health only after Secret readiness.
+Failed validation or CAS persistence revokes the new token, including an uncertain
+write outcome; a lost issuance response needs authorized accessor inspection before
+retrying, since the token may have been created without being stored. Never use a
+root, ESO, default-policy or indefinitely lived token as a shortcut.
+
+**Activation remains blocked** pending publication of a reviewed tool revision and
+Base qualification of Secret delivery, TLS trust and maintenance support. The
+current foundation does not yet inject `VAULT_TOKEN` or mount OpenBao trust.
+Native OAuth application client-registration configuration copies remain in
+PostgreSQL; saved personal access/refresh credentials must use the native Vault
+backend. Individual-authentication registrations and Connect must remain disabled:
+v1.0.11 selects different team scopes for native proxy calls and proxy OAuth flows.
+No broker, upstream patch, empty-team bypass, static fallback, plugins or passthrough
+authentication are introduced. Account and no-authentication/shared-authentication
+registration reconciliation remain separate source-only work.
 
 ### Dify Agent Credentials
 
