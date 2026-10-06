@@ -100,8 +100,8 @@ class Settings(BaseSettings):
         return value
 
 
-_PACKAGE_NAME = re.compile(r"^(?:k8s-stack|addon)-[a-z0-9]+(?:-[a-z0-9]+)*$")
-_REPOSITORY = re.compile(r"^neurwerk/(?:k8s_stack_[a-z0-9_]+|addon_dify_ce_builder)$")
+_PACKAGE_NAME = re.compile(r"^k8s-stack-[a-z0-9]+(?:-[a-z0-9]+)*$")
+_REPOSITORY = re.compile(r"^neurwerk/k8s_stack_[a-z0-9_]+$")
 _CHANNEL = re.compile(r"^[a-z0-9]+$")
 
 PACKAGES: tuple[PackageConfig, ...] = (
@@ -117,7 +117,7 @@ PACKAGES: tuple[PackageConfig, ...] = (
     PackageConfig(
         "k8s-stack-opensearch-reporting-cli", "neurwerk/k8s_stack_opensearch_reporting_cli"
     ),
-    PackageConfig("addon-dify-ce-builder-api", "neurwerk/addon_dify_ce_builder"),
+    PackageConfig("k8s-stack-addon-dify-api", "neurwerk/k8s_stack_addon_dify"),
     PackageConfig("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
-    PackageConfig("addon-dify-ce-builder-web", "neurwerk/addon_dify_ce_builder"),
+    PackageConfig("k8s-stack-addon-dify-web", "neurwerk/k8s_stack_addon_dify"),
 )
