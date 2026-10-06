@@ -2,7 +2,7 @@
 
 Python runtime utilities and trusted-workstation command-line tools used to
 operate the neurwerk Kubernetes stack. This repository contains one container
-package and eight independently locked CLI projects.
+package and independently locked CLI projects.
 
 ## Projects
 
@@ -11,6 +11,7 @@ package and eight independently locked CLI projects.
 | `k8s-stack-tooling` | Keycloak/OpenSearch initialization and a maintenance page server | Kubernetes Jobs and on-demand maintenance Deployment |
 | [`maintenance`](cli_tools/maintenance/) | Starts and stops maintenance pages for selected products | Authorized operator workstation |
 | [`platform-release`](cli_tools/platform_release/) | Reviews, checks and stages signed Base platform releases through protected workflows | Trusted release custodian workstation |
+| [`contextforge-setup`](cli_tools/contextforge_setup/) | Reconciles limited native ContextForge accounts (source only) | Trusted operator workstation |
 | [`package-checker`](cli_tools/package_checker/) | Reports published GHCR versions and active GitHub Actions builds | Developer or operator workstation |
 | [`inference-runtime-manager`](cli_tools/inference_runtime_manager/) | Downloads verified model artifacts and manages one explicit container per inference service | Workstation with external storage and an explicit Docker context |
 | [`openbao-stack-setup`](cli_tools/openbao_stack_setup/) | Bootstraps, reconciles, verifies, and updates supported OpenBao state | Trusted operator workstation only |
