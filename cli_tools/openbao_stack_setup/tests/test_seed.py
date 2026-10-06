@@ -54,6 +54,7 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         {"username": "user", "password": "password"},
         bootstrap_passwords(),
         identity(),
+        dify_enabled=True,
     )
     assert report.external_records_changed == 6
     assert report.internal_records_changed == 14
@@ -105,6 +106,7 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         {"username": "user", "password": "password"},
         {},
         identity(),
+        dify_enabled=True,
     )
     assert reconciled.external_records_changed == 0
 

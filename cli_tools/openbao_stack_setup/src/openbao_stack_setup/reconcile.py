@@ -62,18 +62,20 @@ def reconcile_openbao(
     forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
+    dify_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
     client.ensure_kv_v2_mount()
     state = _load_state(client.read_secret(RECONCILIATION_STATE_PATH), identity)
-    _require_bootstrap_passwords(client, passwords)
+    _require_bootstrap_passwords(client, passwords, dify_enabled=dify_enabled)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
         raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
 
     client.ensure_kubernetes_auth()
     client.configure_kubernetes_auth()
     namespaces = ROLE_NAMESPACES + (("forgejo",) if forgejo_enabled else ())
+    namespaces += ("frontend-dify",) if dify_enabled else ()
     namespaces += ("wireguard",) if wireguard_enabled else ()
     namespaces += DOCLING_NAMESPACES if docling_enabled else ()
     for namespace in namespaces:
@@ -105,6 +107,7 @@ def reconcile_openbao(
         forgejo_enabled=forgejo_enabled,
         wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
+        dify_enabled=dify_enabled,
     )
 
     if state.applied_version < CURRENT_RECONCILIATION_VERSION:
@@ -177,7 +180,7 @@ def _required_state_text(values: dict[str, JsonValue], field: str) -> str:
 
 
 def _require_bootstrap_passwords(
-    client: OpenBaoClient, bootstrap_passwords: dict[str, str]
+    client: OpenBaoClient, bootstrap_passwords: dict[str, str], *, dify_enabled: bool = False
 ) -> None:
     known = {password.key for password in BOOTSTRAP_PASSWORDS}
     if not set(bootstrap_passwords).issubset(known) or any(
@@ -186,6 +189,8 @@ def _require_bootstrap_passwords(
         raise OpenBaoError("Bootstrap passwords are invalid")
     records: dict[str, SecretRecord | None] = {}
     for password in BOOTSTRAP_PASSWORDS:
+        if password.key == "dify" and not dify_enabled:
+            continue
         if password.key in bootstrap_passwords:
             continue
         record = records.setdefault(password.path, client.read_secret(password.path))

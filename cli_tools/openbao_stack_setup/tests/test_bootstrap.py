@@ -57,7 +57,7 @@ def test_bootstrap_seeds_exact_roles_and_provider_records(tmp_path: Path) -> Non
 
     assert report.external_records_changed == 6
     assert "frontend-librechat/external" not in session.secrets
-    assert report.internal_records_changed == 14
+    assert report.internal_records_changed == 13
     assert "librechat-code-interpreter" in ROLE_NAMESPACES
     assert {"infra-postgres-auth", "infra-postgres-operations"}.issubset(ROLE_NAMESPACES)
     role_calls = [call for call in session.calls if call.path.startswith("auth/kubernetes/role/")]
