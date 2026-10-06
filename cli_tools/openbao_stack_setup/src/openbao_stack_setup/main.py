@@ -27,6 +27,8 @@ from openbao_stack_setup.catalog import (
     BOOTSTRAP_EXTERNAL_SECRETS,
     BOOTSTRAP_HELM_RELEASES,
     BOOTSTRAP_SECRET_STORES,
+    CONTEXTFORGE_EXTERNAL_SECRETS,
+    CONTEXTFORGE_SECRET_STORE,
     DIFY_EXTERNAL_SECRETS,
     DIFY_SECRET_STORE,
     DOCLING_EXTERNAL_SECRETS,
@@ -171,6 +173,7 @@ def _preflight(context: str, client: str) -> None:
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
+    contextforge_admin_email = cluster.contextforge_admin_email()
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(
         "Preflight passed for "
@@ -182,6 +185,7 @@ def _preflight(context: str, client: str) -> None:
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Dify credential catalog selected={dify_enabled}")
+    print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
     print("Verify K3s --secrets-encryption on the control-plane node before bootstrap.")
 
@@ -200,6 +204,7 @@ def _bootstrap(
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
+    contextforge_admin_email = cluster.contextforge_admin_email()
     _confirm(context, client, "Bootstrap OpenBao")
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
@@ -264,6 +269,7 @@ def _bootstrap(
                 wireguard_enabled,
                 docling_enabled,
                 dify_enabled,
+                contextforge_admin_email,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -288,6 +294,7 @@ def _bootstrap(
                 wireguard_enabled,
                 docling_enabled,
                 dify_enabled,
+                contextforge_admin_email,
             )
             return
         if kit.checkpoint == "complete":
@@ -306,6 +313,7 @@ def _bootstrap(
             wireguard_enabled,
             docling_enabled,
             dify_enabled,
+            contextforge_admin_email,
         )
 
 
@@ -320,6 +328,7 @@ def _seed_and_finish(
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     dify_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -342,6 +351,7 @@ def _seed_and_finish(
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
                 dify_enabled=dify_enabled,
+                contextforge_admin_email=contextforge_admin_email,
             )
             kit = with_checkpoint(kit, "seeded")
             update(recovery_file, kit)
@@ -359,6 +369,7 @@ def _seed_and_finish(
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
                 dify_enabled=dify_enabled,
+                contextforge_admin_email=contextforge_admin_email,
             )
             print(
                 "Reconciled OpenBao catalog "
@@ -378,6 +389,7 @@ def _seed_and_finish(
         wireguard_enabled,
         docling_enabled,
         dify_enabled,
+        contextforge_admin_email,
     )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
@@ -398,6 +410,7 @@ def _reconcile(
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
+    contextforge_admin_email = cluster.contextforge_admin_email()
     _confirm(context, client, "Reconcile OpenBao", confirmation)
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -424,6 +437,7 @@ def _reconcile(
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
                 dify_enabled=dify_enabled,
+                contextforge_admin_email=contextforge_admin_email,
             )
             _verify_secret_operator(cluster, unauthenticated)
             _revoke_other_root_tokens(root)
@@ -442,6 +456,7 @@ def _reconcile(
         wireguard_enabled,
         docling_enabled,
         dify_enabled,
+        contextforge_admin_email,
     )
     print("OpenBao reconciliation completed.")
 
@@ -548,6 +563,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
+    contextforge_admin_email = cluster.contextforge_admin_email()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
     checkpoint = _bound_kit(paths.seal_file, identity).checkpoint
     with _openbao(cluster) as api:
@@ -557,6 +573,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Dify credential catalog selected={dify_enabled}")
+    print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
 
 
 def _verify_recovery(
@@ -691,6 +708,7 @@ def _refresh_bootstrap_external_secrets(
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     dify_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
 ) -> None:
     targets = _BOOTSTRAP_EXTERNAL_SECRETS
     if active_directory_required:
@@ -709,6 +727,8 @@ def _refresh_bootstrap_external_secrets(
         targets += DOCLING_EXTERNAL_SECRETS
     if dify_enabled:
         targets += DIFY_EXTERNAL_SECRETS
+    if contextforge_admin_email is not None:
+        targets += CONTEXTFORGE_EXTERNAL_SECRETS
     total = len(targets)
     for index, target in enumerate(targets, start=1):
         print(f"Refreshing ExternalSecret {target.namespace}/{target.name} ({index}/{total})...")
@@ -722,6 +742,7 @@ def _converge_runtime(
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     dify_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
@@ -737,6 +758,10 @@ def _converge_runtime(
     if docling_enabled:
         for store in DOCLING_SECRET_STORES:
             cluster.ensure_secret_store_ready(store.name, store.namespace)
+    if contextforge_admin_email is not None:
+        cluster.ensure_secret_store_ready(
+            CONTEXTFORGE_SECRET_STORE.name, CONTEXTFORGE_SECRET_STORE.namespace
+        )
     _refresh_bootstrap_external_secrets(
         cluster,
         active_directory_required,
@@ -744,6 +769,7 @@ def _converge_runtime(
         wireguard_enabled,
         docling_enabled,
         dify_enabled,
+        contextforge_admin_email,
     )
     print(
         "Reconciling infrastructure releases blocked on generated Secrets; "

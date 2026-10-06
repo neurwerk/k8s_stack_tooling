@@ -34,6 +34,7 @@ def seed_bootstrap(
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     dify_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
 ) -> SeedReport:
     """Converge a fresh instance and refuse unexpected external record changes."""
     if set(provider_values) != set(PROVIDERS):
@@ -74,6 +75,7 @@ def seed_bootstrap(
         wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
         dify_enabled=dify_enabled,
+        contextforge_admin_email=contextforge_admin_email,
     )
     return SeedReport(
         external_changed,

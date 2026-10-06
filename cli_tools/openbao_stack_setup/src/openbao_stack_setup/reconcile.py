@@ -11,6 +11,7 @@ from openbao_stack_setup.catalog import (
     RECONCILIATION_STATE_PATH,
     ROLE_NAMESPACES,
     SMTP_REPLICA,
+    contextforge_oauth_policy,
     namespace_policy,
     secret_operator_policy,
 )
@@ -63,6 +64,7 @@ def reconcile_openbao(
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     dify_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -78,9 +80,12 @@ def reconcile_openbao(
     namespaces += ("frontend-dify",) if dify_enabled else ()
     namespaces += ("wireguard",) if wireguard_enabled else ()
     namespaces += DOCLING_NAMESPACES if docling_enabled else ()
+    namespaces += ("contextforge",) if contextforge_admin_email is not None else ()
     for namespace in namespaces:
         client.write_policy(namespace, namespace_policy(namespace))
         client.write_kubernetes_role(namespace)
+    if contextforge_admin_email is not None:
+        client.write_policy("contextforge-oauth", contextforge_oauth_policy())
     client.write_policy(
         "secret-operator",
         secret_operator_policy(
@@ -108,6 +113,7 @@ def reconcile_openbao(
         wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
         dify_enabled=dify_enabled,
+        contextforge_admin_email=contextforge_admin_email,
     )
 
     if state.applied_version < CURRENT_RECONCILIATION_VERSION:
