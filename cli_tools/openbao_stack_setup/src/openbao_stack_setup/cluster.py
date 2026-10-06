@@ -223,6 +223,28 @@ class Cluster:
             raise ClusterError("Selected ContextForge requires an explicit platformAdminEmail")
         return email
 
+    def require_contextforge_stopped(self) -> None:
+        """Refuse token rotation unless reconciliation and every workload are stopped."""
+        try:
+            release = self.custom.get_namespaced_custom_object(
+                "helm.toolkit.fluxcd.io", "v2", "contextforge", "helmreleases", "contextforge"
+            )
+            deployments = kubernetes.client.AppsV1Api().list_namespaced_deployment("contextforge")
+            pods = self.core.list_namespaced_pod("contextforge")
+        except ApiException as exc:
+            raise ClusterError(
+                f"ContextForge stopped-state check failed: HTTP {exc.status}"
+            ) from None
+        if (
+            release.get("spec", {}).get("suspend") is not True
+            or any(deployment.spec.replicas != 0 for deployment in deployments.items)
+            or any(pod.status.phase not in ("Succeeded", "Failed") for pod in pods.items)
+        ):
+            raise ClusterError(
+                "ContextForge token rotation requires its HelmRelease suspended, "
+                "every Deployment scaled to zero, and all active Pods gone"
+            )
+
     def docling_enabled(self) -> bool:
         """Return whether either Docling inference mode is selected."""
         return self.docling_inference_mode() is not None

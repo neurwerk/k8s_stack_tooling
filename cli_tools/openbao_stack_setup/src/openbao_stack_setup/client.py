@@ -248,6 +248,43 @@ class OpenBaoClient:
         """Start OpenBao maintenance for invalid token-store entries."""
         self._write("auth/token/tidy", {})
 
+    def create_orphan_token(self, policy: str, ttl: int, metadata: dict[str, str]) -> str:
+        """Issue a finite, nonrenewable service token without the default policy."""
+        payload = _mapping(
+            self._request(
+                "POST",
+                "auth/token/create-orphan",
+                {
+                    "policies": [policy],
+                    "no_default_policy": True,
+                    "renewable": False,
+                    "type": "service",
+                    "ttl": f"{ttl}s",
+                    "explicit_max_ttl": f"{ttl}s",
+                    "meta": dict(metadata),
+                },
+            ),
+            "orphan token response",
+        )
+        token = _mapping(payload.get("auth"), "orphan token auth").get("client_token")
+        if not isinstance(token, str) or not token:
+            raise OpenBaoError("OpenBao did not return an orphan token")
+        return token
+
+    def lookup_token(self, token: str) -> dict[str, JsonValue] | None:
+        """Look up a token through the privileged operator, without putting it in a URL."""
+        try:
+            payload = self._request("POST", "auth/token/lookup", {"token": token})
+        except OpenBaoError as exc:
+            if str(exc).endswith("failed with HTTP 403"):
+                return None
+            raise
+        return _mapping(_mapping(payload, "token lookup").get("data"), "token metadata")
+
+    def revoke_token(self, token: str) -> None:
+        """Revoke exactly one token; OpenBao treats an already absent token as a no-op."""
+        self._write("auth/token/revoke", {"token": token})
+
     def self_accessor(self) -> str:
         """Return the accessor for this client token without returning the token."""
         payload = _mapping(self._request("GET", "auth/token/lookup-self"), "token lookup")

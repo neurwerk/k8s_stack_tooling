@@ -43,6 +43,7 @@ from openbao_stack_setup.catalog import (
 )
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError, TokenAccessorLookupError
 from openbao_stack_setup.cluster import Cluster, ClusterError, StackIdentity
+from openbao_stack_setup.contextforge import ROTATE_BEFORE_SECONDS, reconcile_contextforge_token
 from openbao_stack_setup.credentials import (
     BOOTSTRAP_PASSWORDS,
     plan_bootstrap_passwords,
@@ -106,6 +107,7 @@ def _arguments() -> argparse.ArgumentParser:
     reconcile.add_argument("--custody-root", type=Path)
     reconcile.add_argument("--custodian-package", action="append", type=Path, required=True)
     reconcile.add_argument("--confirm", metavar="CLIENT")
+    reconcile.add_argument("--rotate-contextforge-token", action="store_true")
     status = _guarded(commands.add_parser("status"))
     status.add_argument("--custody-root", type=Path)
     recovery = commands.add_parser("recovery")
@@ -141,6 +143,7 @@ def main() -> None:
                 args.custody_root,
                 args.custodian_package,
                 args.confirm,
+                args.rotate_contextforge_token,
             )
         elif args.command == "status":
             _status(args.context, args.client, args.custody_root)
@@ -377,6 +380,8 @@ def _seed_and_finish(
                 f"internal_records={reconciled.internal_records_changed} "
                 f"internal_fields_added={reconciled.internal_fields_added}"
             )
+        if contextforge_admin_email is not None:
+            _prepare_contextforge_token(root, kit.client, kit.cluster_id, kit.namespace_uid)
         print("Verifying restricted secret-operator access and revoking other root tokens...")
         _verify_secret_operator(cluster, unauthenticated)
         _revoke_other_root_tokens(root)
@@ -402,6 +407,7 @@ def _reconcile(
     custody_root: Path | None,
     package_paths: list[Path] | None,
     confirmation: str | None = None,
+    rotate_contextforge_token: bool = False,
 ) -> None:
     cluster = Cluster(context)
     identity = cluster.identity(client)
@@ -411,6 +417,10 @@ def _reconcile(
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
     contextforge_admin_email = cluster.contextforge_admin_email()
+    if rotate_contextforge_token:
+        if contextforge_admin_email is None:
+            raise SetupError("ContextForge must be selected before token rotation")
+        cluster.require_contextforge_stopped()
     _confirm(context, client, "Reconcile OpenBao", confirmation)
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -439,6 +449,16 @@ def _reconcile(
                 dify_enabled=dify_enabled,
                 contextforge_admin_email=contextforge_admin_email,
             )
+            if contextforge_admin_email is not None:
+                if rotate_contextforge_token:
+                    cluster.require_contextforge_stopped()
+                _prepare_contextforge_token(
+                    root,
+                    identity.client,
+                    identity.cluster_id,
+                    identity.namespace_uid,
+                    rotate=rotate_contextforge_token,
+                )
             _verify_secret_operator(cluster, unauthenticated)
             _revoke_other_root_tokens(root)
         finally:
@@ -459,6 +479,26 @@ def _reconcile(
         contextforge_admin_email,
     )
     print("OpenBao reconciliation completed.")
+
+
+def _prepare_contextforge_token(
+    root: OpenBaoClient,
+    client: str,
+    cluster_id: str,
+    namespace_uid: str,
+    *,
+    rotate: bool = False,
+) -> None:
+    ttl = reconcile_contextforge_token(
+        root,
+        {"client": client, "clusterId": cluster_id, "namespaceUid": namespace_uid},
+        rotate=rotate,
+    )
+    print(f"ContextForge nonrenewable Vault token verified; remaining lifetime={ttl}s.")
+    if ttl <= ROTATE_BEFORE_SECONDS:
+        print(
+            "Schedule stopped two-custodian token rotation now; expiry blocks native OAuth access."
+        )
 
 
 def _prepare_bootstrap_passwords(

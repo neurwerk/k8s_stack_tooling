@@ -188,6 +188,7 @@ def test_main_dispatches(command: str, target: str) -> None:
         custody_root=Path("custody"),
         custodian_package=[Path("one"), Path("two")],
         confirm="client",
+        rotate_contextforge_token=False,
         provider="brave",
     )
     with (
@@ -198,7 +199,7 @@ def test_main_dispatches(command: str, target: str) -> None:
         main()
     if command == "reconcile":
         operation.assert_called_once_with(
-            "ctx", "client", Path("custody"), [Path("one"), Path("two")], "client"
+            "ctx", "client", Path("custody"), [Path("one"), Path("two")], "client", False
         )
     else:
         operation.assert_called_once()
@@ -473,6 +474,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     seal_file = tmp_path / "seal.json"
     paths = CustodyPaths(tmp_path, seal_file, tmp_path / "packages")
     cluster = MagicMock()
+    cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.seal_exists.return_value = False
     cluster.active_directory_required.return_value = True
@@ -565,6 +567,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
     recovery_file = tmp_path / "recovery.json"
     recovery_file.write_text("existing", encoding="utf-8")
     cluster = MagicMock()
+    cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
     cluster.forgejo_enabled.return_value = False
@@ -608,6 +611,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     seal_file.write_text("existing", encoding="utf-8")
     paths = CustodyPaths(tmp_path, seal_file, tmp_path / "packages")
     cluster = MagicMock()
+    cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
     cluster.forgejo_enabled.return_value = False
@@ -1130,6 +1134,9 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     tmp_path: Path, forgejo_enabled: bool
 ) -> None:
     cluster = MagicMock()
+    cluster.contextforge_admin_email.return_value = (
+        "recovery@example.com" if forgejo_enabled else None
+    )
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
     cluster.forgejo_enabled.return_value = forgejo_enabled
@@ -1159,11 +1166,21 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         patch("openbao_stack_setup.main._verify_secret_operator"),
         patch("openbao_stack_setup.main._revoke_other_root_tokens"),
         patch(
+            "openbao_stack_setup.main._prepare_contextforge_token",
+            side_effect=lambda *_args, **_kwargs: events.append("token"),
+        ) as prepare_token,
+        patch(
             "openbao_stack_setup.main._converge_runtime",
             side_effect=lambda *_args: events.append("converge"),
         ) as converge,
     ):
-        _reconcile("ctx", "client", tmp_path, [Path("one"), Path("two")])
+        _reconcile(
+            "ctx",
+            "client",
+            tmp_path,
+            [Path("one"), Path("two")],
+            rotate_contextforge_token=forgejo_enabled,
+        )
 
     reconcile.assert_called_once_with(
         root,
@@ -1174,7 +1191,12 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         dify_enabled=cluster.dify_enabled.return_value,
         contextforge_admin_email=cluster.contextforge_admin_email.return_value,
     )
-    assert events == ["revoke", "converge"]
+    assert events == (["token"] if forgejo_enabled else []) + ["revoke", "converge"]
+    if forgejo_enabled:
+        prepare_token.assert_called_once_with(root, "client", "cluster", "namespace", rotate=True)
+        assert cluster.require_contextforge_stopped.call_count == 2
+    else:
+        prepare_token.assert_not_called()
     converge.assert_called_once_with(
         cluster,
         False,
@@ -1184,6 +1206,23 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
     )
+
+
+def test_rotation_refuses_running_application_before_custody_or_openbao(tmp_path: Path) -> None:
+    cluster = MagicMock()
+    cluster.contextforge_admin_email.return_value = "recovery@example.com"
+    cluster.require_contextforge_stopped.side_effect = ClusterError("ContextForge is not stopped")
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main.prepare_custody_paths") as custody,
+        patch("openbao_stack_setup.main._openbao") as openbao,
+        pytest.raises(ClusterError, match="not stopped"),
+    ):
+        _reconcile(
+            "ctx", "client", tmp_path, [Path("one"), Path("two")], rotate_contextforge_token=True
+        )
+    custody.assert_not_called()
+    openbao.assert_not_called()
 
 
 def test_reconcile_requires_complete_bootstrap(tmp_path: Path) -> None:
