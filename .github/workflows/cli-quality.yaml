@@ -101,11 +101,16 @@ jobs:
           CHATTERBOX_IMAGE: chatterbox
           KOKORO_IMAGE: kokoro
           KSERVE_IMAGE: kserve
+          GLINER_IMAGE: gliner
         run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
 
       - name: Test
         if: matrix.project != 'cli_tools/inference_runtime_manager' && matrix.project != 'cli_tools/ldap_directory' && matrix.project != 'cli_tools/opensearch_logs'
         run: uv run --frozen pytest
+
+      - name: Test inference runtime manager
+        if: matrix.project == 'cli_tools/inference_runtime_manager'
+        run: uv run --frozen python -m unittest discover -s tests
 
       - name: Build
         run: uv build

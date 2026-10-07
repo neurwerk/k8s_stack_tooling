@@ -141,6 +141,24 @@ class ArtifactStore:
             temporary.mkdir()
             self._client.download(request, revision, temporary)
             self._client.verify_download(request, revision, temporary)
+            for companion in request.companions:
+                target = temporary / companion.directory
+                if target.exists():
+                    raise IntegrityError("Companion directory overlaps model content")
+                target.mkdir()
+                companion_request = request.model_copy(
+                    update={
+                        "source": companion.source,
+                        "revision": companion.revision,
+                        "include": companion.include,
+                        "companions": [],
+                    }
+                )
+                self._client.download(companion_request, companion.revision, target)
+                self._client.verify_download(companion_request, companion.revision, target)
+                for name in companion.include:
+                    if not (target / name).is_file():
+                        raise IntegrityError(f"Missing companion file: {name}")
             checksums = calculate_checksums(temporary)
             _require_model_files(checksums, request.source)
             artifact = StoredArtifact.create(request, revision, checksums)
@@ -200,6 +218,8 @@ def _validate_identity(artifact: StoredArtifact, request: ArtifactRequest, revis
         revision,
     ):
         raise IntegrityError("Artifact metadata does not match requested source or revision")
+    if artifact.companions != request.companions:
+        raise IntegrityError("Artifact companion sources do not match the catalog")
 
 
 def _require_model_files(checksums: list[FileChecksum], source: str) -> None:

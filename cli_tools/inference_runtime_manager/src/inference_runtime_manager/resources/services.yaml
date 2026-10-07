@@ -127,14 +127,61 @@ vad-general:
   health_path: /health
   transport: python
 ner-german:
-  runtime: kserve
-  service: ner-german
-  model_id: openmed-german-pii
-  variant_id: transformers
+  recipes:
+    - default: true
+      runtime: kserve
+      service: ner-german
+      model_id: openmed-german-pii
+      variant_id: transformers
+      enabled: false
+      estimated_vram_gib: 3
+      internal_port: 8080
+      health_path: /v1/models/ner-german
+      transport: python
+      required_files: [config.json]
+      required_any_suffix: [.safetensors, .bin]
+    - runtime: gliner
+      service: ner-german-gliner
+      model_id: gliner-multilingual-pii
+      variant_id: gliner
+      enabled: false
+      estimated_vram_gib: 2
+      internal_port: 8080
+      health_path: /health
+      transport: python
+      required_files: [gliner_config.json, pytorch_model.bin, backbone/config.json, backbone/tokenizer_config.json, backbone/spm.model]
+ner-english:
+  recipes:
+    - default: true
+      runtime: kserve
+      service: ner-english
+      model_id: ai4privacy-english-pii
+      variant_id: transformers
+      enabled: false
+      estimated_vram_gib: 2
+      internal_port: 8080
+      health_path: /v1/models/ner-english
+      transport: python
+      required_files: [config.json]
+      required_any_suffix: [.safetensors, .bin]
+    - runtime: gliner
+      service: ner-english-gliner
+      model_id: gliner-multilingual-pii
+      variant_id: gliner
+      enabled: false
+      estimated_vram_gib: 2
+      internal_port: 8080
+      health_path: /health
+      transport: python
+      required_files: [gliner_config.json, pytorch_model.bin, backbone/config.json, backbone/tokenizer_config.json, backbone/spm.model]
+ner-multilingual:
+  runtime: gliner
+  service: ner-multilingual-gliner
+  model_id: gliner-multilingual-pii
+  variant_id: gliner
   enabled: false
-  estimated_vram_gib: 0
+  estimated_vram_gib: 2
   internal_port: 8080
-  health_path: /v1/models/ner-german
+  health_path: /health
   transport: python
-  required_files: [config.json]
-  required_any_suffix: [.safetensors, .bin]
+  required_files: [gliner_config.json, pytorch_model.bin, backbone/config.json, backbone/tokenizer_config.json, backbone/spm.model]

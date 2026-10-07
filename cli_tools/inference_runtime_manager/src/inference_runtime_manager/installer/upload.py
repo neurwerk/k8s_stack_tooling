@@ -58,6 +58,8 @@ def prepare_artifact(
     )
     if artifact.schema_version != 1 or artifact.category != model.category:
         raise ValueError("Unsupported artifact schema/category")
+    if artifact.companions != variant.companions:
+        raise ValueError("Artifact companion sources do not match the pinned catalog")
     if (artifact.model_id, artifact.variant_id, artifact.source, artifact.revision) != (
         entry.model_id,
         entry.variant_id,
@@ -244,6 +246,7 @@ def provision(
             and state == "running"
             and health == "healthy"
             and docker.image_matches(preset["runtime"], image)
+            and docker.runtime_settings_match(preset["service"])
             and not any(
                 states.get(service, ("", "", ""))[0] == "running" for service in alternatives
             )
