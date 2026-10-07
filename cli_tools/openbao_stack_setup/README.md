@@ -81,10 +81,11 @@ can create/read/update it only when ContextForge is selected. The native token
 policy cannot read it and retains only `contextforge/oauth/*`. No wildcard provider
 namespace, personal-token read/export, new broker, root shortcut or native patch is
 introduced. Kubernetes/operator access must keep the app Secret private.
-The CLI does not deliver credentials to ContextForge itself: the separately pinned
-`contextforge-setup` 0.1.1 resolves the approved Secret field through explicit private
-environment custody or hidden input and sends supported native app registration.
-See [native app preparation and consent](../contextforge_setup/README.md#operator-app-preparation-and-native-consent).
+The CLI does not deliver credentials to ContextForge itself. Native account/team
+setup and application/server registration automation are not supplied here.
+Keep native MCP activation disabled until a separately reviewed setup Job and
+its readiness gates are implemented; catalog declarations alone do not register
+servers or prepare native accounts.
 An OpenBao/ESO update alone does not rotate an existing native PostgreSQL app copy.
 
 The authorized temporary per-email database token backend is separate from this app
@@ -93,8 +94,8 @@ require a runtime Vault token or change its backend. The existing full catalog
 reconciliation still prepares/verifies the selected foundation's Vault token; no
 database-mode skip or new token-lifetime gate is added here. Actual encryption/restart
 checks and the later Vault token-scope fix remain supervisor-owned rollout steps.
-Both CLIs are independent workstation packages, not commands inside root Tooling
-image 0.7.4. Pin a reviewed source commit/install their verified standalone artifacts;
+This CLI is an independent workstation package, not a command inside root Tooling
+image 0.7.4. Pin its reviewed source commit or verified standalone artifact;
 no root image bump or publication is performed by this source patch.
 
 Selected bootstrap and reconciliation now issue a missing `vaultToken` only in
