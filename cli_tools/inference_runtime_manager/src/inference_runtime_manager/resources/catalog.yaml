@@ -292,6 +292,9 @@ models:
       piiAlias: english-pii
     variants:
       - id: transformers
+        runtimes: [kserve]
+        compatibilityNotes: ModernBERT token classification with the pinned KServe GPU runtime; target inference requires the manual endpoint check.
+        runtimeNotes: FP32 GPU inference, 512-token requests. Labels are PRIVATE/O, not individual PII entity categories.
         format: transformers
         quantization: none
         precision: fp32
@@ -320,11 +323,47 @@ models:
     variants:
       - id: transformers
         runtimes: [kserve]
-        compatibilityNotes: Reviewed for the pinned CPU KServe Hugging Face token-classification server; target inference remains to be exercised.
+        compatibilityNotes: DeBERTa token classification with the pinned KServe GPU runtime; target inference requires the manual endpoint check.
+        runtimeNotes: FP32 GPU inference, 512-token requests. Keep long-text chunking and entity interpretation in the caller.
         format: transformers
         quantization: none
         precision: fp32
         estimatedDownloadBytes: 1800000000
+
+  - id: gliner-multilingual-pii
+    category: ner
+    displayName: GLiNER Multilingual PII/PHI
+    description: Multilingual span-based PII and PHI detection with configurable entity labels.
+    recommended: false
+    source: urchade/gliner_multi_pii-v1
+    revision: 1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/urchade/gliner_multi_pii-v1
+      commercialUse: true
+      noticeRequired: true
+      notes: Model weights are Apache-2.0; bundled microsoft/mdeberta-v3-base configuration and tokenizer are MIT. The linked dpowale service is a separate wrapper and is not copied.
+    metadata:
+      architecture: gliner-span-classification
+      parameterCount: null
+      contextLength: null
+      languages: [en, fr, de, es, pt, it]
+      intendedUse: pii-phi-detection
+    variants:
+      - id: gliner
+        runtimes: [gliner]
+        compatibilityNotes: Package-owned offline GLiNER runtime; not compatible with KServe AutoModelForTokenClassification. Requires the short target endpoint check.
+        runtimeNotes: Configurable labels and confidence threshold; returns character spans. Rejects oversized inputs rather than silently truncating them. Does not replace the PII policy engine.
+        format: gliner
+        quantization: none
+        precision: fp32
+        estimatedDownloadBytes: 1200000000
+        companions:
+          - directory: backbone
+            source: microsoft/mdeberta-v3-base
+            revision: a0484667b22365f84929a935b5e50a51f71f159d
+            include: [config.json, tokenizer_config.json, spm.model, README.md]
 
   - id: openmed-dutch-pii
     category: ner

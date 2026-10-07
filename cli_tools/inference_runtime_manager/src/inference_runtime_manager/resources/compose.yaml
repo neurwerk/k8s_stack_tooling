@@ -370,24 +370,124 @@ services:
       retries: 8
 
   ner-german:
-    <<: *common
+    <<: [*common, *gpu]
     image: ${KSERVE_IMAGE:?Run inference-runtime-manager images and install first}
+    entrypoint:
+      - python3
+      - -c
+      - "import runpy, sys, torch; sys.exit('NER requires a visible CUDA device') if not torch.cuda.is_available() else None; sys.argv = ['huggingfaceserver', *sys.argv[1:]]; runpy.run_module('huggingfaceserver', run_name='__main__')"
     command:
       - --model_name=ner-german
       - --model_dir=/models/active/ner-german
       - --task=token_classification
       - --backend=huggingface
-      - --dtype=float32
+      - --dtype=${NER_GERMAN_DTYPE:-float32}
+      - --return_probabilities
+      - --max_model_len=512
+      - --disable_log_requests
       - --http_port=8080
     ports:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${NER_GERMAN_PORT:-8006}:8080"
     environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       API_KEY: ${NER_GERMAN_API_KEY-}
     healthcheck:
-      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1', 8080), 5); s.close()"]
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/models/ner-german', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  ner-english:
+    <<: [*common, *gpu]
+    image: ${KSERVE_IMAGE:?Run inference-runtime-manager images and install first}
+    entrypoint:
+      - python3
+      - -c
+      - "import runpy, sys, torch; sys.exit('NER requires a visible CUDA device') if not torch.cuda.is_available() else None; sys.argv = ['huggingfaceserver', *sys.argv[1:]]; runpy.run_module('huggingfaceserver', run_name='__main__')"
+    command:
+      - --model_name=ner-english
+      - --model_dir=/models/active/ner-english
+      - --task=token_classification
+      - --backend=huggingface
+      - --dtype=${NER_ENGLISH_DTYPE:-float32}
+      - --return_probabilities
+      - --max_model_len=512
+      - --disable_log_requests
+      - --http_port=8080
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${NER_ENGLISH_PORT:-8008}:8080"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      API_KEY: ${NER_ENGLISH_API_KEY-}
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/models/ner-english', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  ner-german-gliner:
+    <<: [*common, *gpu]
+    image: ${GLINER_IMAGE:?Run inference-runtime-manager images and install first}
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${NER_GERMAN_PORT:-8006}:8080"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      GLINER_MODEL_NAME: ner-german
+      GLINER_MODEL_DIR: /models/active/ner-german
+      GLINER_DTYPE: ${NER_GERMAN_DTYPE:-float32}
+      GLINER_LABELS: ${GLINER_LABELS:-["person","email","phone number","address"]}
+      GLINER_THRESHOLD: ${GLINER_THRESHOLD:-0.5}
+      GLINER_API_KEY: ${NER_GERMAN_API_KEY-}
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  ner-english-gliner:
+    <<: [*common, *gpu]
+    image: ${GLINER_IMAGE:?Run inference-runtime-manager images and install first}
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${NER_ENGLISH_PORT:-8008}:8080"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      GLINER_MODEL_NAME: ner-english
+      GLINER_MODEL_DIR: /models/active/ner-english
+      GLINER_DTYPE: ${NER_ENGLISH_DTYPE:-float32}
+      GLINER_LABELS: ${GLINER_LABELS:-["person","email","phone number","address"]}
+      GLINER_THRESHOLD: ${GLINER_THRESHOLD:-0.5}
+      GLINER_API_KEY: ${NER_ENGLISH_API_KEY-}
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
+  ner-multilingual-gliner:
+    <<: [*common, *gpu]
+    image: ${GLINER_IMAGE:?Run inference-runtime-manager images and install first}
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${NER_MULTILINGUAL_PORT:-8009}:8080"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      GLINER_MODEL_NAME: ner-multilingual
+      GLINER_MODEL_DIR: /models/active/ner-multilingual
+      GLINER_DTYPE: ${NER_MULTILINGUAL_DTYPE:-float32}
+      GLINER_LABELS: ${GLINER_LABELS:-["person","email","phone number","address"]}
+      GLINER_THRESHOLD: ${GLINER_THRESHOLD:-0.5}
+      GLINER_API_KEY: ${NER_MULTILINGUAL_API_KEY-}
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
       interval: 15s
       timeout: 10s
       start_period: 180s

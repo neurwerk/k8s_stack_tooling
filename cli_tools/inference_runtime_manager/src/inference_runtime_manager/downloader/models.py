@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -42,6 +42,28 @@ class ModelMetadata(BaseModel):
     pii_alias: str | None = Field(default=None, alias="piiAlias", pattern=_IDENTIFIER)
 
 
+class ModelCompanion(BaseModel):
+    """Pinned configuration/tokenizer files included in an offline model bundle."""
+
+    directory: str = Field(pattern=_IDENTIFIER)
+    source: str = Field(pattern=_SOURCE)
+    revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    include: list[str] = Field(min_length=1)
+
+    @field_validator("include")
+    @classmethod
+    def exact_safe_files(cls, value: list[str]) -> list[str]:
+        for name in value:
+            path = PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts or any(c in name for c in "*?[]\\"):
+                raise ValueError("Companions must name exact safe relative files")
+            if not name or name != path.as_posix() or name == ".":
+                raise ValueError("Companion file paths must be normalized")
+        if len(value) != len(set(value)):
+            raise ValueError("Duplicate companion files")
+        return value
+
+
 class ModelVariant(BaseModel):
     """Describe one selectable downloadable representation of a catalog model.
 
@@ -65,6 +87,7 @@ class ModelVariant(BaseModel):
     precision: str | None = None
     estimated_download_bytes: int = Field(alias="estimatedDownloadBytes", ge=1)
     include: list[str] = Field(default_factory=list)
+    companions: list[ModelCompanion] = Field(default_factory=list)
     runtime_notes: str = Field(default="", alias="runtimeNotes")
     runtimes: list[
         Literal[
@@ -76,6 +99,7 @@ class ModelVariant(BaseModel):
             "chatterbox",
             "kokoro-onnx",
             "kserve",
+            "gliner",
         ]
     ] = Field(default_factory=list)
     compatibility_notes: str = Field(
@@ -339,6 +363,7 @@ class ArtifactRequest(BaseModel):
     source: str
     revision: str
     include: list[str] = Field(default_factory=list)
+    companions: list[ModelCompanion] = Field(default_factory=list)
 
     @property
     def owner(self) -> str:
@@ -363,6 +388,7 @@ class StoredArtifact(BaseModel):
     revision: str
     files: list[FileChecksum]
     created_at: datetime = Field(alias="createdAt")
+    companions: list[ModelCompanion] = Field(default_factory=list)
 
     @classmethod
     def create(
@@ -379,6 +405,7 @@ class StoredArtifact(BaseModel):
             revision=revision,
             files=files,
             createdAt=datetime.now(UTC),
+            companions=request.companions,
         )
 
     def to_installed(self, path: Path) -> InstalledModel:

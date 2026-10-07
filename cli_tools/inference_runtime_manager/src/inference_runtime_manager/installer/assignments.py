@@ -20,6 +20,8 @@ ALIAS_CATEGORIES = {
     "stt-general": "asr",
     "tts-german": "tts",
     "ner-german": "ner",
+    "ner-english": "ner",
+    "ner-multilingual": "ner",
     "image-generation-general": "image-generation",
     "vad-general": "vad",
 }

@@ -13,6 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from inference_runtime_manager.configuration import (
+    RuntimeConfig,
     WorkstationConfig,
     config_path,
     load_workstation_config,
@@ -116,9 +117,19 @@ CATEGORY_GUIDES = {
         "vlm-general",
     ),
     "ner": (
-        "Named-entity recognition",
-        "Detects entities and potentially identifying information in text.",
+        "German named-entity recognition",
+        "Detects potentially identifying information in German text on the GPU.",
         "ner-german",
+    ),
+    "ner-english": (
+        "English named-entity recognition",
+        "Detects potentially identifying information in English text on the GPU.",
+        "ner-english",
+    ),
+    "ner-multilingual": (
+        "Multilingual named-entity recognition (GLiNER)",
+        "Detects PII and PHI spans in multiple languages using one GPU model.",
+        "ner-multilingual",
     ),
     "image-generation": (
         "Image generation",
@@ -134,6 +145,7 @@ RUNTIME_NAMES = {
     "kokoro": "Kokoro ONNX",
     "chatterbox": "Chatterbox",
     "kserve": "KServe",
+    "gliner": "GLiNER",
 }
 
 TARGET_CONTEXT_PLACEHOLDER = "ai-server"
@@ -369,7 +381,7 @@ def guided_models() -> None:
                 ),
             )
             for key in CATEGORY_GUIDES
-            if key in available_groups
+            if key in available_groups or (key.startswith("ner-") and "ner" in available_groups)
         ],
     ).ask()
     if group is None:
@@ -666,11 +678,15 @@ def configuration_menu() -> None:
                 questionary.Choice("Select model staging storage", value="storage"),
                 questionary.Choice("Set target Docker context", value="target"),
                 questionary.Choice("Set workstation Docker context", value="build"),
+                questionary.Choice("NER precision / Docling GPU memory", value="runtime"),
                 questionary.Choice("Back", value="back"),
             ],
         ).ask()
         if action in (None, "back"):
             return
+        if action == "runtime":
+            runtime_configuration()
+            continue
         if action == "storage":
             value = questionary.path(
                 "Model staging directory:",
@@ -701,6 +717,108 @@ def configuration_menu() -> None:
             configured.build_docker_context = value.strip()
         save_workstation_config(WorkstationConfig.model_validate(configured.model_dump()))
         print("Configuration saved.")
+
+
+def runtime_configuration() -> None:
+    configured = load_workstation_config()
+    settings = DeploymentSettings()
+    options = {
+        "ner_german_dtype": ("German NER precision", "ner-german"),
+        "ner_english_dtype": ("English NER precision", "ner-english"),
+        "ner_multilingual_dtype": ("Multilingual GLiNER precision", "ner-multilingual"),
+        "vllm_granite_gpu_memory_utilization": ("Docling GPU memory fraction", "vlm-documents"),
+        "gliner_threshold": ("GLiNER confidence threshold", "gliner"),
+        "gliner_labels": ("GLiNER entity labels", "gliner"),
+    }
+    table(
+        "Runtime settings",
+        ["Setting", "Effective value"],
+        [[label, str(getattr(settings, name))] for name, (label, _) in options.items()],
+    )
+    print("FP16 uses less memory; verify recognition quality after changing precision.")
+    print("The GPU fraction is a vLLM allocation target, not a hard memory limit.")
+    name = questionary.select(
+        "Change a runtime setting",
+        choices=[questionary.Choice(label, value=name) for name, (label, _) in options.items()]
+        + [questionary.Choice("Back", value="back")],
+    ).ask()
+    if name in (None, "back"):
+        return
+    if name.endswith("dtype"):
+        value = questionary.select(
+            options[name][0],
+            choices=[
+                questionary.Choice("FP16 — recommended after target-GPU checks", value="float16"),
+                questionary.Choice("FP32 — conservative default", value="float32"),
+            ],
+            default=getattr(settings, name),
+        ).ask()
+    elif name == "gliner_labels":
+        value = questionary.text(
+            "GLiNER labels (comma separated, at most 25):",
+            default=", ".join(settings.gliner_labels),
+        ).ask()
+        if value is not None:
+            value = [label.strip() for label in value.split(",")]
+    elif name == "gliner_threshold":
+        value = questionary.text(
+            "GLiNER confidence threshold (0 < value < 1):",
+            default=str(settings.gliner_threshold),
+        ).ask()
+    else:
+        value = questionary.text(
+            "GPU memory fraction (0 < value <= 1; recommended starting point: 0.18):",
+            default=str(getattr(settings, name)),
+        ).ask()
+    if value is None:
+        return
+    previous = configured.model_copy(deep=True)
+    draft = configured.runtime.model_dump()
+    draft[name] = value
+    configured.runtime = RuntimeConfig.model_validate(draft)
+    save_workstation_config(configured)
+    print("Runtime setting saved. Only services using this setting need a restart.")
+    alias = options[name][1]
+    if not questionary.confirm(f"Apply {alias} now (brief downtime)?", default=False).ask():
+        print("Choose Review / apply assignments later to apply the saved setting.")
+        return
+    root = state()
+    assignments = load_deployment(root, settings.docker_context).assignments
+    targets = (
+        [alias]
+        if alias != "gliner"
+        else [
+            name
+            for name, assignment in assignments.items()
+            if assignment.runtime == "gliner" and assignment.enabled
+        ]
+    )
+    targets = [name for name in targets if name in assignments and assignments[name].enabled]
+    if not targets:
+        print("Service is not enabled; the saved setting will be used when activated.")
+        return
+    model_root = storage()
+    try:
+        provision(Docker(DeploymentSettings()), model_root, root, targets)
+    except BaseException:
+        save_workstation_config(previous)
+        for target in targets:
+            assignment = assignments[target]
+            preset = recipe(target, assignment.model_id, assignment.variant_id)
+            Docker(settings).run(
+                "up",
+                "--pull",
+                "never",
+                "-d",
+                "--no-deps",
+                "--force-recreate",
+                "--wait",
+                "--wait-timeout",
+                "300",
+                preset["service"],
+            )
+        print("Previous runtime setting restored.")
+        raise
 
 
 def select_models() -> None:

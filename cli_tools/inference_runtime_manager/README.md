@@ -34,6 +34,18 @@ docker --context ai-server info
 
 ## Workflow
 
+**Configuration → NER precision / Docling GPU memory** sets English and German
+NER precision independently (`float32` or `float16`) and Docling's GPU memory
+fraction. Values are saved in the workstation configuration and override matching
+environment settings. Saving does not restart a service unless you accept the
+apply prompt; otherwise use **Review / apply assignments** later. Failed immediate
+application restores the previous saved settings and recreates the previous recipe.
+FP16 needs recognition checks on the target GPU; the memory fraction is not a hard
+VRAM limit. Neither service settings nor activation automatically evict a reader.
+The menu recommends FP16 after target-GPU checks and a `0.18` Docling starting
+fraction. FP32 and `0.25` remain the unset defaults until live service checks justify
+changing them; lower memory targets must still support the configured context.
+
 1. Choose a stable service alias, shown with a short purpose description, and review its
    saved model, runtime, local artifacts and live target state.
 2. Choose whether to change the alias's runtime, model and compatible variant.
@@ -129,7 +141,9 @@ the endpoint test checks that the service actually responds.
 | `stt-general` | Speaches / Faster-Whisper | 8003 | enabled |
 | `tts-german` | Kokoro ONNX German Martin; Chatterbox fallback | 8004 | Kokoro enabled |
 | `vad-general` | Speaches / packaged Silero VAD | 8005 | enabled |
-| `ner-german` | KServe Hugging Face token classification | 8006 | disabled |
+| `ner-german` | KServe GPU / OpenMed German PII | 8006 | disabled |
+| `ner-english` | KServe GPU / AI4Privacy English PII | 8008 | disabled |
+| `ner-multilingual` | GLiNER GPU / multilingual PII/PHI | 8009 | disabled |
 | `vlm-images` | LightOnOCR; olmOCR Q6_K; Nanonets OCR2 | 8007 | LightOnOCR disabled |
 | `image-generation-general` | catalog only | none | unavailable |
 
@@ -177,7 +191,7 @@ commercial permission explicitly unconfirmed for operator review.
 `uv run inference-runtime-manager test` tests every enabled service. Requests
 run with `docker compose exec` inside the corresponding remote container and use
 that container's loopback port. The workstation does not need direct access to
-ports 8000-8007 and the bearer key is not printed.
+ports 8000-8009 and the bearer key is not printed.
 
 The flow checks health first, then exercises chat/vision, document parsing, TTS,
 STT, VAD or NER as applicable. TTS output can feed the speech checks, or the
@@ -225,6 +239,82 @@ GPU services use `gpus: all` and `NVIDIA_DRIVER_CAPABILITIES=compute,utility`.
 The NVIDIA container runtime cannot enforce hard per-service VRAM reservations
 on a non-MIG Quadro RTX 5000. The manager warns when enabled-service estimates
 exceed 14 GiB but never stops another service automatically.
+
+### English And German NER
+
+Choose **1. Choose and configure a model**, then **German named-entity recognition**
+or **English named-entity recognition**. Each language has its own assignment,
+container and endpoint. Existing German assignments remain valid. Neither service
+is enabled automatically. The manager prepares the pinned KServe GPU runtime on
+the configured workstation Docker context and delivers it to the explicit target.
+The target needs an NVIDIA driver compatible with CUDA 12.8 and NVIDIA Container
+Toolkit; startup rejects a missing CUDA device rather than silently using CPU.
+
+Both recipes default to FP32 and at most 512 tokens per input. Set
+`NER_GERMAN_DTYPE` and `NER_ENGLISH_DTYPE` independently to `float16` only after
+checking finite predictions and recognition behavior on the target GPU. BF16 is
+not offered for the Turing GPU. Initial FP32 VRAM budgets are
+3 GiB for German and 2 GiB for English, including working space; these are estimates,
+not reservations. Check actual free and peak GPU memory alongside existing services
+before enabling both. Do not stop Docling or another service without approval.
+
+Use **2. Test endpoints manually** to check each enabled NER service. The check
+confirms CUDA visibility, two synthetic inputs, finite normalized token probabilities
+and service HTTP timing. It does not establish recognition quality. The endpoints
+are `/v1/models/ner-german:predict` and `/v1/models/ner-english:predict`, accepting
+`{"instances": ["text"]}`. KServe returns per-token class probabilities, not character
+offsets or complete Presidio decisions, and truncates inputs above the token limit.
+A future PII caller must provide tokenizer-aware chunking, class interpretation,
+and coverage checks; this tooling change does not connect PII Engine.
+
+The selected English checkpoint labels private text as `PRIVATE/O`; German has
+individual PII categories. This distinction must be preserved in any future adapter.
+Weights, revisions and license selections stay unchanged. Request-content logging
+is disabled. KServe does **not** enforce the reserved NER API-key settings: keep
+both ports on loopback or a trusted private interface with host-firewall restrictions.
+Do not expose them publicly or assume setting an API key authenticates requests.
+
+### GLiNER Multilingual PII/PHI Alternative
+
+The model linked by [GLiNER-MultiLingual-PII_PHI](https://github.com/dpowale/GLiNER-MultiLingual-PII_PHI)
+is `urchade/gliner_multi_pii-v1`, with Apache-2.0 model weights. The manager uses
+the model directly, not code from that service wrapper. Its pinned MIT-licensed
+`microsoft/mdeberta-v3-base` configuration and tokenizer are downloaded into the
+same checksummed bundle, so the target does not need internet access or a separately
+populated Hugging Face cache. No backbone weights are downloaded.
+
+Choose **Multilingual named-entity recognition (GLiNER)** for one model instance
+serving both languages as `ner-multilingual` on port `8009`. Its precision and
+optional bearer key use `NER_MULTILINGUAL_DTYPE` and `NER_MULTILINGUAL_API_KEY`.
+Selecting this service does not automatically disable existing language services;
+disable their assignments explicitly when replacing them to reclaim GPU memory.
+
+Alternatively, select **GLiNER** as the runtime for either English or German NER, then choose
+**GLiNER Multilingual PII/PHI**. It is an alternative recipe on the same alias and
+port; applying it stops the previous recipe for that alias, not other services.
+The default KServe assignments remain unchanged. Selecting both aliases creates
+two model instances; there is no automatic GPU memory eviction or sharing.
+
+**Configuration → NER precision / Docling GPU memory** also sets GLiNER entity
+labels and the confidence threshold. Labels are a JSON list in `GLINER_LABELS`
+when supplied through the environment; `GLINER_THRESHOLD` defaults to `0.5`.
+All GLiNER recipes use these shared settings and their independent NER dtype.
+The pinned GPU runtime requires CUDA and rejects CPU-offloaded parameters.
+
+GLiNER uses `POST /extract` with `{"text":"..."}` and returns `model` plus
+`entities`, each containing `start`, `end`, `label` and `score`. Offsets are Python
+Unicode character indices; the response does not echo input or entity text. The
+service rejects inputs exceeding 8192 characters, the checkpoint's word limit,
+or 512 encoded tokens including the configured label prompt. Callers must chunk
+long text and preserve coverage; there is no silent truncation. Concurrent work
+returns HTTP 429 rather than creating an unbounded queue. Manual tests are two
+short requests, not a long-running benchmark.
+
+Unlike KServe, this runtime enforces a nonempty API key for its selected NER alias
+as a bearer key. Access logging and interactive API docs are
+disabled; keep the same trusted-private network boundary even when a key is set.
+Thresholds and labels affect recall and must be reviewed before PII enforcement;
+this runtime does not connect to PII Engine or guarantee detection quality.
 
 Granite-Docling uses the immutable Transformers checkpoint and serves model name
 `vlm-documents`. Stored weights remain BF16;
