@@ -258,6 +258,7 @@ def _request_from_selection(catalog: AvailableCatalog, selection: Selection) -> 
         source=variant.source or model.source,
         revision=variant.revision or model.revision,
         include=variant.include,
+        companions=variant.companions,
     )
 
 

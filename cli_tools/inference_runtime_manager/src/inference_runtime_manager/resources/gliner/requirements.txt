@@ -1,0 +1,2 @@
+gliner==0.2.29 --hash=sha256:0c8cfb9f5c2daf7aff329ebb5ab1609052d7ad0aca0ef26049b9476b018b3fde
+pydantic-settings==2.8.1 --hash=sha256:81942d5ac3d905f7f3ee1a70df5dfb62d5569c12f51a5a647defc1c3d9ee2e9c

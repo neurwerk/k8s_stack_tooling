@@ -6,10 +6,34 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class RuntimeConfig(BaseModel):
+    """Saved overrides; unset values retain environment settings and defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+    ner_german_dtype: Literal["float32", "float16"] | None = None
+    ner_english_dtype: Literal["float32", "float16"] | None = None
+    ner_multilingual_dtype: Literal["float32", "float16"] | None = None
+    vllm_granite_gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+    gliner_threshold: float | None = Field(default=None, gt=0, lt=1)
+    gliner_labels: list[str] | None = Field(default=None, min_length=1, max_length=25)
+
+    @field_validator("gliner_labels")
+    @classmethod
+    def valid_labels(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and (
+            len(value) != len(set(value))
+            or any(
+                not label.strip() or label != label.strip() or len(label) > 64 for label in value
+            )
+        ):
+            raise ValueError("GLiNER labels must be unique, nonempty and at most 64 characters")
+        return value
 
 
 class WorkstationConfig(BaseModel):
@@ -20,6 +44,7 @@ class WorkstationConfig(BaseModel):
     hf_home: Path | None = None
     docker_context: str | None = None
     build_docker_context: str | None = None
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
 
 def config_root() -> Path:

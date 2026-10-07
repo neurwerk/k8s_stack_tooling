@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import subprocess
 import tempfile
 import time
@@ -37,6 +38,8 @@ ORDER = [
     "stt-general",
     "vad-general",
     "ner-german",
+    "ner-english",
+    "ner-multilingual",
 ]
 
 
@@ -189,6 +192,69 @@ def chat_completion_text(value: object) -> str:
     if not isinstance(content, str) or not content.strip():
         raise ValueError("Chat response has no text")
     return content.strip()
+
+
+def validate_ner_predictions(value: object, instance_count: int) -> list[list[int]]:
+    """Reject incomplete and non-finite token probabilities, then select class IDs."""
+    if not isinstance(value, dict):
+        raise ValueError("NER response is not an object")
+    predictions = value.get("predictions")
+    if not isinstance(predictions, list) or len(predictions) != instance_count:
+        raise ValueError("NER response must contain one prediction per instance")
+    sequences: list[list[int]] = []
+    for prediction in predictions:
+        if not isinstance(prediction, list) or not prediction:
+            raise ValueError("NER prediction has no token probabilities")
+        classes: list[int] = []
+        for token in prediction:
+            if not isinstance(token, dict) or not token:
+                raise ValueError("NER token has no class probabilities")
+            probabilities: dict[int, float] = {}
+            for label, score in token.items():
+                if not isinstance(label, str) or not label.isascii() or not label.isdecimal():
+                    raise ValueError("NER prediction contains invalid token class IDs")
+                if (
+                    isinstance(score, bool)
+                    or not isinstance(score, int | float)
+                    or not math.isfinite(score)
+                    or not 0 <= score <= 1
+                ):
+                    raise ValueError("NER prediction contains invalid class probabilities")
+                probabilities[int(label)] = float(score)
+            # KServe rounds each probability to four decimals.
+            if abs(sum(probabilities.values()) - 1) > max(0.01, len(probabilities) * 0.0001):
+                raise ValueError("NER token probabilities are not normalized")
+            classes.append(max(probabilities, key=lambda label: probabilities[label]))
+        sequences.append(classes)
+    return sequences
+
+
+def validate_gliner_entities(value: object, text: str, alias: str) -> int:
+    """Validate bounded span responses without treating them as policy decisions."""
+    if not isinstance(value, dict) or value.get("model") != alias:
+        raise ValueError("GLiNER response has an invalid model identity")
+    entities = value.get("entities")
+    if not isinstance(entities, list):
+        raise ValueError("GLiNER response has no entity list")
+    for entity in entities:
+        if not isinstance(entity, dict):
+            raise ValueError("GLiNER entity is malformed")
+        start, end, score = entity.get("start"), entity.get("end"), entity.get("score")
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or not 0 <= start < end <= len(text)
+            or isinstance(score, bool)
+            or not isinstance(score, int | float)
+            or not math.isfinite(score)
+            or not 0 <= score <= 1
+            or not isinstance(entity.get("label"), str)
+            or not entity["label"]
+        ):
+            raise ValueError("GLiNER entity has invalid offsets, label or confidence")
+    return len(entities)
 
 
 def show_failure_logs(docker: Docker, service: str) -> None:
@@ -513,17 +579,68 @@ def _test_service(
             )
         ):
             raise ValueError("VAD response has no timestamp list")
-    elif alias == "ner-german":
+    elif alias in {"ner-german", "ner-english", "ner-multilingual"}:
+        device = subprocess.run(
+            docker.command
+            + [
+                "exec",
+                "-T",
+                preset["service"],
+                "python3",
+                "-c",
+                "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; "
+                "print(torch.cuda.get_device_name(0))",
+            ],
+            env=docker.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        print(f"NER CUDA device: {device.stdout.strip()}")
+        instances = (
+            ["Anna Beispiel wohnt in Berlin.", "E-Mail: anna@example.org"]
+            if alias == "ner-german"
+            else ["Jane Example lives in London.", "Email: jane@example.org"]
+        )
+        if alias == "ner-multilingual":
+            instances = [
+                "Contact Jane Example at jane@example.org.",
+                "Kontakt: Anna Beispiel, anna@example.org.",
+            ]
+        if preset["runtime"] == "gliner":
+            for text in instances:
+                timing: dict[str, float] = {}
+                value = json.loads(
+                    request(
+                        docker,
+                        alias,
+                        "/extract",
+                        payload={"text": text},
+                        timing=timing,
+                    )
+                )
+                count = validate_gliner_entities(value, text, alias)
+                print(
+                    f"GLiNER returned {count} spans; service HTTP {timing['service_http_ms']:.0f} ms"
+                )
+            print(f"PASS {alias} — GLiNER span contract; review recognition quality manually.")
+            return speech
+        timing: dict[str, float] = {}
         value = json.loads(
             request(
                 docker,
                 alias,
-                "/v1/models/ner-german:predict",
-                payload={"instances": ["Anna Beispiel wohnt in Berlin."]},
+                f"/v1/models/{alias}:predict",
+                payload={"instances": instances},
+                timing=timing,
             )
         )
-        if not isinstance(value, dict) or not isinstance(value.get("predictions"), list):
-            raise ValueError("NER response has no predictions list")
+        sequences = validate_ner_predictions(value, len(instances))
+        print(
+            f"NER returned {len(sequences)} instances; token counts: {[len(s) for s in sequences]}"
+        )
+        print(f"NER service HTTP time: {timing['service_http_ms']:.0f} ms")
     print(f"PASS {alias} — assigned model: {model_label(preset)}; review output quality manually.")
     return speech
 
