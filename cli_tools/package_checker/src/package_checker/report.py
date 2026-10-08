@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
@@ -17,7 +18,7 @@ class PackageReport:
 
     Args:
         package: GHCR package name.
-        channel: Optional package channel such as `cpu` or `cu124`.
+        channel: Reserved optional channel field, retained for report compatibility.
         version: Newest non-`latest` tag, or a fallback label.
         published_at: Time this package version was published.
         digest: Image digest reported by GitHub.
@@ -49,11 +50,11 @@ def create_report(
     Returns:
         Report record for the package.
     """
-    latest = newest_version(versions, package.tag_suffix)
+    latest = newest_version(versions, package.stable_tags_only)
     return PackageReport(
         package=package.package_name,
-        channel=package.channel,
-        version=version_label(latest, package.tag_suffix),
+        channel=None,
+        version=version_label(latest, package.stable_tags_only),
         published_at=latest.created_at.isoformat(),
         digest=latest.name,
         build_status=workflow_run.status if workflow_run is not None else "not building",
@@ -81,7 +82,7 @@ def failed_report(
     """
     return PackageReport(
         package=package.package_name,
-        channel=package.channel,
+        channel=None,
         version=None,
         published_at=None,
         digest=None,
@@ -97,66 +98,69 @@ def failed_report(
     )
 
 
-def newest_version(versions: list[PackageVersion], tag_suffix: str | None = None) -> PackageVersion:
+def newest_version(
+    versions: list[PackageVersion], stable_tags_only: bool = False
+) -> PackageVersion:
     """Select the most recently published version.
 
     Args:
         versions: Versions returned by GitHub Packages.
-        tag_suffix: Optional suffix selecting one package channel.
+        stable_tags_only: Require full plain X.Y.Z tags without fallback aliases.
 
     Returns:
         Version with the newest creation timestamp.
 
     Raises:
-        GitHubApiError: If GitHub has no active versions for the package.
+        GitHubApiError: If GitHub has no eligible active versions for the package.
     """
-    immutable = [version for version in versions if _immutable_tags(version, tag_suffix)]
+    immutable = [version for version in versions if _immutable_tags(version, stable_tags_only)]
     if immutable:
         return max(immutable, key=lambda version: version.created_at)
-    matching = [version for version in versions if _matching_tags(version, tag_suffix)]
+    matching = [version for version in versions if _matching_tags(version, stable_tags_only)]
     if matching:
         return max(matching, key=lambda version: version.created_at)
-    if tag_suffix is None and versions:
+    if not stable_tags_only and versions:
         return max(versions, key=lambda version: version.created_at)
     raise GitHubApiError(_NO_ACTIVE_VERSIONS_MESSAGE)
 
 
-def version_label(version: PackageVersion, tag_suffix: str | None = None) -> str:
+def version_label(version: PackageVersion, stable_tags_only: bool = False) -> str:
     """Choose a human-readable tag for a package version.
 
     Args:
         version: Package version whose tags should be displayed.
-        tag_suffix: Optional suffix selecting one package channel.
+        stable_tags_only: Restrict the label to full plain X.Y.Z tags.
 
     Returns:
         First non-`latest` tag, `latest`, or `untagged`.
     """
-    immutable = _immutable_tags(version, tag_suffix)
+    immutable = _immutable_tags(version, stable_tags_only)
     if immutable:
         return max(immutable, key=lambda tag: (tag.count("."), len(tag), tag))
-    matching = _matching_tags(version, tag_suffix)
+    matching = _matching_tags(version, stable_tags_only)
     if matching:
         return matching[0]
     return "untagged"
 
 
-def _matching_tags(version: PackageVersion, tag_suffix: str | None) -> list[str]:
-    """Return tags belonging to the selected package channel."""
+def _matching_tags(version: PackageVersion, stable_tags_only: bool) -> list[str]:
+    """Return tags allowed by the package's version policy."""
     tags = version.metadata.container.tags
-    if tag_suffix is None:
+    if not stable_tags_only:
         return list(tags)
-    return [tag for tag in tags if tag.endswith(tag_suffix)]
+    return [tag for tag in tags if _STABLE_TAG.fullmatch(tag)]
 
 
-def _immutable_tags(version: PackageVersion, tag_suffix: str | None) -> list[str]:
-    """Return channel tags that are not moving `latest` aliases."""
+def _immutable_tags(version: PackageVersion, stable_tags_only: bool) -> list[str]:
+    """Return eligible tags that are not moving `latest` aliases."""
     return [
         tag
-        for tag in _matching_tags(version, tag_suffix)
+        for tag in _matching_tags(version, stable_tags_only)
         if tag != "latest" and not tag.startswith("latest-")
     ]
 
 
+_STABLE_TAG = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 _NO_ACTIVE_VERSIONS_MESSAGE = "GitHub reported no active package versions"
 
 

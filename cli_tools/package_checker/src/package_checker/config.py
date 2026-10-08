@@ -9,20 +9,17 @@ from typing import Literal
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PackageConfigErrorReason = Literal["package", "repository", "pair", "channel", "suffix"]
+PackageConfigErrorReason = Literal["package", "repository"]
 
 
 class InvalidPackageConfigError(ValueError):
-    """Indicate that a monitored package violates naming or channel rules."""
+    """Indicate that a monitored package violates naming rules."""
 
     def __init__(self, reason: PackageConfigErrorReason) -> None:
         """Initialize a stable validation message for one configuration field."""
         messages = {
             "package": "package name does not follow the container naming convention",
             "repository": "repository does not follow the source naming convention",
-            "pair": "package channel and tag suffix must be configured together",
-            "channel": "package channel is invalid",
-            "suffix": "package tag suffix must match its channel",
         }
         super().__init__(messages[reason])
 
@@ -34,14 +31,12 @@ class PackageConfig:
     Args:
         package_name: Organization-level GitHub Container Registry package name.
         repository: GitHub repository in `owner/name` format.
-        channel: Optional image channel displayed separately in reports.
-        tag_suffix: Tag suffix selecting one channel from a shared package.
+        stable_tags_only: Require full plain X.Y.Z tags without fallback aliases.
     """
 
     package_name: str
     repository: str
-    channel: str | None = None
-    tag_suffix: str | None = None
+    stable_tags_only: bool = False
 
     def __post_init__(self) -> None:
         """Reject package and repository names outside project conventions."""
@@ -49,12 +44,6 @@ class PackageConfig:
             raise InvalidPackageConfigError("package")
         if _REPOSITORY.fullmatch(self.repository) is None:
             raise InvalidPackageConfigError("repository")
-        if (self.channel is None) != (self.tag_suffix is None):
-            raise InvalidPackageConfigError("pair")
-        if self.channel is not None and _CHANNEL.fullmatch(self.channel) is None:
-            raise InvalidPackageConfigError("channel")
-        if self.tag_suffix is not None and self.tag_suffix != f"-{self.channel}":
-            raise InvalidPackageConfigError("suffix")
 
 
 class InvalidGitHubCredentialsError(ValueError):
@@ -102,14 +91,12 @@ class Settings(BaseSettings):
 
 _PACKAGE_NAME = re.compile(r"^k8s-stack-[a-z0-9]+(?:-[a-z0-9]+)*$")
 _REPOSITORY = re.compile(r"^neurwerk/k8s_stack_[a-z0-9_]+$")
-_CHANNEL = re.compile(r"^[a-z0-9]+$")
 
 PACKAGES: tuple[PackageConfig, ...] = (
     PackageConfig("k8s-stack-studio-api", "neurwerk/k8s_stack_studio"),
     PackageConfig("k8s-stack-studio-web", "neurwerk/k8s_stack_studio"),
     PackageConfig("k8s-stack-agentgateway-extproc", "neurwerk/k8s_stack_agentgateway_extproc"),
-    PackageConfig("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", "cpu", "-cpu"),
-    PackageConfig("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", "cu124", "-cu124"),
+    PackageConfig("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", stable_tags_only=True),
     PackageConfig(
         "k8s-stack-keycloak-api-key-bridge", "neurwerk/k8s_stack_keycloak_api_key_bridge"
     ),

@@ -29,7 +29,6 @@ def test_available_packages_are_registered() -> None:
         ("k8s-stack-studio-web", "neurwerk/k8s_stack_studio"),
         ("k8s-stack-agentgateway-extproc", "neurwerk/k8s_stack_agentgateway_extproc"),
         ("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine"),
-        ("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine"),
         (
             "k8s-stack-keycloak-api-key-bridge",
             "neurwerk/k8s_stack_keycloak_api_key_bridge",
