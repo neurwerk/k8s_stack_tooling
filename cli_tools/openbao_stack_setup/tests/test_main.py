@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from kubernetes.client.exceptions import ApiException
 
+from openbao_stack_setup.client import OpenBaoError
 from openbao_stack_setup.cluster import Cluster, ClusterError, KubernetesApiEndpoint, StackIdentity
 from openbao_stack_setup.custody import CustodianKey, CustodyPaths
 from openbao_stack_setup.main import (
@@ -458,6 +459,7 @@ def test_preflight_reports_identity(capsys: pytest.CaptureFixture[str]) -> None:
     cluster = MagicMock()
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.require_bootstrap_prerequisites.return_value = False
+    cluster.studio_mcp_ids.return_value = ("brave",)
     cluster.validate_kubernetes_api_endpoint.return_value = KubernetesApiEndpoint(
         "172.20.1.202", 6443
     )
@@ -466,6 +468,7 @@ def test_preflight_reports_identity(capsys: pytest.CaptureFixture[str]) -> None:
     output = capsys.readouterr().out
     assert "client=client cluster=cluster context=ctx" in output
     assert "SMTP credentials required=False" in output
+    assert "Studio MCP shared-key catalog selected=True paths=1" in output
     cluster.require_bootstrap_prerequisites.assert_called_once_with()
     cluster.validate_kubernetes_api_endpoint.assert_called_once_with()
 
@@ -559,6 +562,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         True,
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
+        cluster.studio_mcp_ids.return_value,
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -600,6 +604,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         True,
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
+        cluster.studio_mcp_ids.return_value,
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -654,6 +659,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         False,
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
+        cluster.studio_mcp_ids.return_value,
     )
 
 
@@ -957,6 +963,7 @@ def test_seed_finish_and_root_revocation(
             return_value=(kit(), {"keycloak": "keycloak-password"}),
         ),
         patch("openbao_stack_setup.main.seed_bootstrap", side_effect=seed),
+        patch("openbao_stack_setup.main.reconcile_mcp", side_effect=record("mcp")) as mcp,
         patch("openbao_stack_setup.main.with_checkpoint", side_effect=[seeded, complete]),
         patch("openbao_stack_setup.main.update") as update,
         patch("openbao_stack_setup.main._verify_secret_operator", side_effect=record("verify")),
@@ -981,10 +988,12 @@ def test_seed_finish_and_root_revocation(
             tmp_path / "recovery",
             True,
             docling_enabled=True,
+            mcp_ids=("brave",),
         )
     assert update.call_count == 2
     assert events == [
         "seed",
+        "mcp",
         "verify",
         "revoke-self",
         "stores",
@@ -996,6 +1005,7 @@ def test_seed_finish_and_root_revocation(
     cluster.active_directory_required.assert_not_called()
     root.revoke_accessor.assert_called_once_with("root")
     root.revoke_self.assert_called_once_with()
+    mcp.assert_called_once_with(root, ("brave",))
     output = capsys.readouterr().out
     assert "this takes approximately 2 minutes" in output
     assert "this usually takes a few minutes" in output
@@ -1142,6 +1152,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     cluster.forgejo_enabled.return_value = forgejo_enabled
     cluster.wireguard_enabled.return_value = True
     cluster.docling_enabled.return_value = True
+    cluster.studio_mcp_ids.return_value = ("brave",)
     api = MagicMock()
     api.create_recovery_root_token.return_value = "temporary"
     root = MagicMock()
@@ -1163,6 +1174,10 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         patch("openbao_stack_setup.main._openbao", return_value=opened(api)),
         patch("openbao_stack_setup.main.OpenBaoClient", return_value=root),
         patch("openbao_stack_setup.main.reconcile_openbao", return_value=report) as reconcile,
+        patch(
+            "openbao_stack_setup.main.reconcile_mcp",
+            side_effect=lambda *_args: events.append("mcp"),
+        ) as mcp,
         patch("openbao_stack_setup.main._verify_secret_operator"),
         patch("openbao_stack_setup.main._revoke_other_root_tokens"),
         patch(
@@ -1191,7 +1206,8 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         dify_enabled=cluster.dify_enabled.return_value,
         contextforge_admin_email=cluster.contextforge_admin_email.return_value,
     )
-    assert events == (["token"] if forgejo_enabled else []) + ["revoke", "converge"]
+    mcp.assert_called_once_with(root, ("brave",))
+    assert events == ["mcp"] + (["token"] if forgejo_enabled else []) + ["revoke", "converge"]
     if forgejo_enabled:
         prepare_token.assert_called_once_with(root, "client", "cluster", "namespace", rotate=True)
         assert cluster.require_contextforge_stopped.call_count == 2
@@ -1223,6 +1239,50 @@ def test_rotation_refuses_running_application_before_custody_or_openbao(tmp_path
         )
     custody.assert_not_called()
     openbao.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["bootstrap", "reconcile"])
+def test_invalid_mcp_selection_stops_before_confirmation_or_custody(command: str) -> None:
+    cluster = MagicMock()
+    cluster.studio_mcp_ids.side_effect = ClusterError("Invalid Studio MCP credential catalog")
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main._confirm") as confirm,
+        patch("openbao_stack_setup.main.prepare_custody_paths") as custody,
+        patch("openbao_stack_setup.main._openbao") as openbao,
+        pytest.raises(ClusterError, match="Invalid Studio MCP"),
+    ):
+        if command == "bootstrap":
+            _bootstrap("ctx", "client", None)
+        else:
+            _reconcile("ctx", "client", None, [Path("one"), Path("two")])
+    confirm.assert_not_called()
+    custody.assert_not_called()
+    openbao.assert_not_called()
+
+
+def test_mcp_failure_revokes_bootstrap_root_and_stops_convergence(tmp_path: Path) -> None:
+    root = MagicMock()
+    with (
+        patch("openbao_stack_setup.main.OpenBaoClient", return_value=root),
+        patch("openbao_stack_setup.main.reconcile_openbao"),
+        patch("openbao_stack_setup.main.reconcile_mcp", side_effect=OpenBaoError("HTTP 400")),
+        patch("openbao_stack_setup.main._converge_runtime") as converge,
+        patch("openbao_stack_setup.main.update") as update,
+        pytest.raises(OpenBaoError, match="HTTP 400"),
+    ):
+        _seed_and_finish(
+            MagicMock(),
+            MagicMock(),
+            "root",
+            kit("seeded"),
+            tmp_path / "unused",
+            False,
+            mcp_ids=("brave",),
+        )
+    root.revoke_self.assert_called_once_with()
+    converge.assert_not_called()
+    update.assert_not_called()
 
 
 def test_reconcile_requires_complete_bootstrap(tmp_path: Path) -> None:

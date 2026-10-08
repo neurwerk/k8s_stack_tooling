@@ -15,6 +15,9 @@ import kubernetes.config
 import yaml
 from kubernetes.client.exceptions import ApiException
 
+from openbao_stack_setup.client import OpenBaoError
+from openbao_stack_setup.mcp import shared_ids
+
 
 class ClusterError(RuntimeError):
     """Raised for a redacted Kubernetes API failure or unsafe cluster state."""
@@ -299,6 +302,28 @@ class Cluster:
                 "ContextForge token rotation requires its HelmRelease suspended, "
                 "every Deployment scaled to zero, and all active Pods gone"
             )
+
+    def studio_mcp_ids(self) -> tuple[str, ...] | None:
+        """Select shared credentials from the chart's fixed, non-secret catalog."""
+        try:
+            config_map = self.core.read_namespaced_config_map(
+                "infra-agentgateway-mcp-catalog", "infra-agentgateway"
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise ClusterError(f"Approved MCP catalog is unavailable: HTTP {exc.status}") from None
+        data = config_map.data or {}
+        if data.get("studioSetup", "false") == "false":
+            return None
+        if data.get("studioSetup") != "true":
+            raise ClusterError("Invalid Studio MCP setup selector")
+        if self.contextforge_admin_email() is None:
+            raise ClusterError("Studio MCP setup requires selected ContextForge")
+        try:
+            return shared_ids(json.loads(data.get("studio.json", "")))
+        except (TypeError, ValueError, OpenBaoError):
+            raise ClusterError("Invalid Studio MCP credential catalog") from None
 
     def docling_enabled(self) -> bool:
         """Return whether either Docling inference mode is selected."""

@@ -65,6 +65,7 @@ from openbao_stack_setup.custody import (
     validate_package_set,
     write_custodian_package,
 )
+from openbao_stack_setup.mcp import reconcile_mcp
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
 from openbao_stack_setup.reconcile import ReconciliationIdentity, reconcile_openbao
 from openbao_stack_setup.recovery import (
@@ -191,6 +192,7 @@ def _preflight(context: str, client: str) -> None:
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
     contextforge_admin_email = cluster.contextforge_admin_email()
+    mcp_ids = cluster.studio_mcp_ids()
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(
         "Preflight passed for "
@@ -203,6 +205,9 @@ def _preflight(context: str, client: str) -> None:
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Dify credential catalog selected={dify_enabled}")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
+    print(
+        f"Studio MCP shared-key catalog selected={mcp_ids is not None} paths={len(mcp_ids or ())}"
+    )
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
     print("Verify K3s --secrets-encryption on the control-plane node before bootstrap.")
 
@@ -222,6 +227,7 @@ def _bootstrap(
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
     contextforge_admin_email = cluster.contextforge_admin_email()
+    mcp_ids = cluster.studio_mcp_ids()
     _confirm(context, client, "Bootstrap OpenBao")
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
@@ -287,6 +293,7 @@ def _bootstrap(
                 docling_enabled,
                 dify_enabled,
                 contextforge_admin_email,
+                mcp_ids,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -312,6 +319,7 @@ def _bootstrap(
                 docling_enabled,
                 dify_enabled,
                 contextforge_admin_email,
+                mcp_ids,
             )
             return
         if kit.checkpoint == "complete":
@@ -331,6 +339,7 @@ def _bootstrap(
             docling_enabled,
             dify_enabled,
             contextforge_admin_email,
+            mcp_ids,
         )
 
 
@@ -346,6 +355,7 @@ def _seed_and_finish(
     docling_enabled: bool = False,
     dify_enabled: bool = False,
     contextforge_admin_email: str | None = None,
+    mcp_ids: tuple[str, ...] | None = None,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -394,6 +404,7 @@ def _seed_and_finish(
                 f"internal_records={reconciled.internal_records_changed} "
                 f"internal_fields_added={reconciled.internal_fields_added}"
             )
+        _prepare_mcp_credentials(root, mcp_ids)
         if contextforge_admin_email is not None:
             _prepare_contextforge_token(root, kit.client, kit.cluster_id, kit.namespace_uid)
         print("Verifying restricted secret-operator access and revoking other root tokens...")
@@ -435,6 +446,7 @@ def _reconcile(
         if contextforge_admin_email is None:
             raise SetupError("ContextForge must be selected before token rotation")
         cluster.require_contextforge_stopped()
+    mcp_ids = cluster.studio_mcp_ids()
     _confirm(context, client, "Reconcile OpenBao", confirmation)
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -463,6 +475,7 @@ def _reconcile(
                 dify_enabled=dify_enabled,
                 contextforge_admin_email=contextforge_admin_email,
             )
+            _prepare_mcp_credentials(root, mcp_ids)
             if contextforge_admin_email is not None:
                 if rotate_contextforge_token:
                     cluster.require_contextforge_stopped()
@@ -512,6 +525,15 @@ def _prepare_contextforge_token(
     if ttl <= ROTATE_BEFORE_SECONDS:
         print(
             "Schedule stopped two-custodian token rotation now; expiry blocks native OAuth access."
+        )
+
+
+def _prepare_mcp_credentials(root: OpenBaoClient, identities: tuple[str, ...] | None) -> None:
+    if identities is not None:
+        created = reconcile_mcp(root, identities)
+        print(
+            f"Prepared Studio MCP shared credentials: selected_paths={len(identities)} "
+            f"initialized_records={created}"
         )
 
 
@@ -618,6 +640,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     docling_enabled = cluster.docling_enabled()
     dify_enabled = cluster.dify_enabled()
     contextforge_admin_email = cluster.contextforge_admin_email()
+    mcp_ids = cluster.studio_mcp_ids()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
     checkpoint = _bound_kit(paths.seal_file, identity).checkpoint
     with _openbao(cluster) as api:
@@ -628,6 +651,9 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Dify credential catalog selected={dify_enabled}")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
+    print(
+        f"Studio MCP shared-key catalog selected={mcp_ids is not None} paths={len(mcp_ids or ())}"
+    )
 
 
 def _verify_recovery(
