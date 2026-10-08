@@ -7,6 +7,42 @@ files.
 
 ## Setup
 
+### Studio Shared MCP Credentials (0.2.27 source)
+
+Stage the compatible AgentGateway chart catalog with `mcp.studioSetup.enabled: true`
+and select ContextForge before the normal authorized bootstrap or two-custodian
+`reconcile`. Selection reads only
+`infra-agentgateway/infra-agentgateway-mcp-catalog`: `studioSetup: "true"` and
+the `studio.json` array. Only entries with credential owner `shared` and method
+`upstream-env` or `gateway-header` select keys; individual connections, including
+GitHub OAuth, and no-credential entries are excluded. Invalid selection fails
+before confirmation or custody access. `preflight` and `status` report selection
+and path count, not credential or workload health.
+
+The tool initializes missing `secret/data/mcp/shared/<id>` KV2 records with
+`apiKey: ""`, `version: "initial"`, `operationId: ""`, and `kvVersion: 1`, using
+CAS=0. Existing records must match the schema and their actual KV version;
+Studio updates pair a canonical UUID `operationId` with its 32-hex `version`.
+Valid existing records, including Studio-entered keys and later blank removals,
+are retained without writes. Legacy provider credentials are never copied.
+The clean cutover/reset is a separately authorized operator step.
+
+The `studio-mcp` role binds only `frontend-studio/studio-mcp`, audience `openbao`,
+with read/create/update on the selected exact data paths. `mcp-shared-delivery`
+binds only `infra-agentgateway/mcp-shared-delivery`, audience `openbao`, with
+read-only access to the same paths plus self-token lookup/revocation required by
+ESO. Both omit the default policy and limit tokens to five minutes. Each selected
+run replaces these policies; an enabled empty shared selection denies shared-key
+access. Missing/disabled selection performs no MCP work and does not revoke
+previous access.
+
+Base must stage the matching service accounts, ESO delivery, and OpenBao TLS/network
+access. The CLI prepares records and policies during its normal privileged phase;
+normal root revocation and infrastructure convergence follow. Studio owns later
+key entry/removal through CAS. Existing selected ContextForge token verification
+and full-catalog prerequisites still apply. Pin the reviewed standalone CLI source;
+this capability is not part of the root Tooling image.
+
 ### Staged ContextForge Catalog (Source Only)
 
 The optional selector is `contextforge.enabled: true` with an explicit
