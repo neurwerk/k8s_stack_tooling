@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from package_checker.config import PackageConfig
+from package_checker.config import PACKAGES, PackageConfig
 from package_checker.github import GitHubApiError
 from package_checker.models import ContainerMetadata, PackageMetadata, PackageVersion, WorkflowRun
 from package_checker.report import (
@@ -61,14 +61,56 @@ def test_newest_version_prefers_immutable_release_over_newer_latest() -> None:
     assert newest_version([release, moving]) == release
 
 
-def test_pii_channels_are_selected_independently() -> None:
-    created_at = datetime(2026, 8, 1, tzinfo=UTC)
-    cpu = make_version(["0.1.0-cpu", "0.1-cpu"], created_at)
-    cuda = make_version(["0.1.0-cu124", "0.1-cu124"], created_at)
+def test_newest_version_retains_latest_then_untagged_fallback() -> None:
+    moving = make_version(["latest"], datetime(2026, 8, 1, tzinfo=UTC))
+    untagged = make_version([], datetime(2026, 8, 2, tzinfo=UTC))
 
-    assert newest_version([cpu, cuda], "-cpu") == cpu
-    assert newest_version([cpu, cuda], "-cu124") == cuda
-    assert version_label(cpu, "-cpu") == "0.1.0-cpu"
+    assert newest_version([moving, untagged]) == moving
+    assert newest_version([untagged]) == untagged
+
+
+def test_pii_report_ignores_later_suffixed_publications() -> None:
+    package = next(
+        package for package in PACKAGES if package.package_name == "k8s-stack-pii-engine"
+    )
+    older = make_version(["0.1.0"], datetime(2026, 8, 1, tzinfo=UTC))
+    release = make_version(["0.2.0", "latest", "9.9.9-custom"], datetime(2026, 8, 2, tzinfo=UTC))
+    later = make_version(["0.1.0-custom", "0.1.0-preview"], datetime(2026, 8, 3, tzinfo=UTC))
+
+    report = create_report(package, [older, release, later], None)
+
+    assert report.version == "0.2.0"
+    assert report.published_at == release.created_at.isoformat()
+    assert report.channel is None
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["0.1.0-custom", "0.1.0-preview"],
+        ["latest"],
+        [],
+        ["0.2", "v0.2.0", "0.2.0-rc.1", "0.2.0+build", "00.2.0", "0.2.0\n"],
+    ],
+)
+def test_pii_report_rejects_versions_without_plain_stable_tags(tags: list[str]) -> None:
+    package = next(
+        package for package in PACKAGES if package.package_name == "k8s-stack-pii-engine"
+    )
+    version = make_version(tags, datetime(2026, 8, 1, tzinfo=UTC))
+
+    with pytest.raises(GitHubApiError, match="no active package versions"):
+        create_report(package, [version], None)
+
+
+def test_dify_report_retains_suffixed_release_tag() -> None:
+    package = next(
+        package for package in PACKAGES if package.package_name == "k8s-stack-addon-dify-api"
+    )
+    release = make_version(["1.17.1-kc-v1"], datetime(2026, 8, 1, tzinfo=UTC))
+    moving = make_version(["latest"], datetime(2026, 8, 2, tzinfo=UTC))
+
+    assert create_report(package, [release, moving], None).version == "1.17.1-kc-v1"
 
 
 def test_renderers_include_package_status() -> None:

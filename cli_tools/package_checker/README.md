@@ -33,17 +33,23 @@ the package lookup itself succeeded.
 
 Build state is derived from these source repositories:
 
-| Package | Channel | Repository |
-| --- | --- | --- |
-| `k8s-stack-studio-api` | — | `neurwerk/k8s_stack_studio` |
-| `k8s-stack-studio-web` | — | `neurwerk/k8s_stack_studio` |
-| `k8s-stack-agentgateway-extproc` | — | `neurwerk/k8s_stack_agentgateway_extproc` |
-| `k8s-stack-pii-engine` | `cpu` | `neurwerk/k8s_stack_pii_engine` |
-| `k8s-stack-pii-engine` | `cu124` | `neurwerk/k8s_stack_pii_engine` |
-| `k8s-stack-keycloak-api-key-bridge` | — | `neurwerk/k8s_stack_keycloak_api_key_bridge` |
-| `k8s-stack-addon-dify-api` | — | `neurwerk/k8s_stack_addon_dify` |
-| `k8s-stack-tooling` | — | `neurwerk/k8s_stack_tooling` |
-| `k8s-stack-addon-dify-web` | — | `neurwerk/k8s_stack_addon_dify` |
+| Package | Repository |
+| --- | --- |
+| `k8s-stack-studio-api` | `neurwerk/k8s_stack_studio` |
+| `k8s-stack-studio-web` | `neurwerk/k8s_stack_studio` |
+| `k8s-stack-agentgateway-extproc` | `neurwerk/k8s_stack_agentgateway_extproc` |
+| `k8s-stack-pii-engine` | `neurwerk/k8s_stack_pii_engine` |
+| `k8s-stack-keycloak-api-key-bridge` | `neurwerk/k8s_stack_keycloak_api_key_bridge` |
+| `k8s-stack-addon-dify-api` | `neurwerk/k8s_stack_addon_dify` |
+| `k8s-stack-tooling` | `neurwerk/k8s_stack_tooling` |
+| `k8s-stack-addon-dify-web` | `neurwerk/k8s_stack_addon_dify` |
+
+PII Engine is reported once as `ghcr.io/neurwerk/k8s-stack-pii-engine:<version>`.
+Only full plain stable `X.Y.Z` tags are eligible; the newest publication with such
+a tag wins. If none exists, the lookup remains an error rather than falling back
+to a suffixed tag, `latest`, or an untagged version. Other packages retain their
+existing tag selection and fallback behavior. The JSON `channel` field remains
+present as `null` for compatibility.
 
 The inventory tracks source packages, not the images pinned by Base charts or
 historical signed releases. Dify API and Web are separate packages owned by the

@@ -9,6 +9,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from package_checker import main
+from package_checker.config import PackageConfig
 from package_checker.github import GitHubApiError
 from package_checker.models import ContainerMetadata, PackageMetadata, PackageVersion
 
@@ -71,6 +72,37 @@ def test_main_exits_for_invalid_settings(monkeypatch: pytest.MonkeyPatch) -> Non
         main.main([])
 
 
+def test_main_reports_missing_plain_pii_version_and_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = Mock(github_pat=SecretStr("test-token"))
+    client = Mock()
+    client.__enter__ = Mock(return_value=client)
+    client.__exit__ = Mock(return_value=None)
+    client.get_active_workflow_run.return_value = None
+    version = package_version()
+    version.metadata.container.tags = ["0.1.0-custom", "latest"]
+    client.list_package_versions.return_value = [version]
+    monkeypatch.setattr(main, "Settings", Mock(return_value=settings))
+    monkeypatch.setattr(main, "GitHubClient", Mock(return_value=client))
+    monkeypatch.setattr(
+        main,
+        "PACKAGES",
+        (
+            PackageConfig(
+                "k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", stable_tags_only=True
+            ),
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        main.main(["--json"])
+
+    output = capsys.readouterr().out
+    assert '"version": null' in output
+    assert '"error": "GitHub reported no active package versions"' in output
+
+
 def package_version() -> PackageVersion:
     created_at = datetime(2026, 8, 12, tzinfo=UTC)
     return PackageVersion(
@@ -83,10 +115,7 @@ def package_version() -> PackageVersion:
 
 
 def package_versions(package_name: str) -> list[PackageVersion]:
-    version = package_version()
-    if package_name == "k8s-stack-pii-engine":
-        version.metadata.container.tags = ["1.2.3-cpu", "1.2.3-cu124"]
-    return [version]
+    return [package_version()]
 
 
 def invalid_settings_error() -> Exception:
