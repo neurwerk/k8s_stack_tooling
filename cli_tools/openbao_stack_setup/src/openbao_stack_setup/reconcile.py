@@ -23,6 +23,7 @@ from openbao_stack_setup.credentials import (
     reconcile_internal_credentials,
 )
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS
+from openbao_stack_setup.rejection_debug import reconcile_rejection_debug
 
 STATE_SCHEMA_VERSION = 1
 CURRENT_RECONCILIATION_VERSION = 4
@@ -66,6 +67,7 @@ def reconcile_openbao(
     docling_enabled: bool = False,
     dify_enabled: bool = False,
     contextforge_admin_email: str | None = None,
+    rejection_debug_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -117,6 +119,7 @@ def reconcile_openbao(
         dify_enabled=dify_enabled,
         contextforge_admin_email=contextforge_admin_email,
     )
+    debug = reconcile_rejection_debug(client, enabled=rejection_debug_enabled)
 
     if state.applied_version < CURRENT_RECONCILIATION_VERSION:
         client.write_secret(
@@ -128,8 +131,8 @@ def reconcile_openbao(
         state.applied_version,
         CURRENT_RECONCILIATION_VERSION,
         replicated,
-        len(internal.changed_paths),
-        internal.added_fields,
+        len(set(internal.changed_paths) | set(debug.changed_paths)),
+        internal.added_fields + debug.added_fields,
     )
 
 

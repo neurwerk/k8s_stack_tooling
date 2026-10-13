@@ -38,6 +38,8 @@ from openbao_stack_setup.catalog import (
     FORGEJO_EXTERNAL_SECRETS,
     FORGEJO_SECRET_STORE,
     PROVIDER_REFRESH_TARGETS,
+    REJECTION_DEBUG_EXTERNAL_SECRETS,
+    REJECTION_DEBUG_SECRET_STORE,
     WIREGUARD_EXTERNAL_SECRET,
     WIREGUARD_SECRET_STORE,
     HelmReleaseTarget,
@@ -119,6 +121,11 @@ def _arguments() -> argparse.ArgumentParser:
     reconcile.add_argument("--custodian-package", action="append", type=Path, required=True)
     reconcile.add_argument("--confirm", metavar="CLIENT")
     reconcile.add_argument("--rotate-contextforge-token", action="store_true")
+    reconcile.add_argument(
+        "--prepare-rejected-request-debug",
+        action="store_true",
+        help="Prepare isolated debug credentials before enabling client runtime resources.",
+    )
     status = _guarded(commands.add_parser("status"))
     status.add_argument("--custody-root", type=Path)
     recovery = commands.add_parser("recovery")
@@ -157,6 +164,7 @@ def main() -> None:
                 args.custodian_package,
                 args.confirm,
                 args.rotate_contextforge_token,
+                args.prepare_rejected_request_debug,
             )
         elif args.command == "status":
             _status(args.context, args.client, args.custody_root)
@@ -193,6 +201,7 @@ def _preflight(context: str, client: str) -> None:
     dify_enabled = cluster.dify_enabled()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
+    rejection_debug_enabled = cluster.rejection_debug_enabled()
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(
         "Preflight passed for "
@@ -204,6 +213,7 @@ def _preflight(context: str, client: str) -> None:
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Dify credential catalog selected={dify_enabled}")
+    print(f"Rejected-request debug credential catalog selected={rejection_debug_enabled}")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
     print(
         f"Studio MCP shared-key catalog selected={mcp_ids is not None} paths={len(mcp_ids or ())}"
@@ -228,6 +238,7 @@ def _bootstrap(
     dify_enabled = cluster.dify_enabled()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
+    rejection_debug_enabled = cluster.rejection_debug_enabled()
     _confirm(context, client, "Bootstrap OpenBao")
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
@@ -294,6 +305,7 @@ def _bootstrap(
                 dify_enabled,
                 contextforge_admin_email,
                 mcp_ids,
+                rejection_debug_enabled,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -320,6 +332,7 @@ def _bootstrap(
                 dify_enabled,
                 contextforge_admin_email,
                 mcp_ids,
+                rejection_debug_enabled,
             )
             return
         if kit.checkpoint == "complete":
@@ -340,6 +353,7 @@ def _bootstrap(
             dify_enabled,
             contextforge_admin_email,
             mcp_ids,
+            rejection_debug_enabled,
         )
 
 
@@ -356,6 +370,7 @@ def _seed_and_finish(
     dify_enabled: bool = False,
     contextforge_admin_email: str | None = None,
     mcp_ids: tuple[str, ...] | None = None,
+    rejection_debug_enabled: bool = False,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -379,6 +394,7 @@ def _seed_and_finish(
                 docling_enabled=docling_enabled,
                 dify_enabled=dify_enabled,
                 contextforge_admin_email=contextforge_admin_email,
+                rejection_debug_enabled=rejection_debug_enabled,
             )
             kit = with_checkpoint(kit, "seeded")
             update(recovery_file, kit)
@@ -397,6 +413,7 @@ def _seed_and_finish(
                 docling_enabled=docling_enabled,
                 dify_enabled=dify_enabled,
                 contextforge_admin_email=contextforge_admin_email,
+                rejection_debug_enabled=rejection_debug_enabled,
             )
             print(
                 "Reconciled OpenBao catalog "
@@ -420,6 +437,7 @@ def _seed_and_finish(
         docling_enabled,
         dify_enabled,
         contextforge_admin_email,
+        rejection_debug_enabled,
     )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
@@ -433,6 +451,7 @@ def _reconcile(
     package_paths: list[Path] | None,
     confirmation: str | None = None,
     rotate_contextforge_token: bool = False,
+    prepare_rejected_request_debug: bool = False,
 ) -> None:
     cluster = Cluster(context)
     identity = cluster.identity(client)
@@ -447,6 +466,12 @@ def _reconcile(
             raise SetupError("ContextForge must be selected before token rotation")
         cluster.require_contextforge_stopped()
     mcp_ids = cluster.studio_mcp_ids()
+    rejection_debug_enabled = cluster.rejection_debug_enabled()
+    prepare_debug = prepare_rejected_request_debug or rejection_debug_enabled
+    print(
+        f"Rejected-request debug credential preparation selected={prepare_debug}; "
+        f"runtime consumer refresh selected={rejection_debug_enabled}"
+    )
     _confirm(context, client, "Reconcile OpenBao", confirmation)
     cluster.require_openbao_release()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -474,6 +499,7 @@ def _reconcile(
                 docling_enabled=docling_enabled,
                 dify_enabled=dify_enabled,
                 contextforge_admin_email=contextforge_admin_email,
+                rejection_debug_enabled=prepare_debug,
             )
             _prepare_mcp_credentials(root, mcp_ids)
             if contextforge_admin_email is not None:
@@ -504,6 +530,7 @@ def _reconcile(
         docling_enabled,
         dify_enabled,
         contextforge_admin_email,
+        rejection_debug_enabled,
     )
     print("OpenBao reconciliation completed.")
 
@@ -822,6 +849,7 @@ def _refresh_bootstrap_external_secrets(
     docling_enabled: bool = False,
     dify_enabled: bool = False,
     contextforge_admin_email: str | None = None,
+    rejection_debug_enabled: bool = False,
 ) -> None:
     targets = _BOOTSTRAP_EXTERNAL_SECRETS
     if active_directory_required:
@@ -842,6 +870,7 @@ def _refresh_bootstrap_external_secrets(
         targets += DIFY_EXTERNAL_SECRETS
     if contextforge_admin_email is not None:
         targets += CONTEXTFORGE_EXTERNAL_SECRETS
+    targets += REJECTION_DEBUG_EXTERNAL_SECRETS if rejection_debug_enabled else ()
     total = len(targets)
     for index, target in enumerate(targets, start=1):
         print(f"Refreshing ExternalSecret {target.namespace}/{target.name} ({index}/{total})...")
@@ -856,6 +885,7 @@ def _converge_runtime(
     docling_enabled: bool = False,
     dify_enabled: bool = False,
     contextforge_admin_email: str | None = None,
+    rejection_debug_enabled: bool = False,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
@@ -875,6 +905,10 @@ def _converge_runtime(
         cluster.ensure_secret_store_ready(
             CONTEXTFORGE_SECRET_STORE.name, CONTEXTFORGE_SECRET_STORE.namespace
         )
+    if rejection_debug_enabled:
+        cluster.ensure_secret_store_ready(
+            REJECTION_DEBUG_SECRET_STORE.name, REJECTION_DEBUG_SECRET_STORE.namespace
+        )
     _refresh_bootstrap_external_secrets(
         cluster,
         active_directory_required,
@@ -883,6 +917,7 @@ def _converge_runtime(
         docling_enabled,
         dify_enabled,
         contextforge_admin_email,
+        rejection_debug_enabled,
     )
     print(
         "Reconciling infrastructure releases blocked on generated Secrets; "

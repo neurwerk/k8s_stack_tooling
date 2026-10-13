@@ -325,6 +325,21 @@ class Cluster:
         except (TypeError, ValueError, OpenBaoError):
             raise ClusterError("Invalid Studio MCP credential catalog") from None
 
+    def rejection_debug_enabled(self) -> bool:
+        """Read the canonical opt-in from namespace-local non-secret client values."""
+        values = self._product_values(
+            "client-values", "monitor-langfuse", "Rejected-request debug", optional=True
+        )
+        if not isinstance(values, dict):
+            raise ClusterError("Rejected-request debug client values must be a mapping")
+        selection = values.get("rejectedRequestDebug", {})
+        if not isinstance(selection, dict):
+            raise ClusterError("Rejected-request debug selection must be a mapping")
+        enabled = selection.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("Rejected-request debug enabled value must be a boolean")
+        return enabled
+
     def docling_enabled(self) -> bool:
         """Return whether either Docling inference mode is selected."""
         return self.docling_inference_mode() is not None

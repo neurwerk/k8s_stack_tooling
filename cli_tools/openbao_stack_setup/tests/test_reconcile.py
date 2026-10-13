@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,7 @@ def state_values(
     *,
     applied: int = 4,
     client_name: str = "client",
-    package_version: str = "0.2.27",
+    package_version: str = version("openbao-stack-setup"),
 ) -> dict[str, JsonValue]:
     return {
         "schemaVersion": 1,

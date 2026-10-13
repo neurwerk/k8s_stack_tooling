@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 RECONCILIATION_STATE_PATH = "stack-setup/reconciliation-state"
 CONTEXTFORGE_PROVIDER_APPS_PATH = "contextforge/provider-apps"
+REJECTION_DEBUG_PATH = "monitor-agentgateway-extproc/langfuse-debug"
+REJECTION_DEBUG_ROLE = "monitor-agentgateway-extproc-rejection-debug"
 ACTIVE_DIRECTORY_FIELDS = ("activeDirectoryBindDn", "activeDirectoryBindCredential")
 
 ROLE_NAMESPACES: tuple[str, ...] = (
@@ -136,6 +138,17 @@ DOCLING_EXTERNAL_SECRETS = (
     ),
 )
 WIREGUARD_SECRET_STORE = SecretStoreTarget("wireguard-openbao-secret-store", "wireguard")
+REJECTION_DEBUG_SECRET_STORE = SecretStoreTarget(
+    REJECTION_DEBUG_ROLE, "monitor-agentgateway-extproc"
+)
+REJECTION_DEBUG_EXTERNAL_SECRETS = (
+    ExternalSecretTarget(
+        "monitor-langfuse-rejection-debug", "monitor-langfuse", "monitor-langfuse-rejection-debug"
+    ),
+    ExternalSecretTarget(
+        REJECTION_DEBUG_ROLE, "monitor-agentgateway-extproc", REJECTION_DEBUG_ROLE
+    ),
+)
 WIREGUARD_EXTERNAL_SECRET = ExternalSecretTarget(
     "wireguard-server-key", "wireguard", "wireguard-server-key"
 )
@@ -340,7 +353,7 @@ path "secret/metadata/contextforge/provider-apps" {
         *DOCLING_NAMESPACES,
     ):
         raise ValueError("Namespace is not present in the reconciliation catalog")
-    return f"""path "secret/data/{namespace}/*" {{
+    policy = f"""path "secret/data/{namespace}/*" {{
   capabilities = ["read"]
 }}
 
@@ -352,6 +365,13 @@ path "secret/metadata/{namespace}/*" {{
   capabilities = ["read", "list"]
 }}
 """
+    if namespace == "monitor-agentgateway-extproc":
+        # The Docling namespace role must never inherit access to debug content credentials.
+        policy += (
+            f'\npath "secret/data/{REJECTION_DEBUG_PATH}" {{ capabilities = ["deny"] }}\n'
+            f'path "secret/metadata/{REJECTION_DEBUG_PATH}" {{ capabilities = ["deny"] }}\n'
+        )
+    return policy
 
 
 def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:

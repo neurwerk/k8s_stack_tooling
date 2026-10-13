@@ -190,6 +190,7 @@ def test_main_dispatches(command: str, target: str) -> None:
         custodian_package=[Path("one"), Path("two")],
         confirm="client",
         rotate_contextforge_token=False,
+        prepare_rejected_request_debug=False,
         provider="brave",
     )
     with (
@@ -200,7 +201,7 @@ def test_main_dispatches(command: str, target: str) -> None:
         main()
     if command == "reconcile":
         operation.assert_called_once_with(
-            "ctx", "client", Path("custody"), [Path("one"), Path("two")], "client", False
+            "ctx", "client", Path("custody"), [Path("one"), Path("two")], "client", False, False
         )
     else:
         operation.assert_called_once()
@@ -563,6 +564,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
+        cluster.rejection_debug_enabled.return_value,
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -605,6 +607,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
+        cluster.rejection_debug_enabled.return_value,
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -660,6 +663,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
+        cluster.rejection_debug_enabled.return_value,
     )
 
 
@@ -1053,6 +1057,7 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
         docling_enabled=False,
         dify_enabled=False,
         contextforge_admin_email=None,
+        rejection_debug_enabled=False,
     )
     prompt.assert_not_called()
     seed.assert_not_called()
@@ -1140,8 +1145,11 @@ def test_status_and_recovery_verification(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("forgejo_enabled", [False, True])
+@pytest.mark.parametrize(
+    "debug_enabled,prepare_debug", [(False, False), (False, True), (True, False)]
+)
 def test_reconcile_revokes_root_before_runtime_convergence(
-    tmp_path: Path, forgejo_enabled: bool
+    tmp_path: Path, forgejo_enabled: bool, debug_enabled: bool, prepare_debug: bool
 ) -> None:
     cluster = MagicMock()
     cluster.contextforge_admin_email.return_value = (
@@ -1153,6 +1161,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     cluster.wireguard_enabled.return_value = True
     cluster.docling_enabled.return_value = True
     cluster.studio_mcp_ids.return_value = ("brave",)
+    cluster.rejection_debug_enabled.return_value = debug_enabled
     api = MagicMock()
     api.create_recovery_root_token.return_value = "temporary"
     root = MagicMock()
@@ -1195,6 +1204,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
             tmp_path,
             [Path("one"), Path("two")],
             rotate_contextforge_token=forgejo_enabled,
+            prepare_rejected_request_debug=prepare_debug,
         )
 
     reconcile.assert_called_once_with(
@@ -1205,6 +1215,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         docling_enabled=True,
         dify_enabled=cluster.dify_enabled.return_value,
         contextforge_admin_email=cluster.contextforge_admin_email.return_value,
+        rejection_debug_enabled=debug_enabled or prepare_debug,
     )
     mcp.assert_called_once_with(root, ("brave",))
     assert events == ["mcp"] + (["token"] if forgejo_enabled else []) + ["revoke", "converge"]
@@ -1221,6 +1232,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         True,
         cluster.dify_enabled.return_value,
         cluster.contextforge_admin_email.return_value,
+        debug_enabled,
     )
 
 
