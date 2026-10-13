@@ -412,6 +412,73 @@ ExternalSecret to that refresh set. Bootstrap then force-reconciles and waits fo
 Kustomization so the application stage is unblocked immediately. The CLI does not read or print
 the materialized Secret values during these checks.
 
+## Optional Rejected-Request Debug Credentials
+
+Standalone CLI `0.2.28` adds this opt-in catalog at schema `4`; the bundled Tooling
+image version is unchanged. The selector is `rejectedRequestDebug.enabled` in the
+`values.yaml` entry of `monitor-langfuse/client-values`, sourced from the canonical
+client configuration. Missing selection defaults to false; malformed values fail
+before custody or OpenBao access. `captureEnabled` does not select credentials:
+keep `enabled: true` while capture is stopped and cleanup drains existing traces.
+
+With selection enabled, bootstrap/reconcile generate a distinct pair at
+`monitor-langfuse/internal:debugProjectPublicKey,debugProjectSecretKey` and copy
+it exactly to `monitor-agentgateway-extproc/langfuse-debug:publicKey,secretKey`.
+Complete keys and unrelated fields are preserved; half-pairs, invalid keys,
+reuse of the normal tracing keys, and conflicting copies fail without rotation.
+CAS writes make interrupted source/copy preparation retry-safe. Debug keys are
+never copied to Studio. Deselection preserves stored credentials.
+
+The ESO role, policy and ServiceAccount are
+`monitor-agentgateway-extproc-rejection-debug` in `monitor-agentgateway-extproc`,
+with audience `openbao`, no default token policy, and five-minute token lifetime.
+It can read only the exact debug data record, plus look up and revoke its own ESO
+token. The existing namespace policy explicitly denies this record and its
+metadata so a Docling role cannot inherit debug access. This does not create a
+general extProc namespace role when Docling is absent. Routine secret-operator
+permissions are unchanged.
+
+### Prepare before activation
+
+Use the reviewed exact Tooling revision on the trusted workstation. Keep the
+client feature disabled and run from `cli_tools/openbao_stack_setup`:
+
+```bash
+uv run --frozen stack-setup reconcile \
+  --context <kube-context> --client <client-name> \
+  --custodian-package <first-secure-package> \
+  --custodian-package <second-secure-package> \
+  --prepare-rejected-request-debug
+```
+
+This explicit preparation flag selects only the fixed debug catalog in addition
+to normal reconciliation. It does not enable capture or require disabled debug
+Secret resources to exist. All normal identity checks and the completed local
+custody kit with exactly two distinct, matching custodian packages remain
+required. Both custodians must approve and attend; the CLI verifies two shares,
+not the presence of two people. `--confirm <client-name>` can suppress only the
+confirmation prompt. Never put keys, recovery shares, or tokens in arguments or
+logs. Root is revoked before normal Kubernetes convergence.
+
+After successful preparation, enable the matching Base resources. Base owns the
+restricted organization and project (both IDs `rejected-request-debug`), native
+headless initialization, and hourly asynchronous API cleanup of traces older than
+72 hours. Verify project/key ownership, Secret delivery, initialization, cleanup
+and extProc rollout before treating capture as ready. The client runtime gate
+must not be enabled first merely to make the setup tool generate credentials.
+
+When `enabled` is true, reconciliation also checks the same-named debug SecretStore
+in extProc and refreshes these ExternalSecrets and their same-named target Secrets:
+
+- `monitor-langfuse/monitor-langfuse-rejection-debug`;
+- `monitor-agentgateway-extproc/monitor-agentgateway-extproc-rejection-debug`.
+
+The Langfuse consumer uses its existing namespace SecretStore. The extProc consumer
+uses the dedicated debug store, independently of Docling. Checks inspect readiness
+and target metadata, not Secret values. This CLI provisions credentials only; it
+does not create the Langfuse project, change its retention database field, or
+verify deletion. Key rotation is outside this operation.
+
 ## Optional LibreChat Speech Credentials
 
 Package `0.2.14` adds managed-only speech credentials without bootstrap prompts or
