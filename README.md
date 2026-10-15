@@ -16,11 +16,11 @@ Tooling provides one container image and separate CLI tools for setting up and o
 |  |  |
 | [Dify Add-on](https://github.com/neurwerk/k8s_stack_addon_dify) | Optional Dify package with API and web customizations, including single-workspace enforcement. |
 
-## Contributing and support
+## Documentation
 
-The container includes the public-only
-[inspection trust publisher](agentgateway-trust.md) for staged AgentGateway root
-publication and replica-verified promotion.
+See [Repository documentation](docs/README.md).
+
+## Contributing and support
 
 - **Contributions:** Read [CONTRIBUTING.md](.github/CONTRIBUTING.md) before proposing a change.
 - **Bug reports and feature requests:** Use [GitHub Issues](https://github.com/neurwerk/k8s_stack_tooling/issues) for reproducible bugs and clearly scoped feature requests.
