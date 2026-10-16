@@ -76,8 +76,8 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     )
     assert "difyPassword" not in session.secrets["infra-postgres-operations/internal"].values
 
-    planned = plan_bootstrap_passwords(api, dify_enabled=True)
-    first = reconcile_internal_credentials(api, planned, dify_enabled=True)
+    planned = plan_bootstrap_passwords(api, addons=("dify",))
+    first = reconcile_internal_credentials(api, planned, addons=("dify",))
     original = {path: dict(record.values) for path, record in session.secrets.items()}
     second = reconcile_internal_credentials(api, {})
 
@@ -293,13 +293,13 @@ def test_postgres_consumer_conflicts_are_rejected(tmp_path: Path, path: str, fie
     session = FakeSession()
     api = client(tmp_path, session)
     reconcile_internal_credentials(
-        api, plan_bootstrap_passwords(api, dify_enabled=True), dify_enabled=True
+        api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify",)
     )
     session.secrets[path].values[field] = "conflict"
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match=rf"credential mismatch at {path}/{field}"):
-        reconcile_internal_credentials(api, {}, dify_enabled=True)
+        reconcile_internal_credentials(api, {}, addons=("dify",))
 
     assert session.secrets[path].values == existing
 
@@ -316,7 +316,7 @@ def test_bridge_verifier_must_match_managed_key(tmp_path: Path) -> None:
 
     with pytest.raises(OpenBaoError, match="managed verifier slot"):
         reconcile_internal_credentials(
-            api, plan_bootstrap_passwords(api, dify_enabled=True), dify_enabled=True
+            api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify",)
         )
 
 

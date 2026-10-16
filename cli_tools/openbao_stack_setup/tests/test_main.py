@@ -39,6 +39,7 @@ from openbao_stack_setup.main import (
     _reconcile,
     _reconcile_bootstrap_helm_releases,
     _recovery_pgp_keys,
+    _refresh_addon,
     _refresh_bootstrap_external_secrets,
     _refresh_provider,
     _required_package_paths,
@@ -80,6 +81,81 @@ def kit(checkpoint: str = "initialized") -> RecoveryKit:
 @contextmanager
 def opened(api: MagicMock) -> Iterator[MagicMock]:
     yield api
+
+
+@pytest.mark.parametrize(
+    "addons", [(), ("dify",), ("knowledge-center",), ("dify", "knowledge-center")]
+)
+def test_addon_refresh_catalog_is_complete_and_selected(addons: tuple[str, ...]) -> None:
+    cluster = MagicMock()
+    _refresh_bootstrap_external_secrets(cluster, False)
+    base_calls = cluster.force_external_secret_refresh.call_args_list[:]
+    cluster.reset_mock()
+    _refresh_bootstrap_external_secrets(cluster, False, addons=addons)
+    expected = []
+    if "dify" in addons:
+        expected += [
+            ("dify-oidc-secret", "auth-keycloak"),
+            ("frontend-dify-postgres-password", "infra-postgres-operations"),
+            ("frontend-dify-openbao-secret", "frontend-dify"),
+            ("frontend-dify-runtime-secret", "frontend-dify"),
+            ("dify-managed-key-verifiers", "auth-keycloak-api-key-bridge"),
+        ]
+    if "knowledge-center" in addons:
+        expected += [
+            ("forgejo-runtime", "forgejo"),
+            ("forgejo-postgres-password", "infra-postgres-operations"),
+            ("forgejo-oidc-values", "auth-keycloak"),
+        ]
+    assert cluster.force_external_secret_refresh.call_args_list == base_calls + [
+        call(name, namespace, name) for name, namespace in expected
+    ]
+
+
+@pytest.mark.parametrize(
+    "addon_id,database",
+    [
+        ("dify", "frontend-dify-postgres"),
+        ("knowledge-center", "forgejo-postgres"),
+    ],
+)
+def test_addon_refresh_orders_secrets_database_and_consumers(addon_id: str, database: str) -> None:
+    cluster = MagicMock()
+    cluster.selected_addons.return_value = (addon_id,)
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main._confirm"),
+        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
+        patch("openbao_stack_setup.main.subprocess.run") as rollout,
+    ):
+        _refresh_addon("context", "client", addon_id)
+    assert rollout.call_count > 0
+    assert all(
+        item.args[0][:3] == ["/tools/kubectl", "--context", "context"]
+        for item in rollout.call_args_list
+    )
+    assert rollout.call_args_list[-1].args[0][-1] == "--timeout=10m"
+    calls = cluster.mock_calls
+    database_index = calls.index(call.force_reconcile(database, "infra-postgres-operations"))
+    secret_indexes = [
+        i for i, item in enumerate(calls) if item[0] == "force_external_secret_refresh"
+    ]
+    assert secret_indexes and max(secret_indexes) < database_index
+    upgrades = [item for item in calls if item[0] == "force_reconcile"]
+    assert upgrades[0] == call.force_reconcile(database, "infra-postgres-operations")
+    assert len(upgrades) > 1
+    cluster.reset_mock()
+    cluster.force_external_secret_refresh.side_effect = ClusterError("Secret delivery failed")
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main._confirm"),
+        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
+        patch("openbao_stack_setup.main.subprocess.run") as rollout,
+        pytest.raises(ClusterError, match="Secret delivery failed"),
+    ):
+        _refresh_addon("context", "client", addon_id)
+    cluster.force_reconcile.assert_not_called()
+    rollout.assert_not_called()
 
 
 class ControllingTerminal:
@@ -482,7 +558,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.seal_exists.return_value = False
     cluster.active_directory_required.return_value = True
-    cluster.forgejo_enabled.return_value = True
+    cluster.selected_addons.return_value = ("knowledge-center",)
     cluster.wireguard_enabled.return_value = True
     cluster.docling_enabled.return_value = True
     api = MagicMock()
@@ -560,8 +636,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         True,
         True,
         True,
-        True,
-        cluster.dify_enabled.return_value,
+        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
@@ -576,7 +651,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
-    cluster.forgejo_enabled.return_value = False
+    cluster.selected_addons.return_value = ()
     cluster.wireguard_enabled.return_value = False
     cluster.docling_enabled.return_value = True
     api = MagicMock()
@@ -602,9 +677,8 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         recovery_file,
         False,
         False,
-        False,
         True,
-        cluster.dify_enabled.return_value,
+        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
@@ -622,7 +696,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
-    cluster.forgejo_enabled.return_value = False
+    cluster.selected_addons.return_value = ()
     cluster.wireguard_enabled.return_value = False
     cluster.docling_enabled.return_value = False
     api = MagicMock()
@@ -659,8 +733,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         False,
         False,
         False,
-        False,
-        cluster.dify_enabled.return_value,
+        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
@@ -746,9 +819,15 @@ def test_bootstrap_refreshes_every_declared_external_secret() -> None:
     ]
 
     cluster.reset_mock()
-    _refresh_bootstrap_external_secrets(cluster, False, dify_enabled=True)
+    _refresh_bootstrap_external_secrets(cluster, False, addons=("dify",))
     assert cluster.force_external_secret_refresh.call_args_list == [
         *[call(name, namespace, target_secret) for name, namespace, target_secret in expected],
+        call("dify-oidc-secret", "auth-keycloak", "dify-oidc-secret"),
+        call(
+            "frontend-dify-postgres-password",
+            "infra-postgres-operations",
+            "frontend-dify-postgres-password",
+        ),
         call("frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"),
         call("frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"),
         call(
@@ -1052,10 +1131,9 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
     reconcile.assert_called_once_with(
         root,
         ReconciliationIdentity("client", "cluster", "namespace"),
-        forgejo_enabled=False,
         wireguard_enabled=False,
         docling_enabled=False,
-        dify_enabled=False,
+        addons=(),
         contextforge_admin_email=None,
         rejection_debug_enabled=False,
     )
@@ -1157,7 +1235,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     )
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
-    cluster.forgejo_enabled.return_value = forgejo_enabled
+    cluster.selected_addons.return_value = ("knowledge-center",) if forgejo_enabled else ()
     cluster.wireguard_enabled.return_value = True
     cluster.docling_enabled.return_value = True
     cluster.studio_mcp_ids.return_value = ("brave",)
@@ -1210,10 +1288,9 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     reconcile.assert_called_once_with(
         root,
         ReconciliationIdentity("client", "cluster", "namespace"),
-        forgejo_enabled=forgejo_enabled,
         wireguard_enabled=True,
         docling_enabled=True,
-        dify_enabled=cluster.dify_enabled.return_value,
+        addons=cluster.selected_addons.return_value,
         contextforge_admin_email=cluster.contextforge_admin_email.return_value,
         rejection_debug_enabled=debug_enabled or prepare_debug,
     )
@@ -1227,10 +1304,9 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     converge.assert_called_once_with(
         cluster,
         False,
-        forgejo_enabled,
         True,
         True,
-        cluster.dify_enabled.return_value,
+        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         debug_enabled,
     )

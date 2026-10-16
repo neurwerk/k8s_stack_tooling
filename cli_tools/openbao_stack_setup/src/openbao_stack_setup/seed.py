@@ -30,10 +30,9 @@ def seed_bootstrap(
     identity: ReconciliationIdentity,
     active_directory: dict[str, str] | None = None,
     *,
-    forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
-    dify_enabled: bool = False,
+    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
 ) -> SeedReport:
@@ -72,10 +71,9 @@ def seed_bootstrap(
         client,
         identity,
         bootstrap_passwords,
-        forgejo_enabled=forgejo_enabled,
         wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
-        dify_enabled=dify_enabled,
+        addons=addons,
         contextforge_admin_email=contextforge_admin_email,
         rejection_debug_enabled=rejection_debug_enabled,
     )

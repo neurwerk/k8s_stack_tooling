@@ -39,7 +39,7 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
         patch.object(target, "identity"),
         patch.object(target, "require_bootstrap_prerequisites"),
         patch.object(target, "active_directory_required"),
-        patch.object(target, "forgejo_enabled"),
+        patch.object(target, "selected_addons", return_value=()),
         patch.object(target, "wireguard_enabled"),
         patch("openbao_stack_setup.main._confirm") as confirm,
         patch("openbao_stack_setup.main._prompt_provider") as prompt,

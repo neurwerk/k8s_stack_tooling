@@ -22,6 +22,7 @@ import requests
 from kubernetes.client.exceptions import ApiException
 
 from openbao_stack_setup.catalog import (
+    ADDONS,
     AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,
     AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,
     BOOTSTRAP_EXTERNAL_SECRETS,
@@ -30,19 +31,15 @@ from openbao_stack_setup.catalog import (
     CONTEXTFORGE_EXTERNAL_SECRETS,
     CONTEXTFORGE_PROVIDER_APPS_PATH,
     CONTEXTFORGE_SECRET_STORE,
-    DIFY_EXTERNAL_SECRETS,
-    DIFY_SECRET_STORE,
     DOCLING_EXTERNAL_SECRETS,
     DOCLING_SECRET_STORES,
-    FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET,
-    FORGEJO_EXTERNAL_SECRETS,
-    FORGEJO_SECRET_STORE,
     PROVIDER_REFRESH_TARGETS,
     REJECTION_DEBUG_EXTERNAL_SECRETS,
     REJECTION_DEBUG_SECRET_STORE,
     WIREGUARD_EXTERNAL_SECRET,
     WIREGUARD_SECRET_STORE,
     HelmReleaseTarget,
+    addon_catalogs,
 )
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError, TokenAccessorLookupError
 from openbao_stack_setup.cluster import Cluster, ClusterError, StackIdentity
@@ -139,6 +136,10 @@ def _arguments() -> argparse.ArgumentParser:
     set_command.add_argument("provider", choices=sorted(MANAGED_CREDENTIALS))
     oauth = _guarded(secret_commands.add_parser("set-contextforge-oauth"))
     oauth.add_argument("integration_id")
+    addon = commands.add_parser("addon")
+    addon_commands = addon.add_subparsers(dest="addon_command", required=True)
+    refresh = _guarded(addon_commands.add_parser("refresh"))
+    refresh.add_argument("addon_id", choices=sorted(ADDONS))
     return parser
 
 
@@ -170,6 +171,8 @@ def main() -> None:
             _status(args.context, args.client, args.custody_root)
         elif args.command == "recovery":
             _verify_recovery(args.context, args.client, args.custody_root, args.custodian_package)
+        elif args.command == "addon":
+            _refresh_addon(args.context, args.client, args.addon_id)
         elif getattr(args, "secret_command", None) == "set-contextforge-oauth":
             _set_contextforge_oauth(args.context, args.client, args.integration_id)
         else:
@@ -195,10 +198,9 @@ def _preflight(context: str, client: str) -> None:
     identity = cluster.identity(client)
     smtp_required = cluster.require_bootstrap_prerequisites()
     active_directory_required = cluster.active_directory_required()
-    forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
-    dify_enabled = cluster.dify_enabled()
+    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     rejection_debug_enabled = cluster.rejection_debug_enabled()
@@ -209,10 +211,9 @@ def _preflight(context: str, client: str) -> None:
     )
     print(f"Bootstrap prerequisites verified; SMTP credentials required={smtp_required}")
     print(f"Active Directory credentials required={active_directory_required}")
-    print(f"Forgejo generated credential catalog selected={forgejo_enabled}")
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
-    print(f"Dify credential catalog selected={dify_enabled}")
+    print(f"Selected addon catalogs={','.join(addons) or 'none'}")
     print(f"Rejected-request debug credential catalog selected={rejection_debug_enabled}")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
     print(
@@ -232,10 +233,9 @@ def _bootstrap(
     identity = cluster.identity(client)
     cluster.require_bootstrap_prerequisites()
     active_directory_required = cluster.active_directory_required()
-    forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
-    dify_enabled = cluster.dify_enabled()
+    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     rejection_debug_enabled = cluster.rejection_debug_enabled()
@@ -299,10 +299,9 @@ def _bootstrap(
                 kit,
                 paths.seal_file,
                 active_directory_required,
-                forgejo_enabled,
                 wireguard_enabled,
                 docling_enabled,
-                dify_enabled,
+                addons,
                 contextforge_admin_email,
                 mcp_ids,
                 rejection_debug_enabled,
@@ -326,10 +325,9 @@ def _bootstrap(
                 kit,
                 paths.seal_file,
                 active_directory_required,
-                forgejo_enabled,
                 wireguard_enabled,
                 docling_enabled,
-                dify_enabled,
+                addons,
                 contextforge_admin_email,
                 mcp_ids,
                 rejection_debug_enabled,
@@ -347,10 +345,9 @@ def _bootstrap(
             kit,
             paths.seal_file,
             active_directory_required,
-            forgejo_enabled,
             wireguard_enabled,
             docling_enabled,
-            dify_enabled,
+            addons,
             contextforge_admin_email,
             mcp_ids,
             rejection_debug_enabled,
@@ -364,10 +361,9 @@ def _seed_and_finish(
     kit: RecoveryKit,
     recovery_file: Path,
     active_directory_required: bool,
-    forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
-    dify_enabled: bool = False,
+    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     mcp_ids: tuple[str, ...] | None = None,
     rejection_debug_enabled: bool = False,
@@ -380,7 +376,7 @@ def _seed_and_finish(
                 cluster.smtp_required(), active_directory_required
             )
             kit, bootstrap_passwords = _prepare_bootstrap_passwords(
-                root, kit, recovery_file, dify_enabled=dify_enabled
+                root, kit, recovery_file, addons=addons
             )
             report = seed_bootstrap(
                 root,
@@ -389,10 +385,9 @@ def _seed_and_finish(
                 bootstrap_passwords,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
                 active_directory=active_directory,
-                forgejo_enabled=forgejo_enabled,
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
-                dify_enabled=dify_enabled,
+                addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
                 rejection_debug_enabled=rejection_debug_enabled,
             )
@@ -408,10 +403,9 @@ def _seed_and_finish(
             reconciled = reconcile_openbao(
                 root,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
-                forgejo_enabled=forgejo_enabled,
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
-                dify_enabled=dify_enabled,
+                addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
                 rejection_debug_enabled=rejection_debug_enabled,
             )
@@ -432,10 +426,9 @@ def _seed_and_finish(
     _converge_runtime(
         cluster,
         active_directory_required,
-        forgejo_enabled,
         wireguard_enabled,
         docling_enabled,
-        dify_enabled,
+        addons,
         contextforge_admin_email,
         rejection_debug_enabled,
     )
@@ -456,10 +449,9 @@ def _reconcile(
     cluster = Cluster(context)
     identity = cluster.identity(client)
     active_directory_required = cluster.active_directory_required()
-    forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
-    dify_enabled = cluster.dify_enabled()
+    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     if rotate_contextforge_token:
         if contextforge_admin_email is None:
@@ -494,10 +486,9 @@ def _reconcile(
                     identity.cluster_id,
                     identity.namespace_uid,
                 ),
-                forgejo_enabled=forgejo_enabled,
                 wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
-                dify_enabled=dify_enabled,
+                addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
                 rejection_debug_enabled=prepare_debug,
             )
@@ -525,10 +516,9 @@ def _reconcile(
     _converge_runtime(
         cluster,
         active_directory_required,
-        forgejo_enabled,
         wireguard_enabled,
         docling_enabled,
-        dify_enabled,
+        addons,
         contextforge_admin_email,
         rejection_debug_enabled,
     )
@@ -565,11 +555,11 @@ def _prepare_mcp_credentials(root: OpenBaoClient, identities: tuple[str, ...] | 
 
 
 def _prepare_bootstrap_passwords(
-    client: OpenBaoClient, kit: RecoveryKit, recovery_file: Path, *, dify_enabled: bool = False
+    client: OpenBaoClient, kit: RecoveryKit, recovery_file: Path, *, addons: tuple[str, ...] = ()
 ) -> tuple[RecoveryKit, dict[str, str]]:
     if kit.pending_bootstrap_passwords is None:
         client.ensure_kv_v2_mount()
-        planned = plan_bootstrap_passwords(client, dify_enabled=dify_enabled)
+        planned = plan_bootstrap_passwords(client, addons=addons)
         if not planned:
             return kit, {}
         kit = with_pending_bootstrap_passwords(kit, planned)
@@ -577,7 +567,7 @@ def _prepare_bootstrap_passwords(
     passwords = kit.pending_bootstrap_passwords
     if passwords is None:
         raise SetupError("Bootstrap password delivery state is invalid")
-    if "dify" in passwords and not dify_enabled:
+    if "dify" in passwords and "dify" not in addons:
         raise SetupError("Dify selection changed during pending bootstrap password delivery")
     if not kit.bootstrap_passwords_acknowledged:
         _deliver_bootstrap_passwords(passwords)
@@ -662,10 +652,9 @@ def _verify_secret_operator(cluster: Cluster, unauthenticated: OpenBaoClient) ->
 def _status(context: str, client: str, custody_root: Path | None) -> None:
     cluster = Cluster(context)
     identity = cluster.identity(client)
-    forgejo_enabled = cluster.forgejo_enabled()
     wireguard_enabled = cluster.wireguard_enabled()
     docling_enabled = cluster.docling_enabled()
-    dify_enabled = cluster.dify_enabled()
+    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -673,10 +662,9 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     with _openbao(cluster) as api:
         initialized = api.initialized()
     print(f"client={client} initialized={initialized} recovery_checkpoint={checkpoint}")
-    print(f"Forgejo generated credential catalog selected={forgejo_enabled}")
     print(f"WireGuard server-key catalog selected={wireguard_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
-    print(f"Dify credential catalog selected={dify_enabled}")
+    print(f"Selected addon catalogs={','.join(addons) or 'none'}")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
     print(
         f"Studio MCP shared-key catalog selected={mcp_ids is not None} paths={len(mcp_ids or ())}"
@@ -844,30 +832,21 @@ def _refresh_provider(cluster: Cluster, provider: Provider) -> None:
 def _refresh_bootstrap_external_secrets(
     cluster: Cluster,
     active_directory_required: bool,
-    forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
-    dify_enabled: bool = False,
+    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
 ) -> None:
     targets = _BOOTSTRAP_EXTERNAL_SECRETS
     if active_directory_required:
         targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,)
-    if forgejo_enabled:
-        postgres = FORGEJO_EXTERNAL_SECRETS[1]
-        addon_postgres = FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET
-        if cluster.external_secret_exists(addon_postgres.name, addon_postgres.namespace):
-            postgres = addon_postgres
-        elif not cluster.external_secret_exists(postgres.name, postgres.namespace):
-            raise ClusterError("Selected Forgejo PostgreSQL ExternalSecret is missing")
-        targets += (FORGEJO_EXTERNAL_SECRETS[0], postgres, FORGEJO_EXTERNAL_SECRETS[2])
+    for catalog in addon_catalogs(addons):
+        targets += catalog.external_secrets
     if wireguard_enabled:
         targets += (WIREGUARD_EXTERNAL_SECRET,)
     if docling_enabled:
         targets += DOCLING_EXTERNAL_SECRETS
-    if dify_enabled:
-        targets += DIFY_EXTERNAL_SECRETS
     if contextforge_admin_email is not None:
         targets += CONTEXTFORGE_EXTERNAL_SECRETS
     targets += REJECTION_DEBUG_EXTERNAL_SECRETS if rejection_debug_enabled else ()
@@ -880,20 +859,18 @@ def _refresh_bootstrap_external_secrets(
 def _converge_runtime(
     cluster: Cluster,
     active_directory_required: bool,
-    forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
-    dify_enabled: bool = False,
+    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
     _converge_bootstrap_secret_stores(cluster)
-    if dify_enabled:
-        cluster.ensure_secret_store_ready(DIFY_SECRET_STORE.name, DIFY_SECRET_STORE.namespace)
-    if forgejo_enabled:
-        cluster.ensure_secret_store_ready(FORGEJO_SECRET_STORE.name, FORGEJO_SECRET_STORE.namespace)
+    for catalog in addon_catalogs(addons):
+        store = catalog.secret_store
+        cluster.ensure_secret_store_ready(store.name, store.namespace)
     if wireguard_enabled:
         cluster.ensure_secret_store_ready(
             WIREGUARD_SECRET_STORE.name, WIREGUARD_SECRET_STORE.namespace
@@ -912,10 +889,9 @@ def _converge_runtime(
     _refresh_bootstrap_external_secrets(
         cluster,
         active_directory_required,
-        forgejo_enabled,
         wireguard_enabled,
         docling_enabled,
-        dify_enabled,
+        addons,
         contextforge_admin_email,
         rejection_debug_enabled,
     )
@@ -952,6 +928,48 @@ def _force_helm_release(cluster: Cluster, target: HelmReleaseTarget) -> None:
         timeout_seconds=target.timeout_seconds,
         force_token=force_token,
     )
+
+
+def _refresh_addon(context: str, client: str, addon_id: str) -> None:
+    cluster = Cluster(context)
+    cluster.identity(client)
+    if addon_id not in cluster.selected_addons():
+        raise SetupError("Addon is not selected for this client")
+    catalog = addon_catalogs((addon_id,))[0]
+    kubectl = _kubectl_executable()
+    _confirm(context, client, "Refresh addon credentials and consumers")
+    store = catalog.secret_store
+    cluster.ensure_secret_store_ready(store.name, store.namespace)
+    for target in catalog.external_secrets:
+        cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
+    _force_helm_release(cluster, catalog.database_release)
+    for target in catalog.consumers:
+        _force_helm_release(cluster, target)
+    try:
+        for action in ("restart", "status"):
+            for workload in catalog.workloads:
+                command = [
+                    kubectl,
+                    "--context",
+                    context,
+                    "--namespace",
+                    catalog.namespace,
+                    "rollout",
+                    action,
+                    workload,
+                ]
+                if action == "status":
+                    command.append("--timeout=10m")
+                subprocess.run(
+                    command,
+                    check=True,
+                    timeout=660,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+    except (OSError, subprocess.SubprocessError):
+        raise SetupError("Addon workload restart or readiness check failed") from None
+    print("Addon credential delivery and consumers reconciled.")
 
 
 def _bound_kit(path: Path, identity: StackIdentity) -> RecoveryKit:

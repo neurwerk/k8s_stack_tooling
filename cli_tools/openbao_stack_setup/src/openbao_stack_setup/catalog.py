@@ -155,12 +155,9 @@ WIREGUARD_EXTERNAL_SECRET = ExternalSecretTarget(
 FORGEJO_EXTERNAL_SECRETS = (
     ExternalSecretTarget("forgejo-runtime", "forgejo", "forgejo-runtime"),
     ExternalSecretTarget(
-        "forgejo-postgres-values", "infra-postgres-operations", "forgejo-postgres-values"
+        "forgejo-postgres-password", "infra-postgres-operations", "forgejo-postgres-password"
     ),
     ExternalSecretTarget("forgejo-oidc-values", "auth-keycloak", "forgejo-oidc-values"),
-)
-FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET = ExternalSecretTarget(
-    "addon-postgres-values", "infra-postgres-operations", "addon-postgres-values"
 )
 
 BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
@@ -214,6 +211,12 @@ BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
 )
 
 DIFY_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
+    ExternalSecretTarget("dify-oidc-secret", "auth-keycloak", "dify-oidc-secret"),
+    ExternalSecretTarget(
+        "frontend-dify-postgres-password",
+        "infra-postgres-operations",
+        "frontend-dify-postgres-password",
+    ),
     ExternalSecretTarget(
         "frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"
     ),
@@ -227,6 +230,66 @@ DIFY_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
     ),
 )
 DIFY_SECRET_STORE = SecretStoreTarget("frontend-dify-openbao-secret-store", "frontend-dify")
+
+
+@dataclass(frozen=True)
+class AddonCatalog:
+    """One reviewed addon selection and its credential consumers."""
+
+    configuration_key: str
+    namespace: str
+    secret_store: SecretStoreTarget
+    external_secrets: tuple[ExternalSecretTarget, ...]
+    database_release: HelmReleaseTarget
+    consumers: tuple[HelmReleaseTarget, ...]
+    workloads: tuple[str, ...]
+
+
+ADDONS = {
+    "dify": AddonCatalog(
+        "dify",
+        "frontend-dify",
+        DIFY_SECRET_STORE,
+        DIFY_EXTERNAL_SECRETS,
+        HelmReleaseTarget("frontend-dify-postgres", "infra-postgres-operations"),
+        (
+            HelmReleaseTarget("keycloak-dify-oidc", "auth-keycloak"),
+            HelmReleaseTarget("keycloak-dify-agentgateway-oidc", "auth-keycloak"),
+            HelmReleaseTarget("frontend-dify-shared", "frontend-dify"),
+        ),
+        (
+            "statefulset/frontend-dify-redis-stateful-set",
+            "deployment/frontend-dify-plugin-daemon-deployment",
+            "deployment/frontend-dify-sandbox-deployment",
+            "deployment/frontend-dify-agent-backend-deployment",
+            "deployment/frontend-dify-agent-sandbox-deployment",
+            "deployment/frontend-dify-agent-proxy-deployment",
+            "deployment/frontend-dify-api-deployment",
+            "deployment/frontend-dify-worker-deployment",
+            "deployment/frontend-dify-beat-deployment",
+        ),
+    ),
+    "knowledge-center": AddonCatalog(
+        "forgejo",
+        "forgejo",
+        FORGEJO_SECRET_STORE,
+        FORGEJO_EXTERNAL_SECRETS,
+        HelmReleaseTarget("forgejo-postgres", "infra-postgres-operations"),
+        (
+            HelmReleaseTarget("keycloak-forgejo-oidc", "auth-keycloak"),
+            HelmReleaseTarget("forgejo", "forgejo"),
+        ),
+        ("deployment/forgejo",),
+    ),
+}
+
+
+def addon_catalogs(names: tuple[str, ...]) -> tuple[AddonCatalog, ...]:
+    """Resolve only compiled, reviewed addon entries."""
+    if len(set(names)) != len(names) or any(name not in ADDONS for name in names):
+        raise ValueError("Unknown or duplicate addon selection")
+    return tuple(ADDONS[name] for name in names)
+
 
 BOOTSTRAP_SECRET_STORES: tuple[SecretStoreTarget, ...] = (
     SecretStoreTarget("auth-keycloak-openbao-secret-store", "auth-keycloak"),

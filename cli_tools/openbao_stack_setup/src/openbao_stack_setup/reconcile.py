@@ -12,6 +12,7 @@ from openbao_stack_setup.catalog import (
     RECONCILIATION_STATE_PATH,
     ROLE_NAMESPACES,
     SMTP_REPLICA,
+    addon_catalogs,
     contextforge_oauth_policy,
     namespace_policy,
     secret_operator_policy,
@@ -62,10 +63,9 @@ def reconcile_openbao(
     identity: ReconciliationIdentity,
     bootstrap_passwords: dict[str, str] | None = None,
     *,
-    forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
-    dify_enabled: bool = False,
+    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
 ) -> ReconciliationReport:
@@ -73,14 +73,13 @@ def reconcile_openbao(
     passwords = bootstrap_passwords or {}
     client.ensure_kv_v2_mount()
     state = _load_state(client.read_secret(RECONCILIATION_STATE_PATH), identity)
-    _require_bootstrap_passwords(client, passwords, dify_enabled=dify_enabled)
+    _require_bootstrap_passwords(client, passwords, addons=addons)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
         raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
 
     client.ensure_kubernetes_auth()
     client.configure_kubernetes_auth()
-    namespaces = ROLE_NAMESPACES + (("forgejo",) if forgejo_enabled else ())
-    namespaces += ("frontend-dify",) if dify_enabled else ()
+    namespaces = ROLE_NAMESPACES + tuple(item.namespace for item in addon_catalogs(addons))
     namespaces += ("wireguard",) if wireguard_enabled else ()
     namespaces += DOCLING_NAMESPACES if docling_enabled else ()
     namespaces += ("contextforge",) if contextforge_admin_email is not None else ()
@@ -113,10 +112,9 @@ def reconcile_openbao(
     internal = reconcile_internal_credentials(
         client,
         passwords,
-        forgejo_enabled=forgejo_enabled,
         wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
-        dify_enabled=dify_enabled,
+        addons=addons,
         contextforge_admin_email=contextforge_admin_email,
     )
     debug = reconcile_rejection_debug(client, enabled=rejection_debug_enabled)
@@ -191,7 +189,7 @@ def _required_state_text(values: dict[str, JsonValue], field: str) -> str:
 
 
 def _require_bootstrap_passwords(
-    client: OpenBaoClient, bootstrap_passwords: dict[str, str], *, dify_enabled: bool = False
+    client: OpenBaoClient, bootstrap_passwords: dict[str, str], *, addons: tuple[str, ...] = ()
 ) -> None:
     known = {password.key for password in BOOTSTRAP_PASSWORDS}
     if not set(bootstrap_passwords).issubset(known) or any(
@@ -200,7 +198,7 @@ def _require_bootstrap_passwords(
         raise OpenBaoError("Bootstrap passwords are invalid")
     records: dict[str, SecretRecord | None] = {}
     for password in BOOTSTRAP_PASSWORDS:
-        if password.key == "dify" and not dify_enabled:
+        if password.key == "dify" and "dify" not in addons:
             continue
         if password.key in bootstrap_passwords:
             continue
