@@ -30,7 +30,7 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
         self.mapper_config_readback = {}
         self.scopes = [
             {"id": name + "-id", "name": name, "protocol": "openid-connect"}
-            for name in ("profile", "email", "roles", "offline_access")
+            for name in ("profile", "email", "roles", "offline_access", "basic")
         ]
         self.attached = {
             "default-client-scopes": copy.deepcopy(self.scopes[:3]),
@@ -196,7 +196,7 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
         self.assertEqual(self.client_mappings, {})
         self.assertEqual(
             {scope["name"] for scope in self.attached["default-client-scopes"]},
-            {"profile", "email"},
+            {"basic", "profile", "email"},
         )
         self.assertEqual(self.attached["optional-client-scopes"], [])
         mapper = self.mappers[0]
@@ -206,10 +206,10 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
             self.assertEqual(mapper["config"][key], "true")
         self.assertEqual(mapper["config"]["introspection.token.claim"], "false")
         self.assertEqual(mapper["config"]["usermodel.realmRoleMapping.rolePrefix"], "")
-        before = copy.deepcopy((self.client, self.realm_mappings, self.mappers))
+        before = copy.deepcopy((self.client, self.realm_mappings, self.mappers, self.attached))
         self.calls.clear()
         self.reconcile()
-        self.assertEqual((self.client, self.realm_mappings, self.mappers), before)
+        self.assertEqual((self.client, self.realm_mappings, self.mappers, self.attached), before)
         self.assertFalse(any(method in ("POST", "DELETE") for method, _, _ in self.calls))
         self.assertTrue(
             all(
@@ -217,6 +217,15 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                 for method, path, _ in self.calls
                 if method != "GET"
             )
+        )
+
+        self.attached["default-client-scopes"] = [
+            scope for scope in self.attached["default-client-scopes"] if scope["name"] != "basic"
+        ]
+        self.reconcile()
+        self.assertEqual(
+            {scope["name"] for scope in self.attached["default-client-scopes"]},
+            {"basic", "profile", "email"},
         )
 
     def test_normalized_mapper_readback_clears_existing_prefix_and_introspection(self):
@@ -301,6 +310,7 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
         self.clients = [{"id": "forgejo-id", "clientId": "forgejo"}]
         original = copy.deepcopy(self.scopes)
         for scopes in (
+            [scope for scope in original if scope["name"] != "basic"],
             original[1:],
             original + [original[0]],
             [{**original[0], "id": ""}, *original[1:]],

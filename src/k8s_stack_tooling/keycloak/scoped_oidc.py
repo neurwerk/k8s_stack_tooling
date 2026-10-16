@@ -121,7 +121,8 @@ def reconcile() -> None:
 
     scopes = api("/client-scopes", root=realm_url)
     desired_scopes = set()
-    for name in ("profile", "email"):
+    # Keycloak's basic scope supplies the access token's subject claim.
+    for name in ("basic", "profile", "email"):
         matches = [scope for scope in scopes if scope.get("name") == name]
         if (
             len(matches) != 1
@@ -131,7 +132,7 @@ def reconcile() -> None:
         ):
             raise RuntimeError("Required OIDC client scope lookup mismatch")
         desired_scopes.add(matches[0]["id"])
-    if len(desired_scopes) != 2:
+    if len(desired_scopes) != 3:
         raise RuntimeError("Ambiguous OIDC client scope IDs")
     # Change only this client's associations, not realm-wide scope definitions.
     for kind in ("default-client-scopes", "optional-client-scopes"):
@@ -261,7 +262,7 @@ def reconcile() -> None:
     effective = api("/scope-mappings/realm/composite")
     if {(role["id"], role["name"]) for role in effective} != expected_roles:
         raise RuntimeError("Effective role scope readback mismatch")
-    # Verify exact associations and reject tampered shared profile/email scopes.
+    # Verify exact associations and reject tampered shared identity scopes.
     for kind in ("default-client-scopes", "optional-client-scopes"):
         attached = api("/" + kind)
         desired = desired_scopes if kind == "default-client-scopes" else set()
