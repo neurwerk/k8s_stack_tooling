@@ -7,9 +7,12 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from k8s_stack_tooling.keycloak.scoped_oidc import RESERVED_CLIENT_IDS
 
 
 class Contract(BaseModel):
@@ -49,6 +52,76 @@ class Input(Contract):
     owner: Literal["base", "client"]
 
 
+class Authentication(Contract):
+    client_id: str = Field(alias="clientId", pattern=r"^[a-z][a-z0-9-]*$")
+    redirect_uris: list[str] = Field(alias="redirectUris", min_length=1)
+    web_origins: list[str] = Field(alias="webOrigins", min_length=1)
+    realm_roles: list[str] = Field(alias="realmRoles", min_length=1)
+    role_claim: str = Field(alias="roleClaim", pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)?$")
+    audiences: list[str] = Field(default_factory=list)
+    refresh_token_rotation: bool = Field(default=True, alias="refreshTokenRotation")
+    mode: Literal["login-only", "login+gateway"] = "login-only"
+    user_token_forwarding: bool = Field(default=False, alias="userTokenForwarding")
+    gateway_permissions: list[str] = Field(default_factory=list, alias="gatewayPermissions")
+
+    @field_validator("client_id")
+    @classmethod
+    def addon_client(cls, value: str) -> str:
+        if value in RESERVED_CLIENT_IDS:
+            raise ValueError("reserved authentication client ID")
+        return value
+
+    @field_validator(
+        "redirect_uris", "web_origins", "realm_roles", "audiences", "gateway_permissions"
+    )
+    @classmethod
+    def unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("authentication lists must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def authentication_contract(self):
+        for values, origin in ((self.redirect_uris, False), (self.web_origins, True)):
+            for value in values:
+                parsed = urlsplit(value)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                    or parsed.fragment
+                    or any(c.isspace() or c in "*\\" for c in value)
+                    or (origin and (parsed.path or parsed.query))
+                ):
+                    raise ValueError("authentication requires exact HTTPS URLs")
+                _ = parsed.port
+        for values, pattern in (
+            (self.realm_roles, r"[a-z][a-z0-9:-]*"),
+            (self.audiences, r"[a-z][a-z0-9-]*"),
+            (self.gateway_permissions, r"[a-z][A-Za-z0-9:._/-]{0,255}"),
+        ):
+            if any(not re.fullmatch(pattern, value) for value in values):
+                raise ValueError("invalid authentication scope")
+        if self.role_claim.split(".")[0] in {
+            "sub",
+            "aud",
+            "azp",
+            "iss",
+            "exp",
+            "iat",
+            "nbf",
+            "resource_access",
+        }:
+            raise ValueError("reserved authentication claim")
+        if self.mode == "login-only":
+            if self.gateway_permissions or "agentgateway" in self.audiences:
+                raise ValueError("login-only cannot request gateway access")
+        elif not self.user_token_forwarding or "agentgateway" not in self.audiences:
+            raise ValueError("gateway mode requires user-token forwarding and audience")
+        return self
+
+
 class Spec(Contract):
     version: str
     status: Literal["staged", "ready"]
@@ -58,6 +131,7 @@ class Spec(Contract):
     packages: list[Package]
     inputs: list[Input] = Field(default_factory=list)
     retention: Retention
+    authentication: Authentication | None = None
 
 
 class Metadata(Contract):
@@ -252,6 +326,7 @@ def check_client(
         for resource in render(inside(client.resolve(), path))
     }
     claimed: set[tuple[str, str, str, str]] = set()
+    authentication_clients: set[str] = set()
     for root, addon in addons:
         key = addon.spec.configuration_key
         selected = values.get(key, {})
@@ -270,6 +345,11 @@ def check_client(
             continue
         if not selected.get("hostname") or source_name not in sources:
             raise ContractError("enabled addon requires a hostname and source")
+        if addon.spec.authentication is not None:
+            client_id = addon.spec.authentication.client_id
+            if client_id in authentication_clients:
+                raise ContractError("selected addons have duplicate authentication client IDs")
+            authentication_clients.add(client_id)
         for item in addon.spec.inputs:
             if (
                 item.owner == "client"
