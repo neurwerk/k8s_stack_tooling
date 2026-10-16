@@ -20,6 +20,7 @@ dependencies = [
     "ldap3>=2.9,<3",
     "cryptography>=46",
     "PyYAML>=6.0,<7",
+    "pyOpenSSL>=25.3",
 ]
 
 [project.scripts]
@@ -36,6 +37,7 @@ upsert-opensearch-user = "k8s_stack_tooling.opensearch.upsert_opensearch_user:ma
 ldap-directory-worker = "k8s_stack_tooling.ldap_directory:main"
 agentgateway-trust-publish = "k8s_stack_tooling.agentgateway_trust:main"
 addon-check = "k8s_stack_tooling.addons:main"
+agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]
