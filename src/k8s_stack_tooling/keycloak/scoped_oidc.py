@@ -223,6 +223,7 @@ def reconcile() -> None:
                 "id.token.claim": "false",
                 "access.token.claim": "true",
                 "introspection.token.claim": "false",
+                "userinfo.token.claim": "false",
             },
         }
         existing = [
