@@ -160,6 +160,8 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                 if config.get("usermodel.realmRoleMapping.rolePrefix") == "":
                     del config["usermodel.realmRoleMapping.rolePrefix"]
                 config.setdefault("introspection.token.claim", "true")
+                if mapper["protocolMapper"] == "oidc-audience-mapper":
+                    config.setdefault("userinfo.token.claim", "false")
                 config.update(self.mapper_config_readback)
             if result and self.fault == "mapper-readback":
                 result[0]["config"]["userinfo.token.claim"] = "false"
@@ -403,3 +405,9 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.reconcile()
                 self.assertEqual(self.calls, [])
+
+    def test_audience_mapper_rejects_userinfo_claim_drift(self):
+        self.mapper_config_readback = {"userinfo.token.claim": "true"}
+        with patch.dict(os.environ, {"KC_CLIENT_AUDIENCES": '["dify"]'}):
+            with self.assertRaisesRegex(RuntimeError, "Audience mapper readback mismatch"):
+                self.reconcile()
