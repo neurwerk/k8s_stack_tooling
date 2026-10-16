@@ -19,6 +19,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "ldap3>=2.9,<3",
     "cryptography>=46",
+    "pyOpenSSL>=25.3",
 ]
 
 [project.scripts]
@@ -33,6 +34,7 @@ upsert-composite-roles = "k8s_stack_tooling.keycloak.upsert_composite_roles:main
 upsert-opensearch-user = "k8s_stack_tooling.opensearch.upsert_opensearch_user:main"
 ldap-directory-worker = "k8s_stack_tooling.ldap_directory:main"
 agentgateway-trust-publish = "k8s_stack_tooling.agentgateway_trust:main"
+agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]
