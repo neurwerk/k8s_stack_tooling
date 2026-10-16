@@ -214,7 +214,7 @@ def test_forgejo_selector_uses_existing_client_values(values: str, expected: boo
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": values}
     )
-    assert target.forgejo_enabled() is expected
+    assert ("knowledge-center" in target.selected_addons()) is expected
     target.core.read_namespaced_config_map.assert_called_once_with("client-values", "auth-keycloak")
 
 
@@ -236,10 +236,10 @@ def test_dify_selector_fails_closed(values: str, expected: bool | None) -> None:
         data={"values.yaml": values}
     )
     if expected is None:
-        with pytest.raises(ClusterError, match="Dify"):
-            target.dify_enabled()
+        with pytest.raises(ClusterError, match=r"[Aa]ddon"):
+            target.selected_addons()
     else:
-        assert target.dify_enabled() is expected
+        assert ("dify" in target.selected_addons()) is expected
     target.core.read_namespaced_config_map.assert_called_once_with("client-values", "auth-keycloak")
 
 
@@ -259,8 +259,8 @@ def test_forgejo_selector_rejects_invalid_values(values: str) -> None:
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": values}
     )
-    with pytest.raises(ClusterError, match="Forgejo"):
-        target.forgejo_enabled()
+    with pytest.raises(ClusterError, match=r"[Aa]ddon"):
+        target.selected_addons()
 
 
 def test_rejects_non_boolean_active_directory_choice() -> None:

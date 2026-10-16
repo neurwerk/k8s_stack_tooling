@@ -521,7 +521,7 @@ wheels = [
 
 [[package]]
 name = "k8s-stack-tooling"
-version = "0.8.1"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -531,6 +531,7 @@ dependencies = [
     { name = "ldap3" },
     { name = "pydantic-settings" },
     { name = "pyopenssl" },
+    { name = "pyyaml" },
     { name = "requests" },
 ]
 
@@ -550,6 +551,7 @@ requires-dist = [
     { name = "ldap3", specifier = ">=2.9,<3" },
     { name = "pydantic-settings", specifier = ">=2.10" },
     { name = "pyopenssl", specifier = ">=25.3" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "requests", specifier = ">=2.31" },
 ]
 

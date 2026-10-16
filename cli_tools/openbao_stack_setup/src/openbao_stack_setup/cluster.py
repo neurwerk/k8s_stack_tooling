@@ -192,37 +192,24 @@ class Cluster:
             raise ClusterError("Keycloak Active Directory enabled value must be a boolean")
         return enabled
 
-    def forgejo_enabled(self) -> bool:
-        """Read the opt-in selector without requiring the optional namespace to exist."""
-        values = self._product_values("client-values", "auth-keycloak", "Client")
-        if not isinstance(values, dict):
-            raise ClusterError("Client values contain an invalid Forgejo contract")
-        forgejo = values.get("forgejo", {})
-        if not isinstance(forgejo, dict):
-            raise ClusterError("Client values contain an invalid Forgejo contract")
-        enabled = forgejo.get("enabled", False)
-        if not isinstance(enabled, bool):
-            raise ClusterError("Forgejo enabled value must be a boolean")
-        if enabled:
-            hostname = forgejo.get("hostname")
-            if not isinstance(hostname, str) or not hostname.strip():
-                raise ClusterError("Enabled Forgejo requires a nonblank hostname in client-values")
-        return enabled
+    def selected_addons(self) -> tuple[str, ...]:
+        """Read addon selections before optional namespaces or credentials exist."""
+        from openbao_stack_setup.catalog import ADDONS
 
-    def dify_enabled(self) -> bool:
-        """Read the optional Dify selection from client values without touching credentials."""
         values = self._product_values("client-values", "auth-keycloak", "Client")
         if not isinstance(values, dict):
-            raise ClusterError("Client values contain an invalid Dify contract")
-        dify = values.get("dify", {})
-        if not isinstance(dify, dict):
-            raise ClusterError("Client values contain an invalid Dify contract")
-        enabled = dify.get("enabled", False)
-        if not isinstance(enabled, bool):
-            raise ClusterError("Dify enabled value must be a boolean")
-        if enabled and (not isinstance(dify.get("hostname"), str) or not dify["hostname"].strip()):
-            raise ClusterError("Enabled Dify requires a nonblank hostname in client-values")
-        return enabled
+            raise ClusterError("Client values contain an invalid addon contract")
+        selected = []
+        for name, catalog in ADDONS.items():
+            product = values.get(catalog.configuration_key, {})
+            if not isinstance(product, dict) or type(product.get("enabled", False)) is not bool:
+                raise ClusterError("Addon enabled value must be a boolean")
+            if product.get("enabled", False):
+                hostname = product.get("hostname")
+                if not isinstance(hostname, str) or not hostname.strip():
+                    raise ClusterError("Enabled addon requires a nonblank hostname")
+                selected.append(name)
+        return tuple(selected)
 
     def wireguard_enabled(self) -> bool:
         """Read the optional gateway's canonical product values, without reading keys."""

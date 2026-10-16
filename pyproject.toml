@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.8.1"
+version = "0.9.0"
 description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
@@ -19,6 +19,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "ldap3>=2.9,<3",
     "cryptography>=46",
+    "PyYAML>=6.0,<7",
     "pyOpenSSL>=25.3",
 ]
 
@@ -26,6 +27,7 @@ dependencies = [
 maintenance-server = "k8s_stack_tooling.maintenance.main:main"
 upsert-realm = "k8s_stack_tooling.keycloak.upsert_realm:main"
 upsert-oidc-client = "k8s_stack_tooling.keycloak.upsert_oidc_client:main"
+upsert-scoped-oidc-client = "k8s_stack_tooling.keycloak.scoped_oidc:main"
 upsert-realm-roles = "k8s_stack_tooling.keycloak.upsert_realm_roles:main"
 upsert-active-directory = "k8s_stack_tooling.keycloak.upsert_active_directory:main"
 upsert-user = "k8s_stack_tooling.keycloak.upsert_user:main"
@@ -34,6 +36,7 @@ upsert-composite-roles = "k8s_stack_tooling.keycloak.upsert_composite_roles:main
 upsert-opensearch-user = "k8s_stack_tooling.opensearch.upsert_opensearch_user:main"
 ldap-directory-worker = "k8s_stack_tooling.ldap_directory:main"
 agentgateway-trust-publish = "k8s_stack_tooling.agentgateway_trust:main"
+addon-check = "k8s_stack_tooling.addons:main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 
 [tool.hatch.build.targets.wheel]

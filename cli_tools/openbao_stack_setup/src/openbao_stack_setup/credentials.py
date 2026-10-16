@@ -87,12 +87,12 @@ BOOTSTRAP_PASSWORDS: tuple[BootstrapPassword, ...] = (
 
 
 def plan_bootstrap_passwords(
-    client: OpenBaoClient, *, dify_enabled: bool = False
+    client: OpenBaoClient, *, addons: tuple[str, ...] = ()
 ) -> dict[str, str]:
     """Generate values only for human passwords that are absent from OpenBao."""
     planned: dict[str, str] = {}
     for password in BOOTSTRAP_PASSWORDS:
-        if password.key == "dify" and not dify_enabled:
+        if password.key == "dify" and "dify" not in addons:
             continue
         current = client.read_secret(password.path)
         if current is None or password.field not in current.values:
@@ -104,10 +104,9 @@ def reconcile_internal_credentials(
     client: OpenBaoClient,
     bootstrap_passwords: dict[str, str],
     *,
-    forgejo_enabled: bool = False,
     wireguard_enabled: bool = False,
     docling_enabled: bool = False,
-    dify_enabled: bool = False,
+    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
 ) -> InternalResult:
     """Add every missing internal field while preserving all existing values."""
@@ -118,7 +117,7 @@ def reconcile_internal_credentials(
     keycloak_generators = _random_fields(
         "dbPassword", "bridgeOidcClientSecret", "librechatOidcClientSecret"
     )
-    if dify_enabled:
+    if "dify" in addons:
         keycloak_generators.update(
             _random_fields("difyOidcClientSecret", "difyAgentgatewayClientSecret")
         )
@@ -136,7 +135,7 @@ def reconcile_internal_credentials(
     bridge_values = dict(bridge_current.values) if bridge_current else {}
     bridge_fixed = {"keycloakClientSecret": _required_text(keycloak, "bridgeOidcClientSecret")}
     dify: dict[str, JsonValue] = {}
-    if dify_enabled:
+    if "dify" in addons:
         dify, count = _reconcile_dify(
             client, keycloak, bridge_values, bridge_fixed, bootstrap_passwords
         )
@@ -293,13 +292,13 @@ def reconcile_internal_credentials(
             },
         ),
     )
-    if dify_enabled:
+    if "dify" in addons:
         postgres_records[1][1]["difyPassword"] = _required_text(dify, "postgresPassword")
     for path, fixed in postgres_records:
         _, count = _upsert(client, path, _random_fields("adminPassword"), fixed)
         _record_change(changed, path, count)
         added += count
-    if forgejo_enabled:
+    if "knowledge-center" in addons:
         forgejo, count = _upsert(
             client,
             "forgejo/internal",

@@ -1,0 +1,195 @@
+"""Exercise addon composition failures with synthetic packages."""
+
+import copy
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+import yaml
+
+from k8s_stack_tooling.addons import ContractError, check, check_client
+
+
+@pytest.fixture
+def package(tmp_path: Path):
+    root = tmp_path / "addon"
+    (root / "release").mkdir(parents=True)
+    manifest = {
+        "apiVersion": "addons.neurwerk.com/v1alpha1",
+        "kind": "AddonRelease",
+        "metadata": {"name": "example"},
+        "spec": {
+            "version": "0.1.0",
+            "status": "ready",
+            "sourceName": "example",
+            "configurationKey": "example",
+            "prerequisites": {
+                "base": "0.3.26",
+                "tooling": "0.9.0",
+                "stackSetup": "0.3.0",
+                "baseCharts": ["charts/postgres/addon"],
+            },
+            "packages": [
+                {"name": "secrets", "path": "releases/secrets"},
+                {"name": "app", "path": "releases/app", "dependsOn": ["secrets"]},
+            ],
+            "retention": {"databases": "retain", "volumes": "retain", "credentials": "retain"},
+        },
+    }
+    secret = {
+        "apiVersion": "external-secrets.io/v1",
+        "kind": "ExternalSecret",
+        "metadata": {"name": "password", "namespace": "example"},
+        "spec": {"target": {"name": "password"}},
+    }
+    app = {
+        "apiVersion": "helm.toolkit.fluxcd.io/v2",
+        "kind": "HelmRelease",
+        "metadata": {"name": "app", "namespace": "example"},
+        "spec": {
+            "chart": {
+                "spec": {"chart": "./charts/postgres/addon", "sourceRef": {"name": "k8s-stack"}}
+            },
+            "valuesFrom": [{"kind": "Secret", "name": "password"}],
+        },
+    }
+    documents = {"secrets": [secret], "app": [app]}
+
+    def save():
+        (root / "release/manifest.yaml").write_text(yaml.safe_dump(manifest))
+
+    save()
+    with patch("k8s_stack_tooling.addons.render", side_effect=lambda path: documents[path.name]):
+        yield root, manifest, documents, save
+
+
+def test_valid_package_and_staged_release_gate(package):
+    root, manifest, _, save = package
+    assert check(root, installable=True).metadata.name == "example"
+    manifest["spec"]["status"] = "staged"
+    save()
+    check(root)
+    with pytest.raises(ContractError, match="staged"):
+        check(root, installable=True)
+
+
+@pytest.mark.parametrize("path", ["../outside", "/outside"])
+def test_path_escape_is_rejected(package, path):
+    root, manifest, _, save = package
+    manifest["spec"]["packages"][0]["path"] = path
+    save()
+    with pytest.raises(ContractError, match="leaves its repository"):
+        check(root)
+
+
+def test_symlink_escape_is_rejected(package, tmp_path):
+    root, manifest, _, save = package
+    (root / "link").symlink_to(tmp_path, target_is_directory=True)
+    manifest["spec"]["packages"][0]["path"] = "link/secrets"
+    save()
+    with pytest.raises(ContractError, match="leaves its repository"):
+        check(root)
+
+
+def test_unknown_contract_field(package):
+    root, manifest, _, save = package
+    manifest["spec"]["unexpected"] = True
+    save()
+    with pytest.raises(ContractError, match="invalid addon release contract"):
+        check(root)
+
+
+def test_duplicate_resource_owner(package):
+    root, _, documents, _ = package
+    documents["app"].append(copy.deepcopy(documents["secrets"][0]))
+    with pytest.raises(ContractError, match="multiple packages"):
+        check(root)
+
+
+def test_missing_secret_producer(package):
+    root, _, documents, _ = package
+    documents["app"][0]["spec"]["valuesFrom"][0]["name"] = "missing"
+    with pytest.raises(ContractError, match="missing values or secret producer"):
+        check(root)
+
+
+def test_missing_readiness_dependency(package):
+    root, manifest, _, save = package
+    manifest["spec"]["packages"][1]["dependsOn"] = []
+    save()
+    with pytest.raises(ContractError, match="missing producer readiness dependency"):
+        check(root)
+
+
+def test_cycle_and_undeclared_chart(package):
+    root, manifest, documents, save = package
+    manifest["spec"]["packages"][0]["dependsOn"] = ["app"]
+    save()
+    with pytest.raises(ContractError, match="cyclic"):
+        check(root)
+    manifest["spec"]["packages"][0]["dependsOn"] = []
+    save()
+    documents["app"][0]["spec"]["chart"]["spec"]["sourceRef"]["name"] = "other"
+    with pytest.raises(ContractError, match="undeclared chart source"):
+        check(root)
+
+
+def test_incompatible_base(package, tmp_path):
+    root, _, _, _ = package
+    base = tmp_path / "base"
+    (base / "release").mkdir(parents=True)
+    (base / "release/manifest.yaml").write_text("spec:\n  version: 0.1.0\n")
+    with pytest.raises(ContractError, match="reviewed prerequisite"):
+        check(root, base=base)
+
+
+def test_client_requires_dependency_and_single_owner(package, tmp_path):
+    root, _, documents, _ = package
+    addon = check(root)
+    client = tmp_path / "client"
+    (client / "config").mkdir(parents=True)
+    (client / "config/client.yaml").write_text("example: {enabled: true, hostname: example.test}\n")
+    source = {
+        "kind": "GitRepository",
+        "metadata": {"name": "example"},
+        "spec": {"ref": {"commit": "a" * 40}},
+    }
+
+    def stage(name, dependency):
+        return {
+            "kind": "Kustomization",
+            "metadata": {"name": name},
+            "spec": {
+                "path": f"./releases/{name}",
+                "sourceRef": {"name": "example"},
+                "wait": True,
+                "dependsOn": [{"name": d} for d in dependency],
+            },
+        }
+
+    resources: list[dict] = [source, stage("secrets", []), stage("app", ["secrets"])]
+
+    def rendered(path):
+        if path.name == "prod-eu-1":
+            return resources
+        if path.parent == root / "releases":
+            return documents[path.name]
+        return []
+
+    with patch("k8s_stack_tooling.addons.render", side_effect=rendered):
+        check_client([(root, addon)], client)
+        resources[-1]["spec"]["dependsOn"] = []
+        with pytest.raises(ContractError, match="readiness dependency"):
+            check_client([(root, addon)], client)
+        resources[-1]["spec"]["dependsOn"] = [{"name": "secrets"}]
+        with pytest.raises(ContractError, match="overlapping ownership"):
+            check_client([(root, addon), (root, addon)], client)
+        resources.append(
+            {
+                "kind": "GitRepository",
+                "metadata": {"name": "k8s-stack"},
+                "spec": {"ref": {"tag": "v0.1.0"}},
+            }
+        )
+        with pytest.raises(ContractError, match="client Base release"):
+            check_client([(root, addon)], client)

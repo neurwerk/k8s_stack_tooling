@@ -15,7 +15,6 @@ from fake import FakeSession
 
 from openbao_stack_setup.catalog import (
     BOOTSTRAP_SECRET_STORES,
-    FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET,
     FORGEJO_EXTERNAL_SECRETS,
     FORGEJO_SECRET_STORE,
     RECONCILIATION_STATE_PATH,
@@ -45,7 +44,7 @@ def test_forgejo_bootstrap_onboarding_and_retry(
         {},
         plan_bootstrap_passwords(api),
         identity,
-        forgejo_enabled=initially_enabled,
+        addons=("knowledge-center",) if initially_enabled else (),
     )
     before = deepcopy(session.secrets)
     if not initially_enabled:
@@ -56,7 +55,7 @@ def test_forgejo_bootstrap_onboarding_and_retry(
         # Existing schema-4 installations need no global migration or state rewrite.
         session.secrets[RECONCILIATION_STATE_PATH].values["packageVersion"] = "0.2.11"
     state = deepcopy(session.secrets[RECONCILIATION_STATE_PATH])
-    report = reconcile_openbao(api, identity, forgejo_enabled=True)
+    report = reconcile_openbao(api, identity, addons=("knowledge-center",))
     assert report.applied_version == report.previous_version == 4
     assert report.internal_fields_added == (0 if initially_enabled else 9)
     assert session.secrets[RECONCILIATION_STATE_PATH] == state
@@ -114,7 +113,7 @@ def test_forgejo_bootstrap_onboarding_and_retry(
             "token_max_ttl": "30m",
         }
     after = deepcopy(session.secrets)
-    assert reconcile_openbao(api, identity, forgejo_enabled=True).internal_fields_added == 0
+    assert reconcile_openbao(api, identity, addons=("knowledge-center",)).internal_fields_added == 0
     session.calls.clear()
     reconcile_openbao(api, identity)
     assert session.secrets == after
@@ -140,14 +139,14 @@ def test_forgejo_copy_conflict_preserves_generated_keys_and_state(
     session.secrets[path].values[field] = secrets.token_urlsafe(32)
     state = deepcopy(session.secrets[RECONCILIATION_STATE_PATH])
     with pytest.raises(OpenBaoError, match="credential mismatch"):
-        reconcile_openbao(api, identity, forgejo_enabled=True)
+        reconcile_openbao(api, identity, addons=("knowledge-center",))
     generated = deepcopy(session.secrets["forgejo/internal"])
     assert session.secrets[RECONCILIATION_STATE_PATH] == state
     with pytest.raises(OpenBaoError, match="credential mismatch"):
-        reconcile_openbao(api, identity, forgejo_enabled=True)
+        reconcile_openbao(api, identity, addons=("knowledge-center",))
     assert session.secrets["forgejo/internal"] == generated
     session.secrets[path].values[field] = generated.values[source]
-    reconcile_openbao(api, identity, forgejo_enabled=True)
+    reconcile_openbao(api, identity, addons=("knowledge-center",))
     assert session.secrets["forgejo/internal"] == generated
 
 
@@ -168,10 +167,7 @@ def test_runtime_convergence_is_selected_and_orders_credentials_before_postgres(
     enabled: bool,
 ) -> None:
     cluster = MagicMock()
-    cluster.external_secret_exists.return_value = False
-    if enabled:
-        cluster.external_secret_exists.side_effect = [False, True]
-    _converge_runtime(cluster, False, enabled)
+    _converge_runtime(cluster, False, addons=("knowledge-center",) if enabled else ())
     stores = list(BOOTSTRAP_SECRET_STORES) + ([FORGEJO_SECRET_STORE] if enabled else [])
     assert cluster.ensure_secret_store_ready.call_args_list == [
         call(target.name, target.namespace) for target in stores
@@ -199,28 +195,20 @@ def test_runtime_convergence_is_selected_and_orders_credentials_before_postgres(
 
 def test_addon_postgres_external_secret_is_refreshed_before_postgres() -> None:
     cluster = MagicMock()
-    cluster.external_secret_exists.return_value = True
-    _converge_runtime(cluster, False, True)
-    target = FORGEJO_ADDON_POSTGRES_EXTERNAL_SECRET
+    _converge_runtime(cluster, False, addons=("knowledge-center",))
     refresh = call.force_external_secret_refresh(
-        target.name, target.namespace, target.target_secret
+        "forgejo-postgres-password", "infra-postgres-operations", "forgejo-postgres-password"
     )
     assert cluster.mock_calls.index(refresh) < cluster.mock_calls.index(
         call.force_reconcile("postgres-operations", "infra-postgres-operations")
-    )
-    legacy = FORGEJO_EXTERNAL_SECRETS[1]
-    assert (
-        call.force_external_secret_refresh(legacy.name, legacy.namespace, legacy.target_secret)
-        not in cluster.mock_calls
     )
 
 
 def test_selected_forgejo_without_postgres_delivery_fails_before_refresh() -> None:
     cluster = MagicMock()
-    cluster.external_secret_exists.return_value = False
-    with pytest.raises(ClusterError, match="Forgejo PostgreSQL ExternalSecret is missing"):
-        _converge_runtime(cluster, False, True)
-    cluster.force_external_secret_refresh.assert_not_called()
+    cluster.force_external_secret_refresh.side_effect = ClusterError("Secret delivery failed")
+    with pytest.raises(ClusterError, match="Secret delivery failed"):
+        _converge_runtime(cluster, False, addons=("knowledge-center",))
     cluster.force_reconcile.assert_not_called()
 
 
@@ -233,8 +221,8 @@ def test_selected_missing_runtime_resource_fails_visibly_and_can_retry() -> None
 
     cluster.ensure_secret_store_ready.side_effect = ready
     with pytest.raises(ClusterError, match="not available yet"):
-        _converge_runtime(cluster, False, True)
+        _converge_runtime(cluster, False, addons=("knowledge-center",))
     cluster.force_reconcile.assert_not_called()
     cluster.ensure_secret_store_ready.side_effect = None
-    _converge_runtime(cluster, False, True)
+    _converge_runtime(cluster, False, addons=("knowledge-center",))
     cluster.reconcile_kustomization.assert_called_once_with("infrastructure")
