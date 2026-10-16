@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from k8s_stack_tooling.addons import ContractError, check, check_client
+from k8s_stack_tooling.addons import Authentication, ContractError, check, check_client
 
 
 @pytest.fixture
@@ -178,6 +178,10 @@ def test_client_requires_dependency_and_single_owner(package, tmp_path):
 
     with patch("k8s_stack_tooling.addons.render", side_effect=rendered):
         check_client([(root, addon)], client)
+        authenticated = addon.model_copy(deep=True)
+        authenticated.spec.authentication = Authentication.model_validate(authentication())
+        with pytest.raises(ContractError, match="duplicate authentication client IDs"):
+            check_client([(root, authenticated), (root, authenticated)], client)
         resources[-1]["spec"]["dependsOn"] = []
         with pytest.raises(ContractError, match="readiness dependency"):
             check_client([(root, addon)], client)
@@ -193,3 +197,98 @@ def test_client_requires_dependency_and_single_owner(package, tmp_path):
         )
         with pytest.raises(ContractError, match="client Base release"):
             check_client([(root, addon)], client)
+
+
+def authentication():
+    return {
+        "clientId": "example",
+        "redirectUris": ["https://example.test/oauth/callback"],
+        "webOrigins": ["https://example.test"],
+        "realmRoles": ["example-user"],
+        "roleClaim": "example_roles",
+    }
+
+
+@pytest.mark.parametrize(
+    "client_id",
+    [
+        "agentgateway",
+        "studio",
+        "keycloak-api-key-bridge",
+        "account",
+        "account-console",
+        "admin-cli",
+        "broker",
+        "realm-management",
+        "security-admin-console",
+    ],
+)
+def test_reserved_authentication_client(package, client_id):
+    root, manifest, _, save = package
+    manifest["spec"]["authentication"] = authentication() | {"clientId": client_id}
+    save()
+    with pytest.raises(ContractError, match="invalid addon release contract"):
+        check(root)
+
+
+@pytest.mark.parametrize("client_id", ["forgejo", "dify", "librechat"])
+def test_supported_application_authentication_client(package, client_id):
+    root, manifest, _, save = package
+    manifest["spec"]["authentication"] = authentication() | {"clientId": client_id}
+    save()
+    auth = check(root).spec.authentication
+    assert auth is not None
+    assert auth.client_id == client_id
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"redirectUris": ["https://example.test/*"]},
+        {"redirectUris": ["http://example.test/callback"]},
+        {"redirectUris": ["https://user:pass@example.test/callback"]},
+        {"redirectUris": ["https://example.test/callback#fragment"]},
+        {"redirectUris": ["https://example.test/callback\\other"]},
+        {"redirectUris": ["https://example.test/call back"]},
+        {"webOrigins": ["https://example.test/"]},
+        {"webOrigins": ["https://example.test?query=yes"]},
+        {"realmRoles": []},
+        {"realmRoles": ["example-user", "example-user"]},
+        {"roleClaim": "sub"},
+        {"roleClaim": "resource_access.roles"},
+        {"audiences": ["agentgateway"]},
+        {"gatewayPermissions": ["llm:invoke"]},
+        {"mode": "login+gateway", "audiences": ["agentgateway"]},
+        {"mode": "login+gateway", "userTokenForwarding": True},
+        {"clientApproval": {"realmRoles": ["example-user"]}},
+    ],
+)
+def test_invalid_authentication_declaration(package, change):
+    root, manifest, _, save = package
+    manifest["spec"]["authentication"] = authentication() | change
+    save()
+    with pytest.raises(ContractError, match="invalid addon release contract"):
+        check(root)
+
+
+def test_optional_authentication_and_explicit_forwarding(package):
+    root, manifest, _, save = package
+    assert check(root).spec.authentication is None
+    manifest["spec"]["authentication"] = authentication()
+    save()
+    auth = check(root).spec.authentication
+    assert auth is not None
+    assert auth.mode == "login-only"
+    assert auth.refresh_token_rotation is True
+    manifest["spec"]["authentication"].update(
+        {
+            "mode": "login+gateway",
+            "userTokenForwarding": True,
+            "audiences": ["agentgateway"],
+            "gatewayPermissions": ["model:vendor/Model-1.2:invoke"],
+        }
+    )
+    save()
+    auth = check(root).spec.authentication
+    assert auth is not None
+    assert auth.gateway_permissions == ["model:vendor/Model-1.2:invoke"]
