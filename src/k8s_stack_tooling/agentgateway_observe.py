@@ -404,21 +404,11 @@ def _route_loaded(dump: dict[str, Any], listener: dict[str, Any], expected: Rout
             reference = f"{NAMESPACE}/{name}/backend.{NAMESPACE}.{expected.name}.models"
             if concrete[0].get("backend") != {"backend": reference, "weight": 1}:
                 return False
-            # Check the live provider entry as well as the router's concrete reference.
-            providers = [
-                item["backend"]["ai"]
-                for item in dump.get("backends", [])
-                if "ai" in item.get("backend", {})
-            ]
-            if not any(
-                provider.get("namespace") == NAMESPACE
-                and provider.get("name") == name
-                and any(
-                    group.get("active") for group in provider.get("target", {}).get("providers", [])
-                )
-                for provider in providers
-            ):
-                return False
+            # v1.6.0 omits backend map keys from its dump. A provider's namespace/name
+            # cannot prove this scoped reference, even if only one same-name entry
+            # remains: it could belong to a sibling API/proxy route. Stay unknown
+            # for these aliases until native evidence can establish the association.
+            return False
     return True
 
 

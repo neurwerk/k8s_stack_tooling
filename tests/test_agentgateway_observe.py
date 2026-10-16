@@ -296,6 +296,9 @@ class MemoryObserver(observe.KubernetesObserver):
     "fault", [None, "mixed", "missing", "zero", "membership", "not-ready", "old"]
 )
 def test_publication_never_turns_incomplete_evidence_into_current_health(monkeypatch, fault):
+    # Isolate aggregation with independently proven routes; scoped-alias proof is
+    # deliberately unavailable and covered by the shared-provider regression below.
+    monkeypatch.setattr(observe, "_route_loaded", lambda *_args: True)
     api = MemoryObserver()
     if fault == "zero":
         api.members = observe.Membership((), "empty")
@@ -515,7 +518,10 @@ def test_broken_route_or_model_association_cannot_publish_available(monkeypatch,
     assert all(endpoint["state"] == "unknown" for endpoint in result["endpoints"])
 
 
-def test_failed_signer_probe_stays_unknown_per_replica(monkeypatch):
+@pytest.mark.parametrize("missing_api_provider", [False, True])
+def test_shared_provider_stays_unknown_without_losing_signer_evidence(
+    monkeypatch, missing_api_provider
+):
     api = MemoryObserver()
     listener = observe.Listener(
         name="inspect-first",
@@ -548,6 +554,12 @@ def test_failed_signer_probe_stays_unknown_per_replica(monkeypatch):
         routes={},
     )
     native_model_route(dump, inspected["listeners"]["listener-key"], "ai-first-proxy", "/", "first")
+    # The dump loses registry keys: API and proxy scoped providers look identical.
+    api_provider, proxy_provider = dump["backends"][1], dump["backends"][-1]
+    assert api_provider == proxy_provider
+    if missing_api_provider:
+        assert dump["backends"].pop(1) is api_provider
+        assert any(provider is proxy_provider for provider in dump["backends"])
     dump["binds"].append(inspected)
     policy = deepcopy(dump["policies"][0])
     policy["name"]["name"] = "ai-admission-inspect-first"
@@ -572,14 +584,15 @@ def test_failed_signer_probe_stays_unknown_per_replica(monkeypatch):
 
     monkeypatch.setattr(observe, "probe_signer", probe)
     result = observe.observe(api, observe.Deadline(5))
+    assert result["applied_policy_revision"] is None
     assert len(calls) == 2
     assert {row["pod_uid"]: row["state"] for row in result["signers"]} == {
         "old-uid": "verified",
         "new-uid": "unknown",
     }
     assert {e["id"]: e["state"] for e in result["endpoints"]} == {
-        "api-first": "available",
-        "api-second": "available",
+        "api-first": "unknown",
+        "api-second": "unknown",
         "forward-proxy": "unknown",
     }
 
