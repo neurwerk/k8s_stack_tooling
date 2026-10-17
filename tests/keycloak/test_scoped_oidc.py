@@ -44,6 +44,8 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
         self.scope_roles = []
         self.scope_client_roles = {}
         self.scope_mappers = []
+        self.scope_definition_readback = {}
+        self.scope_definition_missing = ()
         self.subject_mappers = [
             {
                 "protocolMapper": "oidc-sub-mapper",
@@ -131,6 +133,14 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
             return (404, None) if self.fault == "missing-role" else (200, copy.deepcopy(role))
         if path.startswith("/client-scopes/"):
             self.assertEqual(method, "GET", "shared scopes must never be modified")
+            if path.count("/") == 2:
+                definition = copy.deepcopy(
+                    next(s for s in self.scopes if s["id"] == path.split("/")[2])
+                )
+                definition.update(self.scope_definition_readback)
+                for key in self.scope_definition_missing:
+                    definition.pop(key, None)
+                return 200, definition
             if path.endswith("/scope-mappings/realm/composite"):
                 if "/offline_access-id/" in path:
                     return 200, copy.deepcopy(self.offline_roles)
@@ -231,7 +241,9 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
         if parts[0] in self.attached:
             kind = parts[0]
             if method == "GET":
-                return 200, copy.deepcopy(self.attached[kind])
+                return 200, [
+                    {"id": scope["id"], "name": scope["name"]} for scope in self.attached[kind]
+                ]
             if self.fault != "attachment-readback":
                 if method == "DELETE":
                     self.attached[kind] = [
@@ -245,6 +257,22 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                     )
             return 204, None
         self.fail(f"Unexpected request: {method} {path}")
+
+    def test_canonical_identity_drift_disables_an_enabled_client(self):
+        for field, wrong in (("id", "other-id"), ("name", "other-name"), ("protocol", "saml")):
+            for missing in (False, True):
+                with self.subTest(field=field, missing=missing):
+                    self.reconcile()
+                    self.assertTrue(self.client["enabled"])
+                    self.scope_definition_readback = {} if missing else {field: wrong}
+                    self.scope_definition_missing = (field,) if missing else ()
+                    with self.assertRaisesRegex(
+                        RuntimeError, "Identity client scope readback mismatch"
+                    ):
+                        self.reconcile()
+                    self.assertFalse(self.client["enabled"])
+                    self.scope_definition_readback = {}
+                    self.scope_definition_missing = ()
 
     def test_exact_scopes_and_effective_mapper_are_idempotent(self):
         self.attached = {
