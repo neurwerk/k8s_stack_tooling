@@ -14,6 +14,7 @@ from fake import FakeSession, StoredSecret
 
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 from openbao_stack_setup.credentials import (
+    _upsert,
     plan_bootstrap_passwords,
     reconcile_internal_credentials,
 )
@@ -64,6 +65,9 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert "dify" not in base_passwords
     reconcile_internal_credentials(api, base_passwords)
     assert "frontend-dify/internal" not in session.secrets
+    assert "frontend-librechat/internal" not in session.secrets
+    assert "librechat-code-interpreter/internal" not in session.secrets
+    assert "librechatOidcClientSecret" not in session.secrets["auth-keycloak/internal"].values
     assert "difyOidcClientSecret" not in session.secrets["auth-keycloak/internal"].values
     assert "difyAgentgatewayClientSecret" not in session.secrets["auth-keycloak/internal"].values
     assert (
@@ -77,7 +81,7 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert "difyPassword" not in session.secrets["infra-postgres-operations/internal"].values
 
     planned = plan_bootstrap_passwords(api, addons=("dify",))
-    first = reconcile_internal_credentials(api, planned, addons=("dify",))
+    first = reconcile_internal_credentials(api, planned, addons=("dify", "librechat"))
     original = {path: dict(record.values) for path, record in session.secrets.items()}
     second = reconcile_internal_credentials(api, {})
 
@@ -86,6 +90,8 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "auth-keycloak/internal",
         "auth-keycloak-api-key-bridge/internal",
         "infra-postgres-operations/internal",
+        "frontend-librechat/internal",
+        "infra-postgres-operations/librechat",
     }
     assert first.added_fields > 0
     assert set(planned) == {"dify"}
@@ -113,32 +119,16 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     )
 
     librechat = original["frontend-librechat/internal"]
-    code_interpreter = original["librechat-code-interpreter/internal"]
     assert {
         "valkeyPassword",
-        "ragPostgresqlUser",
-        "ragPostgresqlPassword",
-        "ragOpenaiApiKey",
+        "documentdbUser",
+        "documentdbPassword",
         "adminPanelSessionSecret",
         "adminPanelMetricsSecret",
-        "codeInterpreterJwtPrivateKey",
-        "codeInterpreterJwtPublicKey",
     }.issubset(librechat)
-    assert librechat["ragPostgresqlUser"] == "librechat_rag"
-    assert set(code_interpreter) == {
-        "internalServiceToken",
-        "valkeyPassword",
-        "egressGrantSecret",
-        "executionManifestPrivateKey",
-        "executionManifestPublicKey",
-        "jwtPublicKey",
-    }
-    assert_ed25519_pair(librechat, "codeInterpreterJwtPrivateKey", "codeInterpreterJwtPublicKey")
-    assert_ed25519_pair(
-        code_interpreter, "executionManifestPrivateKey", "executionManifestPublicKey"
-    )
-    assert code_interpreter["jwtPublicKey"] == librechat["codeInterpreterJwtPublicKey"]
-    assert code_interpreter["valkeyPassword"] != librechat["valkeyPassword"]
+    assert librechat["documentdbUser"] == "librechat"
+    assert "librechat-code-interpreter/internal" not in original
+    assert not {"ragPostgresqlPassword", "codeInterpreterJwtPrivateKey"} & librechat.keys()
     bridge = original["auth-keycloak-api-key-bridge/internal"]
     dify_key = dify["agentgatewayApiKey"]
     assert isinstance(dify_key, str)
@@ -188,10 +178,8 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "agentgatewayPassword",
         "apiKeyBridgePassword",
         "studioPassword",
-        "documentdbPassword",
         "difyPassword",
         "langfusePassword",
-        "librechatRagPassword",
     }
     assert postgres_auth["adminPassword"]
     assert postgres_operations["adminPassword"]
@@ -199,7 +187,10 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert postgres_operations["apiKeyBridgePassword"] == bridge["postgresqlPassword"]
     assert postgres_operations["studioPassword"] == studio["postgresqlPassword"]
     assert postgres_auth["keycloakPassword"] == original["auth-keycloak/internal"]["dbPassword"]
-    assert postgres_operations["documentdbPassword"] == librechat["documentdbPassword"]
+    assert (
+        original["infra-postgres-operations/librechat"]["password"]
+        == librechat["documentdbPassword"]
+    )
     assert (
         postgres_operations["difyPassword"]
         == original["frontend-dify/internal"]["postgresPassword"]
@@ -208,7 +199,6 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         postgres_operations["langfusePassword"]
         == original["monitor-langfuse/internal"]["postgresqlPassword"]
     )
-    assert postgres_operations["librechatRagPassword"] == librechat["ragPostgresqlPassword"]
 
 
 def test_internal_fixed_value_mismatch_is_rejected(tmp_path: Path) -> None:
@@ -283,23 +273,22 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
         ("infra-postgres-operations/internal", "agentgatewayPassword"),
         ("infra-postgres-operations/internal", "apiKeyBridgePassword"),
         ("infra-postgres-operations/internal", "studioPassword"),
-        ("infra-postgres-operations/internal", "documentdbPassword"),
+        ("infra-postgres-operations/librechat", "password"),
         ("infra-postgres-operations/internal", "difyPassword"),
         ("infra-postgres-operations/internal", "langfusePassword"),
-        ("infra-postgres-operations/internal", "librechatRagPassword"),
     ],
 )
 def test_postgres_consumer_conflicts_are_rejected(tmp_path: Path, path: str, field: str) -> None:
     session = FakeSession()
     api = client(tmp_path, session)
     reconcile_internal_credentials(
-        api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify",)
+        api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify", "librechat")
     )
     session.secrets[path].values[field] = "conflict"
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match=rf"credential mismatch at {path}/{field}"):
-        reconcile_internal_credentials(api, {}, addons=("dify",))
+        reconcile_internal_credentials(api, {}, addons=("dify", "librechat"))
 
     assert session.secrets[path].values == existing
 
@@ -358,12 +347,13 @@ def test_incomplete_ed25519_pair_is_rejected_without_rotation(
 ) -> None:
     session = FakeSession()
     api = client(tmp_path, session)
-    reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
+    _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
+    assert_ed25519_pair(session.secrets[path].values, private_field, public_field)
     del session.secrets[path].values[missing_field]
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match="key pair is incomplete"):
-        reconcile_internal_credentials(api, {})
+        _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
 
     assert session.secrets[path].values == existing
     assert (private_field in existing) != (public_field in existing)
@@ -381,26 +371,15 @@ def test_mismatched_ed25519_pair_is_rejected_without_rotation(
 ) -> None:
     session = FakeSession()
     api = client(tmp_path, session)
-    reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
+    private_field = public_field.replace("Public", "Private")
+    _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
     session.secrets[path].values[public_field] = unrelated_public_key()
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match="key pair does not match"):
-        reconcile_internal_credentials(api, {})
+        _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
 
     assert session.secrets[path].values == existing
-
-
-def test_code_interpreter_jwt_verifier_mismatch_is_rejected(tmp_path: Path) -> None:
-    session = FakeSession()
-    api = client(tmp_path, session)
-    reconcile_internal_credentials(api, plan_bootstrap_passwords(api))
-    session.secrets["librechat-code-interpreter/internal"].values["jwtPublicKey"] = (
-        unrelated_public_key()
-    )
-
-    with pytest.raises(OpenBaoError, match=r"credential mismatch.*jwtPublicKey"):
-        reconcile_internal_credentials(api, {})
 
 
 def test_existing_bootstrap_passwords_are_not_planned(tmp_path: Path) -> None:

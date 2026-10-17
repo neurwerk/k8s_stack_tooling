@@ -57,17 +57,20 @@ def test_bootstrap_seeds_exact_roles_and_provider_records(tmp_path: Path) -> Non
 
     assert report.external_records_changed == 6
     assert "frontend-librechat/external" not in session.secrets
-    assert report.internal_records_changed == 13
-    assert "librechat-code-interpreter" in ROLE_NAMESPACES
+    assert report.internal_records_changed == 11
+    assert "librechat-code-interpreter" not in ROLE_NAMESPACES
+    assert "frontend-librechat" not in ROLE_NAMESPACES
     assert {"infra-postgres-auth", "infra-postgres-operations"}.issubset(ROLE_NAMESPACES)
     role_calls = [call for call in session.calls if call.path.startswith("auth/kubernetes/role/")]
     assert len(role_calls) == len(ROLE_NAMESPACES) + 1
-    assert any(
+    assert not any(
         call.path == "auth/kubernetes/role/librechat-code-interpreter" for call in role_calls
     )
     policy_calls = [call for call in session.calls if call.path.startswith("sys/policies/acl/")]
     assert len(policy_calls) == len(ROLE_NAMESPACES) + 1
-    assert any(call.path == "sys/policies/acl/librechat-code-interpreter" for call in policy_calls)
+    assert not any(
+        call.path == "sys/policies/acl/librechat-code-interpreter" for call in policy_calls
+    )
     for namespace in ("infra-postgres-auth", "infra-postgres-operations"):
         assert any(call.path == f"auth/kubernetes/role/{namespace}" for call in role_calls)
         assert any(call.path == f"sys/policies/acl/{namespace}" for call in policy_calls)

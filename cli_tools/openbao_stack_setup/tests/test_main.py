@@ -84,7 +84,7 @@ def opened(api: MagicMock) -> Iterator[MagicMock]:
 
 
 @pytest.mark.parametrize(
-    "addons", [(), ("dify",), ("knowledge-center",), ("dify", "knowledge-center")]
+    "addons", [(), ("librechat",), ("dify",), ("knowledge-center",), ("dify", "knowledge-center")]
 )
 def test_addon_refresh_catalog_is_complete_and_selected(addons: tuple[str, ...]) -> None:
     cluster = MagicMock()
@@ -93,6 +93,12 @@ def test_addon_refresh_catalog_is_complete_and_selected(addons: tuple[str, ...])
     cluster.reset_mock()
     _refresh_bootstrap_external_secrets(cluster, False, addons=addons)
     expected = []
+    if "librechat" in addons:
+        expected += [
+            ("frontend-librechat-runtime-secret", "frontend-librechat"),
+            ("librechat-oidc-secret", "auth-keycloak"),
+            ("librechat-documentdb-password", "infra-postgres-operations"),
+        ]
     if "dify" in addons:
         expected += [
             ("dify-oidc-secret", "auth-keycloak"),
@@ -117,6 +123,7 @@ def test_addon_refresh_catalog_is_complete_and_selected(addons: tuple[str, ...])
     [
         ("dify", "frontend-dify-postgres"),
         ("knowledge-center", "forgejo-postgres"),
+        ("librechat", "librechat-documentdb"),
     ],
 )
 def test_addon_refresh_orders_secrets_database_and_consumers(addon_id: str, database: str) -> None:
@@ -751,16 +758,6 @@ def test_bootstrap_refreshes_every_declared_external_secret() -> None:
             "auth-keycloak-api-key-bridge-openbao-secret",
         ),
         (
-            "frontend-librechat-runtime-secret",
-            "frontend-librechat",
-            "frontend-librechat-runtime-secret",
-        ),
-        (
-            "frontend-librechat-code-interpreter-runtime-secret",
-            "librechat-code-interpreter",
-            "frontend-librechat-code-interpreter-runtime-secret",
-        ),
-        (
             "frontend-studio-openbao-secret",
             "frontend-studio",
             "frontend-studio-openbao-secret",
@@ -844,8 +841,6 @@ def test_bootstrap_converges_every_declared_secret_store(
     expected = (
         ("auth-keycloak-openbao-secret-store", "auth-keycloak"),
         ("auth-keycloak-api-key-bridge-openbao-secret-store", "auth-keycloak-api-key-bridge"),
-        ("frontend-librechat-openbao-secret-store", "frontend-librechat"),
-        ("librechat-code-interpreter-openbao-secret-store", "librechat-code-interpreter"),
         ("frontend-studio-openbao-secret-store", "frontend-studio"),
         ("infra-agentgateway-openbao-secret-store", "infra-agentgateway"),
         ("infra-cert-manager-openbao-secret-store", "infra-cert-manager"),
@@ -866,8 +861,8 @@ def test_bootstrap_converges_every_declared_secret_store(
         call(name, namespace) for name, namespace in expected
     ]
     output = capsys.readouterr().out
-    assert "(1/14)" in output
-    assert "(14/14)" in output
+    assert "(1/12)" in output
+    assert "(12/12)" in output
 
 
 def test_bootstrap_force_reconciles_blocked_helm_releases() -> None:
