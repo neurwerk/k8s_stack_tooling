@@ -259,8 +259,8 @@ ADDONS = {
             HelmReleaseTarget("frontend-librechat-shared", "frontend-librechat"),
         ),
         (
-            "statefulset/frontend-librechat-valkey",
-            "statefulset/frontend-librechat-meilisearch",
+            "statefulset/frontend-librechat-valkey-stateful-set",
+            "statefulset/frontend-librechat-meilisearch-stateful-set",
             "deployment/frontend-librechat",
             "deployment/frontend-librechat-admin-panel",
         ),
