@@ -88,7 +88,10 @@ BEGIN
        WHERE c.rolname = application_user AND
          (p.rolname != 'documentdb_admin_role' OR g.rolname != 'documentdb' OR m.admin_option)) OR
      EXISTS (SELECT FROM pg_auth_members m JOIN pg_roles p ON p.oid = m.roleid
-       WHERE p.rolname = application_user) THEN
+       JOIN pg_roles c ON c.oid = m.member JOIN pg_roles g ON g.oid = m.grantor
+       WHERE p.rolname = application_user AND NOT
+         (c.rolname = 'operations_admin' AND g.rolname = 'documentdb'
+          AND m.admin_option AND NOT m.inherit_option AND NOT m.set_option)) THEN
     RAISE EXCEPTION 'Existing DocumentDB application identity has unexpected privileges';
   END IF;
 END $verify$;
@@ -169,7 +172,12 @@ BEGIN
        AND g.rolname = 'documentdb' AND NOT m.admin_option) OR
      EXISTS (SELECT FROM pg_auth_members m JOIN pg_roles p ON p.oid = m.roleid
        JOIN pg_roles c ON c.oid = m.member WHERE c.rolname = application_user
-       AND (p.rolname != 'documentdb_admin_role' OR m.admin_option)) THEN
+       AND (p.rolname != 'documentdb_admin_role' OR m.admin_option)) OR
+     EXISTS (SELECT FROM pg_auth_members m JOIN pg_roles p ON p.oid = m.roleid
+       JOIN pg_roles c ON c.oid = m.member JOIN pg_roles g ON g.oid = m.grantor
+       WHERE p.rolname = application_user AND NOT
+         (c.rolname = 'operations_admin' AND g.rolname = 'documentdb'
+          AND m.admin_option AND NOT m.inherit_option AND NOT m.set_option)) THEN
     RAISE EXCEPTION 'DocumentDB application memberships failed verification';
   END IF;
 END $verify$;
