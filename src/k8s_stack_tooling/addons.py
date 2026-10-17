@@ -33,10 +33,20 @@ class Prerequisites(Contract):
         return value
 
 
+class HelmOutput(Contract):
+    """A ConfigMap produced by a package's namespace-local HelmRelease."""
+
+    kind: Literal["ConfigMap"]
+    namespace: str
+    name: str
+    helm_release: str = Field(alias="helmRelease")
+
+
 class Package(Contract):
     name: str
     path: str
     depends_on: list[str] = Field(default_factory=list, alias="dependsOn")
+    helm_outputs: list[HelmOutput] = Field(default_factory=list, alias="helmOutputs")
 
 
 class Retention(Contract):
@@ -229,7 +239,16 @@ def check(root: Path, *, installable: bool = False, base: Path | None = None) ->
     outputs: dict[tuple[str, str, str], str | None] = {
         (item.kind, item.namespace, item.name): None for item in addon.spec.inputs
     }
-    consumers: list[tuple[str, str, dict]] = []
+    generated: dict[tuple[str, str, str], tuple[str, str]] = {}
+    for name, package in packages.items():
+        for output in package.helm_outputs:
+            key = (output.kind, output.namespace, output.name)
+            if key in outputs:
+                raise ContractError("duplicate input or generated producer")
+            outputs[key] = name
+            generated[key] = (name, output.helm_release)
+    helm_releases: dict[tuple[str, str, str], dict] = {}
+    consumers: list[tuple[str, str, str, dict]] = []
     for name, package in packages.items():
         visit(name)
         resources = render(inside(root, package.path))
@@ -255,14 +274,17 @@ def check(root: Path, *, installable: bool = False, base: Path | None = None) ->
                 raise ContractError("release packages must not contain Secret values")
             if resource["kind"] != "HelmRelease":
                 continue
+            helm_releases[(name, namespace, resource_name)] = resource
             for reference in resource["spec"].get("valuesFrom", []):
                 if not reference.get("optional", False):
-                    consumers.append((name, namespace, reference))
+                    consumers.append((name, namespace, resource_name, reference))
             password_secret = (
                 resource["spec"].get("values", {}).get("addon", {}).get("passwordSecret")
             )
             if password_secret:
-                consumers.append((name, namespace, {"kind": "Secret", "name": password_secret}))
+                consumers.append(
+                    (name, namespace, resource_name, {"kind": "Secret", "name": password_secret})
+                )
             chart = resource["spec"]["chart"]["spec"]
             source = chart["sourceRef"]["name"]
             if source == addon.spec.source_name:
@@ -289,13 +311,28 @@ def check(root: Path, *, installable: bool = False, base: Path | None = None) ->
             result.update(ancestors(dependency))
         return result
 
-    for consumer, namespace, reference in consumers:
+    for (_, namespace, _), (package, release) in generated.items():
+        if (package, namespace, release) not in helm_releases:
+            raise ContractError("missing namespace-local Helm output producer")
+    for consumer, namespace, release, reference in consumers:
         key = (reference["kind"], namespace, reference["name"])
         if key not in outputs:
             raise ContractError("missing values or secret producer")
         producer = outputs[key]
         if producer is not None and producer != consumer and producer not in ancestors(consumer):
             raise ContractError("missing producer readiness dependency")
+        if key in generated and producer == consumer:
+            producer_release = generated[key][1]
+            if release == producer_release:
+                raise ContractError("HelmRelease cannot consume its own generated output")
+            dependencies = helm_releases[(consumer, namespace, release)]["spec"].get(
+                "dependsOn", []
+            )
+            if not any(
+                item["name"] == producer_release and item.get("namespace", namespace) == namespace
+                for item in dependencies
+            ):
+                raise ContractError("missing Helm output readiness dependency")
     if base is not None:
         base = base.resolve()
         manifest = load(base / "release/manifest.yaml")
@@ -394,6 +431,11 @@ def check_client(
                 raise ContractError("addon stage must check readiness")
             for resource in render(inside(root.resolve(), package.path)):
                 resource_id = identity(resource)
+                if resource_id in claimed:
+                    raise ContractError("selected addons have overlapping ownership")
+                claimed.add(resource_id)
+            for output in package.helm_outputs:
+                resource_id = ("", output.kind, output.namespace, output.name)
                 if resource_id in claimed:
                     raise ContractError("selected addons have overlapping ownership")
                 claimed.add(resource_id)

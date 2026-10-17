@@ -13,13 +13,11 @@ ACTIVE_DIRECTORY_FIELDS = ("activeDirectoryBindDn", "activeDirectoryBindCredenti
 ROLE_NAMESPACES: tuple[str, ...] = (
     "auth-keycloak",
     "auth-keycloak-api-key-bridge",
-    "frontend-librechat",
     "frontend-studio",
     "infra-agentgateway",
     "infra-cert-manager",
     "infra-postgres-auth",
     "infra-postgres-operations",
-    "librechat-code-interpreter",
     "monitor-fluent-bit",
     "monitor-kube-prometheus-stack",
     "monitor-langfuse",
@@ -172,16 +170,6 @@ BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
         "auth-keycloak-api-key-bridge-openbao-secret",
     ),
     ExternalSecretTarget(
-        "frontend-librechat-runtime-secret",
-        "frontend-librechat",
-        "frontend-librechat-runtime-secret",
-    ),
-    ExternalSecretTarget(
-        "frontend-librechat-code-interpreter-runtime-secret",
-        "librechat-code-interpreter",
-        "frontend-librechat-code-interpreter-runtime-secret",
-    ),
-    ExternalSecretTarget(
         "frontend-studio-openbao-secret", "frontend-studio", "frontend-studio-openbao-secret"
     ),
     INFRA_AGENTGATEWAY_EXTERNAL_SECRET,
@@ -246,6 +234,37 @@ class AddonCatalog:
 
 
 ADDONS = {
+    "librechat": AddonCatalog(
+        "frontendLibrechat",
+        "frontend-librechat",
+        SecretStoreTarget("frontend-librechat-openbao-secret-store", "frontend-librechat"),
+        (
+            ExternalSecretTarget(
+                "frontend-librechat-runtime-secret",
+                "frontend-librechat",
+                "frontend-librechat-runtime-secret",
+            ),
+            ExternalSecretTarget("librechat-oidc-secret", "auth-keycloak", "librechat-oidc-secret"),
+            ExternalSecretTarget(
+                "librechat-documentdb-password",
+                "infra-postgres-operations",
+                "librechat-documentdb-password",
+            ),
+        ),
+        HelmReleaseTarget("librechat-documentdb", "infra-postgres-operations"),
+        (
+            HelmReleaseTarget("keycloak-librechat-access", "auth-keycloak"),
+            HelmReleaseTarget("librechat-oidc-settings", "auth-keycloak"),
+            HelmReleaseTarget("keycloak-librechat-oidc", "auth-keycloak"),
+            HelmReleaseTarget("frontend-librechat-shared", "frontend-librechat"),
+        ),
+        (
+            "statefulset/frontend-librechat-valkey",
+            "statefulset/frontend-librechat-meilisearch",
+            "deployment/frontend-librechat",
+            "deployment/frontend-librechat-admin-panel",
+        ),
+    ),
     "dify": AddonCatalog(
         "dify",
         "frontend-dify",
@@ -295,10 +314,6 @@ BOOTSTRAP_SECRET_STORES: tuple[SecretStoreTarget, ...] = (
     SecretStoreTarget("auth-keycloak-openbao-secret-store", "auth-keycloak"),
     SecretStoreTarget(
         "auth-keycloak-api-key-bridge-openbao-secret-store", "auth-keycloak-api-key-bridge"
-    ),
-    SecretStoreTarget("frontend-librechat-openbao-secret-store", "frontend-librechat"),
-    SecretStoreTarget(
-        "librechat-code-interpreter-openbao-secret-store", "librechat-code-interpreter"
     ),
     SecretStoreTarget("frontend-studio-openbao-secret-store", "frontend-studio"),
     SecretStoreTarget("infra-agentgateway-openbao-secret-store", "infra-agentgateway"),
@@ -410,8 +425,7 @@ path "secret/metadata/contextforge/provider-apps" {
 """
     if namespace not in (
         *ROLE_NAMESPACES,
-        "frontend-dify",
-        "forgejo",
+        *(addon.namespace for addon in ADDONS.values()),
         "wireguard",
         *DOCLING_NAMESPACES,
     ):

@@ -121,6 +121,100 @@ def test_missing_readiness_dependency(package):
         check(root)
 
 
+@pytest.fixture
+def helm_output(package):
+    root, manifest, documents, save = package
+    producer = copy.deepcopy(documents["app"][0])
+    producer["metadata"]["name"] = "settings"
+    producer["spec"]["valuesFrom"] = []
+    documents["app"].append(producer)
+    consumer = documents["app"][0]
+    consumer["spec"]["valuesFrom"].append({"kind": "ConfigMap", "name": "settings-values"})
+    consumer["spec"]["dependsOn"] = [{"name": "settings"}]
+    manifest["spec"]["packages"][1]["helmOutputs"] = [
+        {
+            "kind": "ConfigMap",
+            "namespace": "example",
+            "name": "settings-values",
+            "helmRelease": "settings",
+        }
+    ]
+    save()
+    return root, manifest, documents, save
+
+
+def test_chart_generated_values_have_a_real_helm_producer(helm_output):
+    root, _, documents, _ = helm_output
+    check(root)
+    documents["app"][0]["spec"]["dependsOn"][0]["namespace"] = "example"
+    check(root)
+
+
+@pytest.mark.parametrize("failure", ["missing", "namespace", "package", "dependency", "self"])
+def test_chart_generated_values_reject_invalid_producer_ordering(helm_output, failure):
+    root, manifest, documents, save = helm_output
+    if failure == "missing":
+        documents["app"].pop()
+    elif failure == "namespace":
+        documents["app"][-1]["metadata"]["namespace"] = "other"
+    elif failure == "package":
+        documents["secrets"].append(documents["app"].pop())
+    elif failure == "dependency":
+        documents["app"][0]["spec"]["dependsOn"][0]["namespace"] = "other"
+    else:
+        manifest["spec"]["packages"][1]["helmOutputs"][0]["helmRelease"] = "app"
+    save()
+    with pytest.raises(ContractError, match="Helm|own generated"):
+        check(root)
+
+
+@pytest.mark.parametrize("duplicate", ["input", "rendered", "declaration", "other-package"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_chart_generated_values_reject_conflicting_ownership(helm_output, duplicate, reverse):
+    root, manifest, documents, save = helm_output
+    output = manifest["spec"]["packages"][1]["helmOutputs"][0]
+    if duplicate == "input":
+        manifest["spec"]["inputs"] = [
+            {
+                "kind": "ConfigMap",
+                "namespace": "example",
+                "name": "settings-values",
+                "owner": "base",
+            }
+        ]
+    elif duplicate == "rendered":
+        documents["secrets"].append(
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"namespace": "example", "name": "settings-values"},
+            }
+        )
+    elif duplicate == "declaration":
+        manifest["spec"]["packages"][1]["helmOutputs"].append(copy.deepcopy(output))
+    else:
+        manifest["spec"]["packages"][0]["helmOutputs"] = [copy.deepcopy(output)]
+    if reverse:
+        manifest["spec"]["packages"].reverse()
+    save()
+    with pytest.raises(ContractError, match="duplicate"):
+        check(root)
+
+
+def test_chart_generated_values_require_cross_package_readiness(helm_output):
+    root, manifest, documents, save = helm_output
+    documents["secrets"].append(documents["app"].pop())
+    packages = manifest["spec"]["packages"]
+    packages[0]["helmOutputs"] = packages[1].pop("helmOutputs")
+    documents["app"][0]["spec"]["dependsOn"] = []
+    save()
+    check(root)
+    packages[1]["dependsOn"] = []
+    save()
+    with pytest.raises(ContractError, match="missing producer readiness dependency"):
+        check(root)
+
+
 def test_cycle_and_undeclared_chart(package):
     root, manifest, documents, save = package
     manifest["spec"]["packages"][0]["dependsOn"] = ["app"]

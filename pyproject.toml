@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.10.0"
+version = "0.11.0"
 description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
@@ -38,6 +38,7 @@ ldap-directory-worker = "k8s_stack_tooling.ldap_directory:main"
 agentgateway-trust-publish = "k8s_stack_tooling.agentgateway_trust:main"
 addon-check = "k8s_stack_tooling.addons:main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
+stage-documentdb-provisioner = "k8s_stack_tooling.postgres.documentdb:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]

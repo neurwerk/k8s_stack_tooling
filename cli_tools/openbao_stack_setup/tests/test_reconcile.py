@@ -95,6 +95,27 @@ def test_reconcile_is_idempotent_and_preserves_state_cas_version(tmp_path: Path)
     assert session.secrets[RECONCILIATION_STATE_PATH].version == state_version
 
 
+def test_selected_librechat_reconciles_namespace_policy_and_preserves_deselected_data(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords(), addons=("librechat",))
+    paths = {call.path for call in session.calls}
+    assert "sys/policies/acl/frontend-librechat" in paths
+    assert "auth/kubernetes/role/frontend-librechat" in paths
+    assert "auth/kubernetes/role/librechat-code-interpreter" not in paths
+    product = deepcopy(session.secrets["frontend-librechat/internal"].values)
+    database = deepcopy(session.secrets["infra-postgres-operations/librechat"].values)
+    assert database["password"] == product["documentdbPassword"]
+    session.calls.clear()
+    reconcile_openbao(api, identity(), addons=())
+    assert session.secrets["frontend-librechat/internal"].values == product
+    assert session.secrets["infra-postgres-operations/librechat"].values == database
+    assert not any(call.method == "DELETE" for call in session.calls)
+
+
 @pytest.mark.parametrize(
     ("values", "message"),
     [
@@ -330,6 +351,7 @@ def test_schema_2_librechat_credentials_migrate_exactly_once(tmp_path: Path) -> 
     api = client(tmp_path, session)
     reconcile_openbao(api, identity(), passwords())
     session.secrets[RECONCILIATION_STATE_PATH].values = state_values(applied=2)
+    session.secrets["frontend-librechat/internal"] = StoredSecret({})
     librechat = session.secrets["frontend-librechat/internal"].values
     librechat.update(
         {
@@ -360,7 +382,7 @@ def test_schema_2_librechat_username_migration_fails_closed(tmp_path: Path) -> N
     api = client(tmp_path, session)
     reconcile_openbao(api, identity(), passwords())
     session.secrets[RECONCILIATION_STATE_PATH].values = state_values(applied=2)
-    session.secrets["frontend-librechat/internal"].values["ragPostgresqlUser"] = "other"
+    session.secrets["frontend-librechat/internal"] = StoredSecret({"ragPostgresqlUser": "other"})
 
     with pytest.raises(OpenBaoError, match=r"credential mismatch.*ragPostgresqlUser"):
         reconcile_openbao(api, identity())

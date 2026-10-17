@@ -26,8 +26,6 @@ type Generator = Callable[[], str]
 INTERNAL_PATHS: tuple[str, ...] = (
     "auth-keycloak/internal",
     "auth-keycloak-api-key-bridge/internal",
-    "frontend-librechat/internal",
-    "librechat-code-interpreter/internal",
     "monitor-langfuse/internal",
     "monitor-opensearch/internal",
     "frontend-studio/internal",
@@ -114,13 +112,14 @@ def reconcile_internal_credentials(
     changed: list[str] = []
     added = 0
 
-    keycloak_generators = _random_fields(
-        "dbPassword", "bridgeOidcClientSecret", "librechatOidcClientSecret"
+    keycloak_generators = _random_fields("dbPassword", "bridgeOidcClientSecret")
+    addon_oidc_fields = {
+        "librechat": ("librechatOidcClientSecret",),
+        "dify": ("difyOidcClientSecret", "difyAgentgatewayClientSecret"),
+    }
+    keycloak_generators.update(
+        _random_fields(*(field for addon in addons for field in addon_oidc_fields.get(addon, ())))
     )
-    if "dify" in addons:
-        keycloak_generators.update(
-            _random_fields("difyOidcClientSecret", "difyAgentgatewayClientSecret")
-        )
     keycloak, count = _upsert(
         client,
         "auth-keycloak/internal",
@@ -146,46 +145,39 @@ def reconcile_internal_credentials(
     _record_change(changed, bridge_path, count)
     added += count
 
-    librechat_path = "frontend-librechat/internal"
-    librechat, count = _upsert(
-        client,
-        librechat_path,
-        {
-            **_random_fields(
-                "jwtSecret",
-                "jwtRefreshSecret",
-                "meiliMasterKey",
-                "documentdbPassword",
-                "openidSessionSecret",
-                "valkeyPassword",
-                "ragPostgresqlPassword",
-                "ragOpenaiApiKey",
-                "adminPanelSessionSecret",
-                "adminPanelMetricsSecret",
-            ),
-            "credsKey": _hex_64,
-            "credsIv": _hex_32,
-        },
-        {
-            "documentdbUser": "librechat",
-            "ragPostgresqlUser": "librechat_rag",
-            "openidClientSecret": _required_text(keycloak, "librechatOidcClientSecret"),
-        },
-        ed25519_pair=("codeInterpreterJwtPrivateKey", "codeInterpreterJwtPublicKey"),
-    )
-    _record_change(changed, librechat_path, count)
-    added += count
-
-    code_interpreter_path = "librechat-code-interpreter/internal"
-    _, count = _upsert(
-        client,
-        code_interpreter_path,
-        _random_fields("internalServiceToken", "valkeyPassword", "egressGrantSecret"),
-        {"jwtPublicKey": _required_text(librechat, "codeInterpreterJwtPublicKey")},
-        ed25519_pair=("executionManifestPrivateKey", "executionManifestPublicKey"),
-    )
-    _record_change(changed, code_interpreter_path, count)
-    added += count
+    if "librechat" in addons:
+        librechat, count = _upsert(
+            client,
+            "frontend-librechat/internal",
+            {
+                **_random_fields(
+                    "jwtSecret",
+                    "jwtRefreshSecret",
+                    "meiliMasterKey",
+                    "documentdbPassword",
+                    "openidSessionSecret",
+                    "valkeyPassword",
+                    "adminPanelSessionSecret",
+                    "adminPanelMetricsSecret",
+                ),
+                "credsKey": _hex_64,
+                "credsIv": _hex_32,
+            },
+            {
+                "documentdbUser": "librechat",
+                "openidClientSecret": _required_text(keycloak, "librechatOidcClientSecret"),
+            },
+        )
+        _record_change(changed, "frontend-librechat/internal", count)
+        added += count
+        _, count = _upsert(
+            client,
+            "infra-postgres-operations/librechat",
+            {},
+            {"password": _required_text(librechat, "documentdbPassword")},
+        )
+        _record_change(changed, "infra-postgres-operations/librechat", count)
+        added += count
 
     langfuse, count = _upsert(
         client,
@@ -283,12 +275,10 @@ def reconcile_internal_credentials(
         (
             "infra-postgres-operations/internal",
             {
-                "documentdbPassword": _required_text(librechat, "documentdbPassword"),
                 "agentgatewayPassword": _required_text(agentgateway, "postgresqlPassword"),
                 "apiKeyBridgePassword": _required_text(bridge, "postgresqlPassword"),
                 "studioPassword": _required_text(studio, "postgresqlPassword"),
                 "langfusePassword": _required_text(langfuse, "postgresqlPassword"),
-                "librechatRagPassword": _required_text(librechat, "ragPostgresqlPassword"),
             },
         ),
     )

@@ -57,7 +57,7 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         addons=("dify",),
     )
     assert report.external_records_changed == 6
-    assert report.internal_records_changed == 14
+    assert report.internal_records_changed == 12
     assert session.secrets["stack-setup/providers/smtp"].values == {
         "smtpUsername": "user",
         "smtpPassword": "password",
@@ -89,15 +89,9 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
             "postgresqlPassword"
         ],
         "studioPassword": session.secrets["frontend-studio/internal"].values["postgresqlPassword"],
-        "documentdbPassword": session.secrets["frontend-librechat/internal"].values[
-            "documentdbPassword"
-        ],
         "difyPassword": session.secrets["frontend-dify/internal"].values["postgresPassword"],
         "langfusePassword": session.secrets["monitor-langfuse/internal"].values[
             "postgresqlPassword"
-        ],
-        "librechatRagPassword": session.secrets["frontend-librechat/internal"].values[
-            "ragPostgresqlPassword"
         ],
     }
     reconciled = seed_bootstrap(
