@@ -145,6 +145,7 @@ def reconcile_internal_credentials(
     _record_change(changed, bridge_path, count)
     added += count
 
+    librechat: dict[str, JsonValue] = {}
     if "librechat" in addons:
         librechat, count = _upsert(
             client,
@@ -169,14 +170,6 @@ def reconcile_internal_credentials(
             },
         )
         _record_change(changed, "frontend-librechat/internal", count)
-        added += count
-        _, count = _upsert(
-            client,
-            "infra-postgres-operations/librechat",
-            {},
-            {"password": _required_text(librechat, "documentdbPassword")},
-        )
-        _record_change(changed, "infra-postgres-operations/librechat", count)
         added += count
 
     langfuse, count = _upsert(
@@ -282,8 +275,16 @@ def reconcile_internal_credentials(
             },
         ),
     )
-    if "dify" in addons:
-        postgres_records[1][1]["difyPassword"] = _required_text(dify, "postgresPassword")
+    postgres_records[1][1].update(
+        {
+            field: _required_text(values, source)
+            for addon, field, values, source in (
+                ("dify", "difyPassword", dify, "postgresPassword"),
+                ("librechat", "documentdbPassword", librechat, "documentdbPassword"),
+            )
+            if addon in addons
+        }
+    )
     for path, fixed in postgres_records:
         _, count = _upsert(client, path, _random_fields("adminPassword"), fixed)
         _record_change(changed, path, count)

@@ -107,12 +107,12 @@ def test_selected_librechat_reconciles_namespace_policy_and_preserves_deselected
     assert "auth/kubernetes/role/frontend-librechat" in paths
     assert "auth/kubernetes/role/librechat-code-interpreter" not in paths
     product = deepcopy(session.secrets["frontend-librechat/internal"].values)
-    database = deepcopy(session.secrets["infra-postgres-operations/librechat"].values)
-    assert database["password"] == product["documentdbPassword"]
+    database = deepcopy(session.secrets["infra-postgres-operations/internal"].values)
+    assert database["documentdbPassword"] == product["documentdbPassword"]
     session.calls.clear()
     reconcile_openbao(api, identity(), addons=())
     assert session.secrets["frontend-librechat/internal"].values == product
-    assert session.secrets["infra-postgres-operations/librechat"].values == database
+    assert session.secrets["infra-postgres-operations/internal"].values == database
     assert not any(call.method == "DELETE" for call in session.calls)
 
 

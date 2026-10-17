@@ -91,7 +91,6 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "auth-keycloak-api-key-bridge/internal",
         "infra-postgres-operations/internal",
         "frontend-librechat/internal",
-        "infra-postgres-operations/librechat",
     }
     assert first.added_fields > 0
     assert set(planned) == {"dify"}
@@ -180,6 +179,7 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "studioPassword",
         "difyPassword",
         "langfusePassword",
+        "documentdbPassword",
     }
     assert postgres_auth["adminPassword"]
     assert postgres_operations["adminPassword"]
@@ -187,10 +187,7 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert postgres_operations["apiKeyBridgePassword"] == bridge["postgresqlPassword"]
     assert postgres_operations["studioPassword"] == studio["postgresqlPassword"]
     assert postgres_auth["keycloakPassword"] == original["auth-keycloak/internal"]["dbPassword"]
-    assert (
-        original["infra-postgres-operations/librechat"]["password"]
-        == librechat["documentdbPassword"]
-    )
+    assert postgres_operations["documentdbPassword"] == librechat["documentdbPassword"]
     assert (
         postgres_operations["difyPassword"]
         == original["frontend-dify/internal"]["postgresPassword"]
@@ -273,7 +270,7 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
         ("infra-postgres-operations/internal", "agentgatewayPassword"),
         ("infra-postgres-operations/internal", "apiKeyBridgePassword"),
         ("infra-postgres-operations/internal", "studioPassword"),
-        ("infra-postgres-operations/librechat", "password"),
+        ("infra-postgres-operations/internal", "documentdbPassword"),
         ("infra-postgres-operations/internal", "difyPassword"),
         ("infra-postgres-operations/internal", "langfusePassword"),
     ],
