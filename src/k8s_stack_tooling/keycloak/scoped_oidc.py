@@ -308,6 +308,14 @@ def reconcile() -> None:
 
     def check_shared_scope(scope_id):
         root = realm_url + "/client-scopes/" + quote(scope_id, safe="")
+        definition = api(root=root)
+        if (
+            not isinstance(definition, dict)
+            or definition.get("id") != scope_id
+            or definition.get("name") != identity_scopes[scope_id]
+            or definition.get("protocol") != "openid-connect"
+        ):
+            raise ScopeDriftError("Identity client scope readback mismatch")
         mappings = api("/scope-mappings", root=root)
         effective = api("/scope-mappings/realm/composite", root=root)
         if not {(r["id"], r["name"]) for r in effective} <= expected_roles or any(
@@ -435,11 +443,8 @@ def reconcile() -> None:
             if len(attached) != len(desired_ids) or {s["id"] for s in attached} != desired_ids:
                 raise ScopeDriftError("Client scope attachment readback mismatch")
             for scope in attached:
-                if (
-                    scope.get("name") != identity_scopes[scope["id"]]
-                    or scope.get("protocol") != "openid-connect"
-                ):
-                    raise ScopeDriftError("Identity client scope readback mismatch")
+                # Attachment responses are brief representations; identity is
+                # verified using the canonical scope record, including protocol.
                 check_shared_scope(scope["id"])
 
     if uuid:
