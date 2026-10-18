@@ -11,12 +11,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
@@ -473,14 +467,10 @@ def _upsert(
     path: str,
     generators: dict[str, Generator],
     fixed: dict[str, str] | None = None,
-    *,
-    ed25519_pair: tuple[str, str] | None = None,
 ) -> tuple[dict[str, JsonValue], int]:
     current = client.read_secret(path)
     values = dict(current.values) if current else {}
     added = 0
-    if ed25519_pair is not None:
-        added += _reconcile_ed25519_pair(values, path, *ed25519_pair)
     for name, generator in generators.items():
         if name not in values:
             values[name] = generator()
@@ -495,54 +485,6 @@ def _upsert(
     if added:
         client.write_secret(path, values, current.version if current else 0)
     return values, added
-
-
-def _reconcile_ed25519_pair(
-    values: dict[str, JsonValue], path: str, private_field: str, public_field: str
-) -> int:
-    private_present = private_field in values
-    public_present = public_field in values
-    if private_present != public_present:
-        raise OpenBaoError(f"Ed25519 key pair is incomplete at {path}")
-    if not private_present:
-        private_key = Ed25519PrivateKey.generate()
-        values[private_field] = private_key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        ).decode("ascii")
-        values[public_field] = (
-            private_key.public_key()
-            .public_bytes(
-                serialization.Encoding.PEM,
-                serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-            .decode("ascii")
-        )
-        return 2
-
-    private_value = _required_text(values, private_field)
-    public_value = _required_text(values, public_field)
-    try:
-        private_key = serialization.load_pem_private_key(
-            private_value.encode("ascii"), password=None
-        )
-        public_key = serialization.load_pem_public_key(public_value.encode("ascii"))
-    except (TypeError, UnicodeError, ValueError, UnsupportedAlgorithm):
-        raise OpenBaoError(f"Ed25519 key pair is invalid at {path}") from None
-    if not isinstance(private_key, Ed25519PrivateKey) or not isinstance(
-        public_key, Ed25519PublicKey
-    ):
-        raise OpenBaoError(f"Ed25519 key pair is invalid at {path}")
-    expected_public = private_key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
-    actual_public = public_key.public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
-    if expected_public != actual_public:
-        raise OpenBaoError(f"Ed25519 key pair does not match at {path}")
-    return 0
 
 
 def _random_fields(*names: str) -> dict[str, Generator]:

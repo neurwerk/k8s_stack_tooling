@@ -5,16 +5,10 @@ import re
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
 from fake import FakeSession, StoredSecret
 
-from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
+from openbao_stack_setup.client import OpenBaoClient, OpenBaoError
 from openbao_stack_setup.credentials import (
-    _upsert,
     plan_bootstrap_passwords,
     reconcile_internal_credentials,
 )
@@ -24,37 +18,6 @@ def client(tmp_path: Path, session: FakeSession) -> OpenBaoClient:
     ca = tmp_path / "ca.crt"
     ca.write_text("CA", encoding="utf-8")
     return OpenBaoClient("https://bao.test", "root", ca, session)
-
-
-def assert_ed25519_pair(
-    values: dict[str, JsonValue], private_field: str, public_field: str
-) -> None:
-    private_pem = values[private_field]
-    public_pem = values[public_field]
-    assert isinstance(private_pem, str)
-    assert isinstance(public_pem, str)
-    assert private_pem.startswith("-----BEGIN PRIVATE KEY-----\n")
-    assert public_pem.startswith("-----BEGIN PUBLIC KEY-----\n")
-
-    private_key = serialization.load_pem_private_key(private_pem.encode("ascii"), password=None)
-    public_key = serialization.load_pem_public_key(public_pem.encode("ascii"))
-    assert isinstance(private_key, Ed25519PrivateKey)
-    assert isinstance(public_key, Ed25519PublicKey)
-    assert private_key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    ) == public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-
-
-def unrelated_public_key() -> str:
-    return (
-        Ed25519PrivateKey.generate()
-        .public_key()
-        .public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode("ascii")
-    )
 
 
 def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> None:
@@ -304,79 +267,6 @@ def test_bridge_verifier_must_match_managed_key(tmp_path: Path) -> None:
         reconcile_internal_credentials(
             api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify",)
         )
-
-
-@pytest.mark.parametrize(
-    ("path", "private_field", "public_field", "missing_field"),
-    [
-        (
-            "frontend-librechat/internal",
-            "codeInterpreterJwtPrivateKey",
-            "codeInterpreterJwtPublicKey",
-            "codeInterpreterJwtPrivateKey",
-        ),
-        (
-            "frontend-librechat/internal",
-            "codeInterpreterJwtPrivateKey",
-            "codeInterpreterJwtPublicKey",
-            "codeInterpreterJwtPublicKey",
-        ),
-        (
-            "librechat-code-interpreter/internal",
-            "executionManifestPrivateKey",
-            "executionManifestPublicKey",
-            "executionManifestPrivateKey",
-        ),
-        (
-            "librechat-code-interpreter/internal",
-            "executionManifestPrivateKey",
-            "executionManifestPublicKey",
-            "executionManifestPublicKey",
-        ),
-    ],
-)
-def test_incomplete_ed25519_pair_is_rejected_without_rotation(
-    tmp_path: Path,
-    path: str,
-    private_field: str,
-    public_field: str,
-    missing_field: str,
-) -> None:
-    session = FakeSession()
-    api = client(tmp_path, session)
-    _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
-    assert_ed25519_pair(session.secrets[path].values, private_field, public_field)
-    del session.secrets[path].values[missing_field]
-    existing = dict(session.secrets[path].values)
-
-    with pytest.raises(OpenBaoError, match="key pair is incomplete"):
-        _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
-
-    assert session.secrets[path].values == existing
-    assert (private_field in existing) != (public_field in existing)
-
-
-@pytest.mark.parametrize(
-    ("path", "public_field"),
-    [
-        ("frontend-librechat/internal", "codeInterpreterJwtPublicKey"),
-        ("librechat-code-interpreter/internal", "executionManifestPublicKey"),
-    ],
-)
-def test_mismatched_ed25519_pair_is_rejected_without_rotation(
-    tmp_path: Path, path: str, public_field: str
-) -> None:
-    session = FakeSession()
-    api = client(tmp_path, session)
-    private_field = public_field.replace("Public", "Private")
-    _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
-    session.secrets[path].values[public_field] = unrelated_public_key()
-    existing = dict(session.secrets[path].values)
-
-    with pytest.raises(OpenBaoError, match="key pair does not match"):
-        _upsert(api, path, {}, ed25519_pair=(private_field, public_field))
-
-    assert session.secrets[path].values == existing
 
 
 def test_existing_bootstrap_passwords_are_not_planned(tmp_path: Path) -> None:
