@@ -31,6 +31,7 @@ from k8s_stack_tooling.agentgateway_trust import (
     parse_root,
     validate_publication,
 )
+from k8s_stack_tooling.gateway_catalog import MAX_ENDPOINTS, GatewayCatalog
 
 NAMESPACE = "infra-agentgateway"
 GATEWAY = "infra-agentgateway-gateway"
@@ -99,7 +100,7 @@ class Proxy(Document):
 
 class Inventory(Document):
     policy_revision: Digest
-    endpoints: list[Endpoint] = Field(max_length=32)
+    endpoints: list[Endpoint] = Field(max_length=MAX_ENDPOINTS)
     proxy: Proxy | None = None
 
     @model_validator(mode="after")
@@ -604,22 +605,24 @@ def observe(api: KubernetesObserver, deadline: Deadline) -> dict[str, Any]:
     )
     previous = api.read(STATUS)
     catalog_cm = api.read(CATALOG)
-    catalog = _document((catalog_cm.data or {}).get("catalog.json", "").encode(), 1024 * 1024)
+    catalog = GatewayCatalog.model_validate_json(
+        json.dumps(_document((catalog_cm.data or {}).get("catalog.json", "").encode(), 1024 * 1024))
+    )
     started = datetime.now(UTC)
     snapshot: dict[str, Any] = {
         "schema_version": 1,
-        "catalog_revision": catalog["catalog_revision"],
+        "catalog_revision": catalog.catalog_revision,
         "applied_policy_revision": None,
         "observed_at": started.isoformat(),
         "valid_until": (started + timedelta(minutes=5)).isoformat(),
-        "endpoints": [{"id": e["id"], "state": "unknown"} for e in catalog["endpoints"]],
+        "endpoints": [{"id": e.id, "state": "unknown"} for e in catalog.endpoints],
         "profiles": [],
         "signers": [],
     }
     try:
-        if inventory.policy_revision != catalog["policy_revision"] or {
+        if inventory.policy_revision != catalog.policy_revision or {
             e.id for e in inventory.endpoints
-        } != {e["id"] for e in catalog["endpoints"]}:
+        } != {e.id for e in catalog.endpoints}:
             raise ObservationError("observation inventory differs from catalog")
         before = api.membership(inventory)
         if not before.replicas:
