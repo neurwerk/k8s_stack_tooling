@@ -27,6 +27,25 @@ REVISION = "a" * 64
 NS = SimpleNamespace
 
 
+def catalog_route(endpoint_id, *, proxy=False):
+    return {
+        "id": endpoint_id,
+        "url": "https://gateway.example.test/" + ("" if proxy else endpoint_id),
+        "entry_mode": "forward_proxy" if proxy else "api",
+        "caller_auth_modes": ["proxy_basic"] if proxy else ["oidc_bearer", "neurwerk_bearer"],
+    }
+
+
+def catalog_entry(entry_id, routes):
+    return {
+        "id": entry_id,
+        "provider_id": None,
+        "display_name": entry_id,
+        "routes": routes,
+        "destinations": [],
+    }
+
+
 def inventory():
     return observe.Inventory.model_validate(
         {
@@ -267,9 +286,18 @@ class MemoryObserver(observe.KubernetesObserver):
         self.change = False
         self.inventory = inventory()
         self.catalog: dict[str, Any] = {
+            "schema_version": 2,
             "catalog_revision": "catalog-1",
             "policy_revision": REVISION,
-            "endpoints": [{"id": e.id} for e in inventory().endpoints],
+            "profiles": [],
+            "self-hosted-api-providers": [
+                catalog_entry("first", [catalog_route("api-first")]),
+            ],
+            "external-api-providers": [
+                catalog_entry("second", [catalog_route("api-second")]),
+            ],
+            "external-subscription-providers": [],
+            "mcp-servers": [],
         }
         self.written = None
 
@@ -290,6 +318,129 @@ class MemoryObserver(observe.KubernetesObserver):
 
     def publish(self, snapshot, previous):
         self.written = snapshot
+
+
+def test_observer_consumes_routes_from_every_group(monkeypatch):
+    api = MemoryObserver()
+    api.catalog["profiles"] = [
+        {
+            "id": "inspected",
+            "revision": "profile-1",
+            "limitations": [],
+            "operations": [
+                {
+                    "id": "chat",
+                    "support": "supported",
+                    "restoration_scope": "request",
+                    "limitations": [],
+                    "verified_at": "2026-10-21T00:00:00Z",
+                }
+            ],
+        }
+    ]
+    api.catalog["self-hosted-api-providers"][0]["destinations"] = [
+        {
+            "id": "first-model",
+            "kind": "model",
+            "display_name": "First model",
+            "endpoint_ids": ["api-first"],
+            "profile_ids": ["inspected"],
+            "required_permissions": ["llm:invoke"],
+            "credential_modes": [{"source": "none", "required_permissions": []}],
+            "provider_id": None,
+            "model": "first-model",
+        }
+    ]
+    for group, endpoint_id in (
+        ("external-subscription-providers", "api-subscription"),
+        ("mcp-servers", "mcp-tools"),
+    ):
+        api.catalog[group] = [catalog_entry(endpoint_id, [catalog_route(endpoint_id)])]
+        api.inventory.endpoints.append(
+            api.inventory.endpoints[0].model_copy(update={"id": endpoint_id})
+        )
+    monkeypatch.setattr(observe, "_route_loaded", lambda *_args: True)
+    monkeypatch.setattr(
+        observe,
+        "_http",
+        lambda _s, _a, port, *_args: (
+            200,
+            b"ready" if port == 15021 else json.dumps(native_dump()).encode(),
+        ),
+    )
+    result = observe.observe(api, observe.Deadline(5))
+    assert result is api.written
+    assert result["schema_version"] == 1
+    assert {row["id"]: row["state"] for row in result["endpoints"]} == {
+        endpoint_id: "available"
+        for endpoint_id in ("api-first", "api-second", "api-subscription", "mcp-tools")
+    }
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "legacy",
+        "bool-version",
+        "float-version",
+        "extra-root",
+        "missing-group",
+        "missing-provider",
+        "duplicate-api",
+        "duplicate-local-proxy",
+        "conflicting-proxy",
+        "foreign-endpoint",
+        "foreign-profile",
+        "wrong-provider",
+        "duplicate-entry",
+    ],
+)
+def test_invalid_catalog_stops_before_probing_or_publication(monkeypatch, fault):
+    api = MemoryObserver()
+    first = api.catalog["self-hosted-api-providers"][0]
+    second = api.catalog["external-api-providers"][0]
+    if fault == "legacy":
+        api.catalog = {"schema_version": 1, "endpoints": [], "destinations": []}
+    elif fault == "bool-version":
+        api.catalog["schema_version"] = True
+    elif fault == "float-version":
+        api.catalog["schema_version"] = 2.0
+    elif fault == "extra-root":
+        api.catalog["endpoints"] = []
+    elif fault == "missing-group":
+        del api.catalog["mcp-servers"]
+    elif fault == "missing-provider":
+        del first["provider_id"]
+    elif fault == "duplicate-api":
+        second["routes"] = deepcopy(first["routes"])
+    elif fault == "duplicate-local-proxy":
+        first["routes"] = [catalog_route("forward-proxy", proxy=True)] * 2
+    elif fault == "conflicting-proxy":
+        first["routes"].append(catalog_route("forward-proxy", proxy=True))
+        second["routes"].append(catalog_route("forward-proxy", proxy=True))
+        second["routes"][-1]["url"] = "https://other.example.test"
+    elif fault == "duplicate-entry":
+        second["id"] = first["id"]
+    else:
+        first["destinations"] = [
+            {
+                "id": "model",
+                "kind": "model",
+                "display_name": "Model",
+                "endpoint_ids": ["api-second" if fault == "foreign-endpoint" else "api-first"],
+                "profile_ids": ["missing"] if fault == "foreign-profile" else [],
+                "required_permissions": ["llm:invoke"],
+                "credential_modes": [],
+                "provider_id": "wrong" if fault == "wrong-provider" else None,
+            }
+        ]
+    probe = Mock(side_effect=AssertionError("invalid catalog must not be probed"))
+    monkeypatch.setattr(observe, "_http", probe)
+    with pytest.raises(ValueError):
+        observe.observe(api, observe.Deadline(5))
+    probe.assert_not_called()
+    assert api.calls == 0
+    assert api.written is None
 
 
 @pytest.mark.parametrize(
@@ -319,6 +470,7 @@ def test_publication_never_turns_incomplete_evidence_into_current_health(monkeyp
     monkeypatch.setattr(observe, "_http", http)
     result = observe.observe(api, observe.Deadline(5))
     assert result is api.written
+    assert result["schema_version"] == 1
     assert result["profiles"] == []
     assert datetime.fromisoformat(result["valid_until"]) - datetime.fromisoformat(
         result["observed_at"]
@@ -542,7 +694,8 @@ def test_shared_provider_stays_unknown_without_losing_signer_evidence(
         listener=listener.name,
         inspection_hostname="provider.example.test",
     )
-    api.catalog["endpoints"].append({"id": "forward-proxy"})
+    for group in ("self-hosted-api-providers", "external-api-providers"):
+        api.catalog[group][0]["routes"].append(catalog_route("forward-proxy", proxy=True))
     dump = native_dump()
     inspected = deepcopy(dump["binds"][0])
     inspected["address"] = "[::]:443"
@@ -595,6 +748,7 @@ def test_shared_provider_stays_unknown_without_losing_signer_evidence(
         "api-second": "unknown",
         "forward-proxy": "unknown",
     }
+    assert len(result["endpoints"]) == 3
 
 
 def certificate(name, issuer=None, *, ca=False, expired=False):
