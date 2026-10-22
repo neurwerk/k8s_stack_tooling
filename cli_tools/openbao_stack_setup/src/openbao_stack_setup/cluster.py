@@ -211,19 +211,19 @@ class Cluster:
                 selected.append(name)
         return tuple(selected)
 
-    def wireguard_enabled(self) -> bool:
-        """Read the optional gateway's canonical product values, without reading keys."""
+    def tailscale_enabled(self) -> bool:
+        """Read optional OAuth catalog selection independently of operator activation."""
         values = self._product_values(
-            "wireguard-product-values", "wireguard", "WireGuard", optional=True
+            "tailscale-product-values", "tailscale", "Tailscale", optional=True
         )
-        if not isinstance(values, dict) or not isinstance(values.get("wireguard", {}), dict):
-            raise ClusterError("WireGuard product values contain an invalid contract")
-        gateway = values.get("wireguard", {})
-        enabled = gateway.get("enabled", False)
+        if not isinstance(values, dict) or not isinstance(values.get("tailscale", {}), dict):
+            raise ClusterError("Tailscale product values contain an invalid contract")
+        product = values.get("tailscale", {})
+        enabled = product.get("enabled", False)
         if not isinstance(enabled, bool):
-            raise ClusterError("WireGuard enabled value must be a boolean")
-        if enabled and gateway.get("serverKeySecret") != "wireguard-server-key":
-            raise ClusterError("Selected WireGuard requires serverKeySecret=wireguard-server-key")
+            raise ClusterError("Tailscale enabled value must be a boolean")
+        if enabled and product.get("oauthSecret") != "operator-oauth":
+            raise ClusterError("Selected Tailscale requires oauthSecret=operator-oauth")
         return enabled
 
     def contextforge_admin_email(self) -> str | None:

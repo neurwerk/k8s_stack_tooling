@@ -61,12 +61,20 @@ def test_bootstrap_seeds_exact_roles_and_provider_records(tmp_path: Path) -> Non
     assert "librechat-code-interpreter" not in ROLE_NAMESPACES
     assert "frontend-librechat" not in ROLE_NAMESPACES
     assert {"infra-postgres-auth", "infra-postgres-operations"}.issubset(ROLE_NAMESPACES)
-    role_calls = [call for call in session.calls if call.path.startswith("auth/kubernetes/role/")]
+    role_calls = [
+        call
+        for call in session.calls
+        if call.method == "POST" and call.path.startswith("auth/kubernetes/role/")
+    ]
     assert len(role_calls) == len(ROLE_NAMESPACES) + 1
     assert not any(
         call.path == "auth/kubernetes/role/librechat-code-interpreter" for call in role_calls
     )
-    policy_calls = [call for call in session.calls if call.path.startswith("sys/policies/acl/")]
+    policy_calls = [
+        call
+        for call in session.calls
+        if call.method == "POST" and call.path.startswith("sys/policies/acl/")
+    ]
     assert len(policy_calls) == len(ROLE_NAMESPACES) + 1
     assert not any(
         call.path == "sys/policies/acl/librechat-code-interpreter" for call in policy_calls

@@ -9,6 +9,8 @@ CONTEXTFORGE_PROVIDER_APPS_PATH = "contextforge/provider-apps"
 REJECTION_DEBUG_PATH = "monitor-agentgateway-extproc/langfuse-debug"
 REJECTION_DEBUG_ROLE = "monitor-agentgateway-extproc-rejection-debug"
 ACTIVE_DIRECTORY_FIELDS = ("activeDirectoryBindDn", "activeDirectoryBindCredential")
+TAILSCALE_OAUTH_PATH = "tailscale/external"
+TAILSCALE_OAUTH_FIELDS = ("client_id", "client_secret")
 
 ROLE_NAMESPACES: tuple[str, ...] = (
     "auth-keycloak",
@@ -135,7 +137,8 @@ DOCLING_EXTERNAL_SECRETS = (
         "monitor-agentgateway-extproc-docling-secret",
     ),
 )
-WIREGUARD_SECRET_STORE = SecretStoreTarget("wireguard-openbao-secret-store", "wireguard")
+TAILSCALE_SECRET_STORE = SecretStoreTarget("tailscale-openbao-secret-store", "tailscale")
+TAILSCALE_EXTERNAL_SECRET = ExternalSecretTarget("operator-oauth", "tailscale", "operator-oauth")
 REJECTION_DEBUG_SECRET_STORE = SecretStoreTarget(
     REJECTION_DEBUG_ROLE, "monitor-agentgateway-extproc"
 )
@@ -146,9 +149,6 @@ REJECTION_DEBUG_EXTERNAL_SECRETS = (
     ExternalSecretTarget(
         REJECTION_DEBUG_ROLE, "monitor-agentgateway-extproc", REJECTION_DEBUG_ROLE
     ),
-)
-WIREGUARD_EXTERNAL_SECRET = ExternalSecretTarget(
-    "wireguard-server-key", "wireguard", "wireguard-server-key"
 )
 FORGEJO_EXTERNAL_SECRETS = (
     ExternalSecretTarget("forgejo-runtime", "forgejo", "forgejo-runtime"),
@@ -341,6 +341,7 @@ BOOTSTRAP_HELM_RELEASES: tuple[HelmReleaseTarget, ...] = (
 )
 
 PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
+    ProviderRefreshTarget(TAILSCALE_OAUTH_PATH, TAILSCALE_OAUTH_FIELDS, TAILSCALE_EXTERNAL_SECRET),
     ProviderRefreshTarget(
         "docling/external",
         ("inferenceToken",),
@@ -405,6 +406,15 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
+    if namespace == "tailscale":
+        return f"""path "secret/data/{TAILSCALE_OAUTH_PATH}" {{
+  capabilities = ["read"]
+}}
+
+path "secret/metadata/{TAILSCALE_OAUTH_PATH}" {{
+  capabilities = ["read"]
+}}
+"""
     if namespace == "contextforge":
         # Native OAuth records must never be readable through the ESO role.
         return """path "secret/data/contextforge/internal" {
@@ -426,7 +436,6 @@ path "secret/metadata/contextforge/provider-apps" {
     if namespace not in (
         *ROLE_NAMESPACES,
         *(addon.namespace for addon in ADDONS.values()),
-        "wireguard",
         *DOCLING_NAMESPACES,
     ):
         raise ValueError("Namespace is not present in the reconciliation catalog")
@@ -463,6 +472,7 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
                 "docling/external",
                 "monitor-agentgateway-extproc/external",
                 CONTEXTFORGE_PROVIDER_APPS_PATH,
+                TAILSCALE_OAUTH_PATH,
             )
             else '["read", "update"]'
         )

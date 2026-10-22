@@ -76,7 +76,11 @@ def test_reconcile_applies_catalog_and_cluster_bound_state(tmp_path: Path) -> No
         "smtpPassword": "smtp-password",
     }
     assert session.secrets[RECONCILIATION_STATE_PATH].values == state_values()
-    role_calls = [call for call in session.calls if call.path.startswith("auth/kubernetes/role/")]
+    role_calls = [
+        call
+        for call in session.calls
+        if call.method == "POST" and call.path.startswith("auth/kubernetes/role/")
+    ]
     assert len(role_calls) == len(ROLE_NAMESPACES) + 1
 
 
@@ -113,7 +117,13 @@ def test_selected_librechat_reconciles_namespace_policy_and_preserves_deselected
     reconcile_openbao(api, identity(), addons=())
     assert session.secrets["frontend-librechat/internal"].values == product
     assert session.secrets["infra-postgres-operations/internal"].values == database
-    assert not any(call.method == "DELETE" for call in session.calls)
+    assert "frontend-librechat" in session.policies
+    assert "frontend-librechat" in session.kubernetes_roles
+    assert all(
+        call.path in ("sys/policies/acl/tailscale", "auth/kubernetes/role/tailscale")
+        for call in session.calls
+        if call.method == "DELETE"
+    )
 
 
 @pytest.mark.parametrize(

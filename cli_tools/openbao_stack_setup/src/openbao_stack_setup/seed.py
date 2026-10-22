@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from openbao_stack_setup.catalog import secret_operator_policy
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
-from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS
+from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, managed_credential_paths
 from openbao_stack_setup.reconcile import (
     ReconciliationIdentity,
     reconcile_openbao,
@@ -30,11 +30,11 @@ def seed_bootstrap(
     identity: ReconciliationIdentity,
     active_directory: dict[str, str] | None = None,
     *,
-    wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
+    tailscale_enabled: bool = False,
 ) -> SeedReport:
     """Converge a fresh instance and refuse unexpected external record changes."""
     if set(provider_values) != set(PROVIDERS):
@@ -71,11 +71,11 @@ def seed_bootstrap(
         client,
         identity,
         bootstrap_passwords,
-        wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
         addons=addons,
         contextforge_admin_email=contextforge_admin_email,
         rejection_debug_enabled=rejection_debug_enabled,
+        tailscale_enabled=tailscale_enabled,
     )
     return SeedReport(
         external_changed,
@@ -94,8 +94,6 @@ def _reconcile_exact_record(client: OpenBaoClient, path: str, values: dict[str, 
     return 0
 
 
-def _secret_operator_policy() -> str:
+def _secret_operator_policy(*, tailscale_enabled: bool = False) -> str:
     """Restrict provider updates to exact KV v2 records and metadata reads."""
-    return secret_operator_policy(
-        tuple(path for provider in MANAGED_CREDENTIALS.values() for path in provider.paths)
-    )
+    return secret_operator_policy(managed_credential_paths(tailscale_enabled=tailscale_enabled))

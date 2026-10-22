@@ -23,7 +23,7 @@ from openbao_stack_setup.credentials import (
     migrate_schema_2_internal_credentials,
     reconcile_internal_credentials,
 )
-from openbao_stack_setup.providers import MANAGED_CREDENTIALS
+from openbao_stack_setup.providers import managed_credential_paths
 from openbao_stack_setup.rejection_debug import reconcile_rejection_debug
 
 STATE_SCHEMA_VERSION = 1
@@ -63,11 +63,11 @@ def reconcile_openbao(
     identity: ReconciliationIdentity,
     bootstrap_passwords: dict[str, str] | None = None,
     *,
-    wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
+    tailscale_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -79,8 +79,13 @@ def reconcile_openbao(
 
     client.ensure_kubernetes_auth()
     client.configure_kubernetes_auth()
+    if not tailscale_enabled:
+        # Role removal alone leaves issued tokens usable. Policies are evaluated
+        # at request time, so remove their read grant before disabling new logins.
+        client.delete_policy("tailscale")
+        client.delete_kubernetes_role("tailscale")
     namespaces = ROLE_NAMESPACES + tuple(item.namespace for item in addon_catalogs(addons))
-    namespaces += ("wireguard",) if wireguard_enabled else ()
+    namespaces += ("tailscale",) if tailscale_enabled else ()
     namespaces += DOCLING_NAMESPACES if docling_enabled else ()
     namespaces += ("contextforge",) if contextforge_admin_email is not None else ()
     for namespace in namespaces:
@@ -91,7 +96,7 @@ def reconcile_openbao(
     client.write_policy(
         "secret-operator",
         secret_operator_policy(
-            tuple(path for provider in MANAGED_CREDENTIALS.values() for path in provider.paths)
+            managed_credential_paths(tailscale_enabled=tailscale_enabled)
             + ((CONTEXTFORGE_PROVIDER_APPS_PATH,) if contextforge_admin_email is not None else ())
         ),
     )
@@ -112,7 +117,6 @@ def reconcile_openbao(
     internal = reconcile_internal_credentials(
         client,
         passwords,
-        wireguard_enabled=wireguard_enabled,
         docling_enabled=docling_enabled,
         addons=addons,
         contextforge_admin_email=contextforge_admin_email,

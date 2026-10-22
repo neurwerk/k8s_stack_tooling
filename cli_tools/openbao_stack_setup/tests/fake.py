@@ -38,6 +38,8 @@ class FakeSession:
     def __init__(self) -> None:
         self.mounts: dict[str, JsonValue] = {}
         self.auth_methods: dict[str, JsonValue] = {}
+        self.policies: dict[str, JsonValue] = {}
+        self.kubernetes_roles: dict[str, JsonValue] = {}
         self.secrets: dict[str, StoredSecret] = {}
         self.calls: list[Call] = []
         self.failure: tuple[str, str, int, dict[str, JsonValue]] | None = None
@@ -73,9 +75,29 @@ class FakeSession:
         if method == "POST" and path == "sys/auth/kubernetes":
             self.auth_methods["kubernetes/"] = {"type": "kubernetes"}
             return _response(204)
+        access_response = self._access_request(method, path, json)
+        if access_response is not None:
+            return access_response
         if path.startswith("secret/data/"):
             return self._secret_request(method, path.removeprefix("secret/data/"), json)
         return _response(204)
+
+    def _access_request(self, method: str, path: str, body: JsonValue) -> requests.Response | None:
+        for prefix, records in (
+            ("sys/policies/acl/", self.policies),
+            ("auth/kubernetes/role/", self.kubernetes_roles),
+        ):
+            if path.startswith(prefix):
+                name = path.removeprefix(prefix)
+                if method == "POST":
+                    records[name] = body
+                    return _response(204)
+                if method == "DELETE":
+                    if name not in records:
+                        return _response(404, {"errors": ["not found"]})
+                    del records[name]
+                    return _response(204)
+        return None
 
     def _secret_request(
         self,

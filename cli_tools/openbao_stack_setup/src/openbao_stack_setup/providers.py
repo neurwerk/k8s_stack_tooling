@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from openbao_stack_setup.catalog import SMTP_REPLICA
+from openbao_stack_setup.catalog import SMTP_REPLICA, TAILSCALE_OAUTH_FIELDS, TAILSCALE_OAUTH_PATH
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 
 
@@ -38,6 +38,7 @@ ACTIVE_DIRECTORY = Provider(
 )
 MANAGED_CREDENTIALS: dict[str, Provider] = {
     **PROVIDERS,
+    "tailscale-oauth": Provider("tailscale-oauth", (TAILSCALE_OAUTH_PATH,), TAILSCALE_OAUTH_FIELDS),
     "smtp": SMTP,
     "active-directory": ACTIVE_DIRECTORY,
     "docling-inference": Provider("docling-inference", ("docling/external",), ("inferenceToken",)),
@@ -49,10 +50,26 @@ MANAGED_CREDENTIALS: dict[str, Provider] = {
 }
 
 
+def managed_credential_paths(*, tailscale_enabled: bool = False) -> tuple[str, ...]:
+    """Select routine operator paths without granting access to an unselected OAuth catalog."""
+    return tuple(
+        path
+        for name, provider in MANAGED_CREDENTIALS.items()
+        if name != "tailscale-oauth" or tailscale_enabled
+        for path in provider.paths
+    )
+
+
 def update_provider(client: OpenBaoClient, provider: Provider, values: dict[str, str]) -> None:
     """CAS-update all credential records while preserving sibling values."""
     if set(values) != set(provider.fields) or any(not value.strip() for value in values.values()):
         raise OpenBaoError("Provider credentials are incomplete")
+    if provider.name == "tailscale-oauth" and any(
+        len(value) > 16384
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        for value in values.values()
+    ):
+        raise OpenBaoError("Invalid Tailscale OAuth credentials; values are hidden")
     if provider.name == "docling-inference" and any(
         "\r" in value or "\n" in value for value in values.values()
     ):

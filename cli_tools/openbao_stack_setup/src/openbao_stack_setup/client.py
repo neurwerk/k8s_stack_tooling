@@ -326,6 +326,14 @@ class OpenBaoClient:
         """Create or replace an ACL policy."""
         self._write(f"sys/policies/acl/{name}", {"policy": policy})
 
+    def delete_policy(self, name: str) -> None:
+        """Remove one named policy, including its grants to already issued tokens."""
+        self._request("DELETE", f"sys/policies/acl/{name}", allow_not_found=True)
+
+    def delete_kubernetes_role(self, namespace: str) -> None:
+        """Disable new logins through one role; an absent role is already disabled."""
+        self._request("DELETE", f"auth/kubernetes/role/{namespace}", allow_not_found=True)
+
     def write_kubernetes_role(self, namespace: str) -> None:
         """Create or replace a namespace-scoped External Secrets role."""
         self._write(
