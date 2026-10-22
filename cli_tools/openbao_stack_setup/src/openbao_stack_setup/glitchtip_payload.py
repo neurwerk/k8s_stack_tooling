@@ -1,0 +1,1 @@
+../../../../src/k8s_stack_tooling/glitchtip/payload.py

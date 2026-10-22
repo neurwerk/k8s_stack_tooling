@@ -39,6 +39,10 @@ ACTIVE_DIRECTORY = Provider(
 MANAGED_CREDENTIALS: dict[str, Provider] = {
     **PROVIDERS,
     "tailscale-oauth": Provider("tailscale-oauth", (TAILSCALE_OAUTH_PATH,), TAILSCALE_OAUTH_FIELDS),
+    "glitchtip-smtp": Provider(
+        "glitchtip-smtp", ("glitchtip/external",), ("smtpUsername", "smtpPassword")
+    ),
+    "glitchtip-owner": Provider("glitchtip-owner", ("glitchtip/owner",), ("email", "password")),
     "smtp": SMTP,
     "active-directory": ACTIVE_DIRECTORY,
     "docling-inference": Provider("docling-inference", ("docling/external",), ("inferenceToken",)),
@@ -74,6 +78,10 @@ def update_provider(client: OpenBaoClient, provider: Provider, values: dict[str,
         "\r" in value or "\n" in value for value in values.values()
     ):
         raise OpenBaoError("Docling inference token must not contain CR or LF")
+    if provider.name.startswith("glitchtip-") and any(
+        any(ord(char) < 32 or ord(char) == 127 for char in value) for value in values.values()
+    ):
+        raise OpenBaoError("GlitchTip credentials contain invalid control characters")
     for path in provider.paths:
         current = client.read_secret(path)
         merged: dict[str, JsonValue] = dict(current.values) if current else {}

@@ -211,6 +211,55 @@ class Cluster:
                 selected.append(name)
         return tuple(selected)
 
+    def glitchtip_enabled(self) -> bool:
+        """Read the optional GlitchTip credential-catalog selection."""
+        values = self._product_values(
+            "glitchtip-product-values", "glitchtip", "GlitchTip", optional=True
+        )
+        if not isinstance(values, dict) or not isinstance(values.get("glitchtip", {}), dict):
+            raise ClusterError("GlitchTip product values contain an invalid contract")
+        enabled = values.get("glitchtip", {}).get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ClusterError("GlitchTip enabled value must be a boolean")
+        return enabled
+
+    def glitchtip_application_pod(self) -> str:
+        """Select exactly one Ready pinned application Pod, never a provisioning Job."""
+        try:
+            pods = self.core.list_namespaced_pod(
+                "glitchtip",
+                label_selector=(
+                    "app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=application"
+                ),
+            ).items
+        except ApiException:
+            raise ClusterError("Could not select the GlitchTip application Pod") from None
+        ready = [
+            pod
+            for pod in pods
+            if not pod.metadata.deletion_timestamp
+            and any(
+                condition.type == "Ready" and condition.status == "True"
+                for condition in pod.status.conditions or []
+            )
+        ]
+        if len(ready) != 1:
+            raise ClusterError("Private DSN export requires exactly one Ready GlitchTip Pod")
+        pod = ready[0]
+        containers = [
+            container for container in pod.spec.containers if container.name == "glitchtip"
+        ]
+        expected = (
+            "docker.io/glitchtip/glitchtip:6.2.6@sha256:"
+            "a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6"
+        )
+        if len(containers) != 1 or containers[0].image != expected:
+            raise ClusterError("Private DSN export requires the reviewed pinned GlitchTip image")
+        name = pod.metadata.name
+        if not isinstance(name, str) or not name:
+            raise ClusterError("Selected GlitchTip Pod has no name")
+        return name
+
     def tailscale_enabled(self) -> bool:
         """Read optional OAuth catalog selection independently of operator activation."""
         values = self._product_values(

@@ -35,6 +35,7 @@ def seed_bootstrap(
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
     tailscale_enabled: bool = False,
+    glitchtip_enabled: bool = False,
 ) -> SeedReport:
     """Converge a fresh instance and refuse unexpected external record changes."""
     if set(provider_values) != set(PROVIDERS):
@@ -76,6 +77,7 @@ def seed_bootstrap(
         contextforge_admin_email=contextforge_admin_email,
         rejection_debug_enabled=rejection_debug_enabled,
         tailscale_enabled=tailscale_enabled,
+        glitchtip_enabled=glitchtip_enabled,
     )
     return SeedReport(
         external_changed,

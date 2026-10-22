@@ -31,6 +31,13 @@ Security = "https://github.com/neurwerk/k8s_stack_tooling/security/policy"
 [tool.hatch.build.targets.wheel]
 packages = ["src/openbao_stack_setup"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["src/openbao_stack_setup/glitchtip_payload.py"]
+
+[tool.hatch.build.targets.sdist.force-include]
+# Dereference the shared resource into the standalone source archive.
+"../../src/k8s_stack_tooling/glitchtip/payload.py" = "src/openbao_stack_setup/glitchtip_payload.py"
+
 [dependency-groups]
 dev = [
     "pytest>=8",
@@ -66,6 +73,8 @@ max-complexity = 10
 "src/openbao_stack_setup/main.py" = ["S404", "S603", "T201"]
 # This module invokes the resolved local gpg executable without a shell.
 "src/openbao_stack_setup/custody.py" = ["S603"]
+# The native payload's outer security boundary redacts all upstream exceptions and owns CLI output.
+"src/openbao_stack_setup/glitchtip_payload.py" = ["BLE001", "T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["openbao_stack_setup"]
@@ -75,6 +84,10 @@ convention = "google"
 
 [tool.ty.rules]
 all = "error"
+
+[tool.ty.src]
+# This symlinked resource executes only inside the pinned upstream image.
+exclude = ["src/openbao_stack_setup/glitchtip_payload.py"]
 
 [tool.ty.analysis]
 strict-literal-narrowing = true

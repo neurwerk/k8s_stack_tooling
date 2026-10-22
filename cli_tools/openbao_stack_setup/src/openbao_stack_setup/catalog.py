@@ -343,6 +343,16 @@ BOOTSTRAP_HELM_RELEASES: tuple[HelmReleaseTarget, ...] = (
 PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
     ProviderRefreshTarget(TAILSCALE_OAUTH_PATH, TAILSCALE_OAUTH_FIELDS, TAILSCALE_EXTERNAL_SECRET),
     ProviderRefreshTarget(
+        "glitchtip/external",
+        ("smtpUsername", "smtpPassword"),
+        ExternalSecretTarget("glitchtip-runtime", "glitchtip", "glitchtip-runtime"),
+    ),
+    ProviderRefreshTarget(
+        "glitchtip/owner",
+        ("email", "password"),
+        ExternalSecretTarget("glitchtip-owner", "glitchtip", "glitchtip-owner"),
+    ),
+    ProviderRefreshTarget(
         "docling/external",
         ("inferenceToken",),
         ExternalSecretTarget("docling-inference", "docling", "docling-inference"),
@@ -436,6 +446,7 @@ path "secret/metadata/contextforge/provider-apps" {
     if namespace not in (
         *ROLE_NAMESPACES,
         *(addon.namespace for addon in ADDONS.values()),
+        "glitchtip",
         *DOCLING_NAMESPACES,
     ):
         raise ValueError("Namespace is not present in the reconciliation catalog")

@@ -1092,6 +1092,8 @@ def test_seed_finish_and_root_revocation(
 
 
 def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) -> None:
+    cluster = MagicMock()
+    cluster.glitchtip_enabled.return_value = False
     unauthenticated = MagicMock()
     unauthenticated.ca_cert = tmp_path / "ca"
     root = MagicMock()
@@ -1115,7 +1117,7 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
         patch("openbao_stack_setup.main.update") as update,
     ):
         _seed_and_finish(
-            MagicMock(),
+            cluster,
             unauthenticated,
             "root",
             kit("seeded"),
@@ -1127,6 +1129,7 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
         root,
         ReconciliationIdentity("client", "cluster", "namespace"),
         tailscale_enabled=False,
+        glitchtip_enabled=False,
         docling_enabled=False,
         addons=(),
         contextforge_admin_email=None,
@@ -1225,6 +1228,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     tmp_path: Path, forgejo_enabled: bool, debug_enabled: bool, prepare_debug: bool
 ) -> None:
     cluster = MagicMock()
+    cluster.glitchtip_enabled.return_value = False
     cluster.contextforge_admin_email.return_value = (
         "recovery@example.com" if forgejo_enabled else None
     )
@@ -1284,6 +1288,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         root,
         ReconciliationIdentity("client", "cluster", "namespace"),
         tailscale_enabled=True,
+        glitchtip_enabled=False,
         docling_enabled=True,
         addons=cluster.selected_addons.return_value,
         contextforge_admin_email=cluster.contextforge_admin_email.return_value,

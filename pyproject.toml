@@ -39,6 +39,7 @@ agentgateway-trust-publish = "k8s_stack_tooling.agentgateway_trust:main"
 addon-check = "k8s_stack_tooling.addons:main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 stage-documentdb-provisioner = "k8s_stack_tooling.postgres.documentdb:main"
+provision-glitchtip = "k8s_stack_tooling.glitchtip.provision:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]
@@ -60,6 +61,8 @@ quote-style = "double"
 
 [tool.ty.src]
 include = ["src", "tests"]
+# The standalone payload and native acceptance harness run with upstream Python/Django, not Tooling.
+exclude = ["src/k8s_stack_tooling/glitchtip/payload.py", "tests/glitchtip_native"]
 
 
 [tool.pytest.ini_options]

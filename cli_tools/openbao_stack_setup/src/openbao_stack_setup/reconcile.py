@@ -68,6 +68,7 @@ def reconcile_openbao(
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
     tailscale_enabled: bool = False,
+    glitchtip_enabled: bool = False,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
@@ -88,9 +89,17 @@ def reconcile_openbao(
     namespaces += ("tailscale",) if tailscale_enabled else ()
     namespaces += DOCLING_NAMESPACES if docling_enabled else ()
     namespaces += ("contextforge",) if contextforge_admin_email is not None else ()
+    namespaces += ("glitchtip",) if glitchtip_enabled else ()
     for namespace in namespaces:
         client.write_policy(namespace, namespace_policy(namespace))
         client.write_kubernetes_role(namespace)
+    if glitchtip_enabled:
+        client.write_policy(
+            "monitor-opensearch",
+            namespace_policy("monitor-opensearch")
+            + '\npath "secret/data/glitchtip/adapter" { capabilities = ["read"] }\n'
+            'path "secret/metadata/glitchtip/adapter" { capabilities = ["read"] }\n',
+        )
     if contextforge_admin_email is not None:
         client.write_policy("contextforge-oauth", contextforge_oauth_policy())
     client.write_policy(
@@ -98,6 +107,7 @@ def reconcile_openbao(
         secret_operator_policy(
             managed_credential_paths(tailscale_enabled=tailscale_enabled)
             + ((CONTEXTFORGE_PROVIDER_APPS_PATH,) if contextforge_admin_email is not None else ())
+            + (("glitchtip/adapter",) if glitchtip_enabled else ())
         ),
     )
     client._write(
@@ -120,6 +130,7 @@ def reconcile_openbao(
         docling_enabled=docling_enabled,
         addons=addons,
         contextforge_admin_email=contextforge_admin_email,
+        glitchtip_enabled=glitchtip_enabled,
     )
     debug = reconcile_rejection_debug(client, enabled=rejection_debug_enabled)
 
