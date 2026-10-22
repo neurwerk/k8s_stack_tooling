@@ -36,8 +36,8 @@ from openbao_stack_setup.catalog import (
     PROVIDER_REFRESH_TARGETS,
     REJECTION_DEBUG_EXTERNAL_SECRETS,
     REJECTION_DEBUG_SECRET_STORE,
-    WIREGUARD_EXTERNAL_SECRET,
-    WIREGUARD_SECRET_STORE,
+    TAILSCALE_EXTERNAL_SECRET,
+    TAILSCALE_SECRET_STORE,
     HelmReleaseTarget,
     addon_catalogs,
 )
@@ -198,7 +198,7 @@ def _preflight(context: str, client: str) -> None:
     identity = cluster.identity(client)
     smtp_required = cluster.require_bootstrap_prerequisites()
     active_directory_required = cluster.active_directory_required()
-    wireguard_enabled = cluster.wireguard_enabled()
+    tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
@@ -211,7 +211,7 @@ def _preflight(context: str, client: str) -> None:
     )
     print(f"Bootstrap prerequisites verified; SMTP credentials required={smtp_required}")
     print(f"Active Directory credentials required={active_directory_required}")
-    print(f"WireGuard server-key catalog selected={wireguard_enabled}")
+    print(f"Tailscale OAuth catalog selected={tailscale_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Selected addon catalogs={','.join(addons) or 'none'}")
     print(f"Rejected-request debug credential catalog selected={rejection_debug_enabled}")
@@ -233,7 +233,7 @@ def _bootstrap(
     identity = cluster.identity(client)
     cluster.require_bootstrap_prerequisites()
     active_directory_required = cluster.active_directory_required()
-    wireguard_enabled = cluster.wireguard_enabled()
+    tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
@@ -299,12 +299,12 @@ def _bootstrap(
                 kit,
                 paths.seal_file,
                 active_directory_required,
-                wireguard_enabled,
                 docling_enabled,
                 addons,
                 contextforge_admin_email,
                 mcp_ids,
                 rejection_debug_enabled,
+                tailscale_enabled=tailscale_enabled,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -325,12 +325,12 @@ def _bootstrap(
                 kit,
                 paths.seal_file,
                 active_directory_required,
-                wireguard_enabled,
                 docling_enabled,
                 addons,
                 contextforge_admin_email,
                 mcp_ids,
                 rejection_debug_enabled,
+                tailscale_enabled=tailscale_enabled,
             )
             return
         if kit.checkpoint == "complete":
@@ -345,12 +345,12 @@ def _bootstrap(
             kit,
             paths.seal_file,
             active_directory_required,
-            wireguard_enabled,
             docling_enabled,
             addons,
             contextforge_admin_email,
             mcp_ids,
             rejection_debug_enabled,
+            tailscale_enabled=tailscale_enabled,
         )
 
 
@@ -361,12 +361,13 @@ def _seed_and_finish(
     kit: RecoveryKit,
     recovery_file: Path,
     active_directory_required: bool,
-    wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     mcp_ids: tuple[str, ...] | None = None,
     rejection_debug_enabled: bool = False,
+    *,
+    tailscale_enabled: bool = False,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -385,11 +386,11 @@ def _seed_and_finish(
                 bootstrap_passwords,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
                 active_directory=active_directory,
-                wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
                 rejection_debug_enabled=rejection_debug_enabled,
+                tailscale_enabled=tailscale_enabled,
             )
             kit = with_checkpoint(kit, "seeded")
             update(recovery_file, kit)
@@ -403,11 +404,11 @@ def _seed_and_finish(
             reconciled = reconcile_openbao(
                 root,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
-                wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
                 rejection_debug_enabled=rejection_debug_enabled,
+                tailscale_enabled=tailscale_enabled,
             )
             print(
                 "Reconciled OpenBao catalog "
@@ -426,11 +427,11 @@ def _seed_and_finish(
     _converge_runtime(
         cluster,
         active_directory_required,
-        wireguard_enabled,
         docling_enabled,
         addons,
         contextforge_admin_email,
         rejection_debug_enabled,
+        tailscale_enabled=tailscale_enabled,
     )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
@@ -449,7 +450,7 @@ def _reconcile(
     cluster = Cluster(context)
     identity = cluster.identity(client)
     active_directory_required = cluster.active_directory_required()
-    wireguard_enabled = cluster.wireguard_enabled()
+    tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
@@ -486,11 +487,11 @@ def _reconcile(
                     identity.cluster_id,
                     identity.namespace_uid,
                 ),
-                wireguard_enabled=wireguard_enabled,
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
                 rejection_debug_enabled=prepare_debug,
+                tailscale_enabled=tailscale_enabled,
             )
             _prepare_mcp_credentials(root, mcp_ids)
             if contextforge_admin_email is not None:
@@ -516,11 +517,11 @@ def _reconcile(
     _converge_runtime(
         cluster,
         active_directory_required,
-        wireguard_enabled,
         docling_enabled,
         addons,
         contextforge_admin_email,
         rejection_debug_enabled,
+        tailscale_enabled=tailscale_enabled,
     )
     print("OpenBao reconciliation completed.")
 
@@ -652,7 +653,7 @@ def _verify_secret_operator(cluster: Cluster, unauthenticated: OpenBaoClient) ->
 def _status(context: str, client: str, custody_root: Path | None) -> None:
     cluster = Cluster(context)
     identity = cluster.identity(client)
-    wireguard_enabled = cluster.wireguard_enabled()
+    tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
@@ -662,7 +663,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     with _openbao(cluster) as api:
         initialized = api.initialized()
     print(f"client={client} initialized={initialized} recovery_checkpoint={checkpoint}")
-    print(f"WireGuard server-key catalog selected={wireguard_enabled}")
+    print(f"Tailscale OAuth catalog selected={tailscale_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Selected addon catalogs={','.join(addons) or 'none'}")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
@@ -698,6 +699,12 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
     cluster = Cluster(context)
     cluster.identity(client)
     provider = MANAGED_CREDENTIALS[provider_name]
+    if provider_name == "tailscale-oauth":
+        if not cluster.tailscale_enabled():
+            raise SetupError("Tailscale OAuth catalog is not selected for the client")
+        target = TAILSCALE_EXTERNAL_SECRET
+        if not cluster.external_secret_exists(target.name, target.namespace):
+            raise SetupError("Approved Tailscale OAuth ExternalSecret is missing")
     if provider_name == "docling-inference" and cluster.docling_inference_mode() != "private-vlm":
         raise SetupError("Docling private-vlm inference is not selected for the client")
     if provider_name == "active-directory" and not cluster.active_directory_required():
@@ -832,7 +839,6 @@ def _refresh_provider(cluster: Cluster, provider: Provider) -> None:
 def _refresh_bootstrap_external_secrets(
     cluster: Cluster,
     active_directory_required: bool,
-    wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
@@ -843,8 +849,6 @@ def _refresh_bootstrap_external_secrets(
         targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,)
     for catalog in addon_catalogs(addons):
         targets += catalog.external_secrets
-    if wireguard_enabled:
-        targets += (WIREGUARD_EXTERNAL_SECRET,)
     if docling_enabled:
         targets += DOCLING_EXTERNAL_SECRETS
     if contextforge_admin_email is not None:
@@ -859,22 +863,27 @@ def _refresh_bootstrap_external_secrets(
 def _converge_runtime(
     cluster: Cluster,
     active_directory_required: bool,
-    wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
+    *,
+    tailscale_enabled: bool = False,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
     _converge_bootstrap_secret_stores(cluster)
+    if tailscale_enabled:
+        cluster.ensure_secret_store_ready(
+            TAILSCALE_SECRET_STORE.name, TAILSCALE_SECRET_STORE.namespace
+        )
+        print(
+            "Tailscale OAuth access prepared; use secret set tailscale-oauth to verify delivery. "
+            "Operator activation remains separate."
+        )
     for catalog in addon_catalogs(addons):
         store = catalog.secret_store
         cluster.ensure_secret_store_ready(store.name, store.namespace)
-    if wireguard_enabled:
-        cluster.ensure_secret_store_ready(
-            WIREGUARD_SECRET_STORE.name, WIREGUARD_SECRET_STORE.namespace
-        )
     if docling_enabled:
         for store in DOCLING_SECRET_STORES:
             cluster.ensure_secret_store_ready(store.name, store.namespace)
@@ -889,7 +898,6 @@ def _converge_runtime(
     _refresh_bootstrap_external_secrets(
         cluster,
         active_directory_required,
-        wireguard_enabled,
         docling_enabled,
         addons,
         contextforge_admin_email,

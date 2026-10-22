@@ -11,8 +11,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 
 type Generator = Callable[[], str]
@@ -96,7 +94,6 @@ def reconcile_internal_credentials(
     client: OpenBaoClient,
     bootstrap_passwords: dict[str, str],
     *,
-    wireguard_enabled: bool = False,
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
@@ -308,13 +305,6 @@ def reconcile_internal_credentials(
             _, count = _upsert(client, path, {}, {field: _required_text(forgejo, source)})
             _record_change(changed, path, count)
             added += count
-    if wireguard_enabled:
-        gateway, count = _upsert(
-            client, "wireguard/internal", {"privateKey": _wireguard_private_key}
-        )
-        _validate_wireguard_private_key(_required_text(gateway, "privateKey"))
-        _record_change(changed, "wireguard/internal", count)
-        added += count
     if docling_enabled:
         docling, count = _upsert(client, "docling/internal", _random_fields("apiKey"))
         api_key = _docling_api_key(docling)
@@ -408,20 +398,6 @@ def _validate_opensearch_query_encryption_key(values: dict[str, JsonValue]) -> N
     value = _required_text(values, "queryDatasourceEncryptionKey")
     if len(value) != 32:
         raise OpenBaoError("OpenSearch query data-source encryption key must be 32 characters")
-
-
-def _wireguard_private_key() -> str:
-    """Encode a new X25519 private key in WireGuard's raw base64 format."""
-    return base64.b64encode(X25519PrivateKey.generate().private_bytes_raw()).decode("ascii")
-
-
-def _validate_wireguard_private_key(value: str) -> None:
-    try:
-        raw = base64.b64decode(value, validate=True)
-    except ValueError:
-        raise OpenBaoError("WireGuard server key is invalid; refusing to replace it") from None
-    if len(raw) != 32 or raw == bytes(32) or base64.b64encode(raw).decode("ascii") != value:
-        raise OpenBaoError("WireGuard server key is invalid; refusing to replace it")
 
 
 def migrate_schema_2_internal_credentials(client: OpenBaoClient) -> None:
