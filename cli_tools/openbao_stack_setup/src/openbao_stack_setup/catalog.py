@@ -139,15 +139,13 @@ DOCLING_EXTERNAL_SECRETS = (
 )
 TAILSCALE_SECRET_STORE = SecretStoreTarget("tailscale-openbao-secret-store", "tailscale")
 TAILSCALE_EXTERNAL_SECRET = ExternalSecretTarget("operator-oauth", "tailscale", "operator-oauth")
-REJECTION_DEBUG_SECRET_STORE = SecretStoreTarget(
-    REJECTION_DEBUG_ROLE, "monitor-agentgateway-extproc"
+GLITCHTIP_SECRET_STORE = SecretStoreTarget("glitchtip-openbao-secret-store", "glitchtip")
+GLITCHTIP_POSTGRES_EXTERNAL_SECRET = ExternalSecretTarget(
+    "glitchtip-postgres-values", "infra-postgres-operations", "glitchtip-postgres-values"
 )
 REJECTION_DEBUG_EXTERNAL_SECRETS = (
     ExternalSecretTarget(
         "monitor-langfuse-rejection-debug", "monitor-langfuse", "monitor-langfuse-rejection-debug"
-    ),
-    ExternalSecretTarget(
-        REJECTION_DEBUG_ROLE, "monitor-agentgateway-extproc", REJECTION_DEBUG_ROLE
     ),
 )
 FORGEJO_EXTERNAL_SECRETS = (

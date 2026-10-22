@@ -33,9 +33,10 @@ from openbao_stack_setup.catalog import (
     CONTEXTFORGE_SECRET_STORE,
     DOCLING_EXTERNAL_SECRETS,
     DOCLING_SECRET_STORES,
+    GLITCHTIP_POSTGRES_EXTERNAL_SECRET,
+    GLITCHTIP_SECRET_STORE,
     PROVIDER_REFRESH_TARGETS,
     REJECTION_DEBUG_EXTERNAL_SECRETS,
-    REJECTION_DEBUG_SECRET_STORE,
     TAILSCALE_EXTERNAL_SECRET,
     TAILSCALE_SECRET_STORE,
     HelmReleaseTarget,
@@ -206,6 +207,7 @@ def _preflight(context: str, client: str) -> None:
     active_directory_required = cluster.active_directory_required()
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
+    glitchtip_enabled = cluster.glitchtip_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
@@ -218,6 +220,7 @@ def _preflight(context: str, client: str) -> None:
     print(f"Bootstrap prerequisites verified; SMTP credentials required={smtp_required}")
     print(f"Active Directory credentials required={active_directory_required}")
     print(f"Tailscale OAuth catalog selected={tailscale_enabled}")
+    print(f"GlitchTip staged credential catalog selected={glitchtip_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
     print(f"Selected addon catalogs={','.join(addons) or 'none'}")
     print(f"Rejected-request debug credential catalog selected={rejection_debug_enabled}")
@@ -241,6 +244,7 @@ def _bootstrap(
     active_directory_required = cluster.active_directory_required()
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
+    glitchtip_enabled = cluster.glitchtip_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
@@ -311,6 +315,7 @@ def _bootstrap(
                 mcp_ids,
                 rejection_debug_enabled,
                 tailscale_enabled=tailscale_enabled,
+                glitchtip_enabled=glitchtip_enabled,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -337,6 +342,7 @@ def _bootstrap(
                 mcp_ids,
                 rejection_debug_enabled,
                 tailscale_enabled=tailscale_enabled,
+                glitchtip_enabled=glitchtip_enabled,
             )
             return
         if kit.checkpoint == "complete":
@@ -357,6 +363,7 @@ def _bootstrap(
             mcp_ids,
             rejection_debug_enabled,
             tailscale_enabled=tailscale_enabled,
+            glitchtip_enabled=glitchtip_enabled,
         )
 
 
@@ -374,6 +381,7 @@ def _seed_and_finish(
     rejection_debug_enabled: bool = False,
     *,
     tailscale_enabled: bool = False,
+    glitchtip_enabled: bool = False,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -392,7 +400,7 @@ def _seed_and_finish(
                 bootstrap_passwords,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
                 active_directory=active_directory,
-                glitchtip_enabled=cluster.glitchtip_enabled(),
+                glitchtip_enabled=glitchtip_enabled,
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
@@ -411,7 +419,7 @@ def _seed_and_finish(
             reconciled = reconcile_openbao(
                 root,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
-                glitchtip_enabled=cluster.glitchtip_enabled(),
+                glitchtip_enabled=glitchtip_enabled,
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
@@ -440,6 +448,7 @@ def _seed_and_finish(
         contextforge_admin_email,
         rejection_debug_enabled,
         tailscale_enabled=tailscale_enabled,
+        glitchtip_enabled=glitchtip_enabled,
     )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
@@ -460,6 +469,7 @@ def _reconcile(
     active_directory_required = cluster.active_directory_required()
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
+    glitchtip_enabled = cluster.glitchtip_enabled()
     addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     if rotate_contextforge_token:
@@ -495,7 +505,7 @@ def _reconcile(
                     identity.cluster_id,
                     identity.namespace_uid,
                 ),
-                glitchtip_enabled=cluster.glitchtip_enabled(),
+                glitchtip_enabled=glitchtip_enabled,
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
@@ -531,6 +541,7 @@ def _reconcile(
         contextforge_admin_email,
         rejection_debug_enabled,
         tailscale_enabled=tailscale_enabled,
+        glitchtip_enabled=glitchtip_enabled,
     )
     print("OpenBao reconciliation completed.")
 
@@ -901,6 +912,8 @@ def _refresh_provider(cluster: Cluster, provider: Provider) -> None:
     )
     if not targets:
         raise SetupError("Provider refresh target is unavailable")
+    if provider.name in ("glitchtip-owner", "glitchtip-smtp"):
+        _converge_glitchtip(cluster)
     refreshed = []
     for target in targets:
         external_secret = target.external_secret
@@ -939,6 +952,14 @@ def _refresh_bootstrap_external_secrets(
         cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
 
 
+def _converge_glitchtip(cluster: Cluster) -> None:
+    """Verify generated database delivery without waiting for unentered private inputs."""
+    store = GLITCHTIP_SECRET_STORE
+    cluster.ensure_secret_store_ready(store.name, store.namespace)
+    target = GLITCHTIP_POSTGRES_EXTERNAL_SECRET
+    cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
+
+
 def _converge_runtime(
     cluster: Cluster,
     active_directory_required: bool,
@@ -948,10 +969,18 @@ def _converge_runtime(
     rejection_debug_enabled: bool = False,
     *,
     tailscale_enabled: bool = False,
+    glitchtip_enabled: bool = False,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
     _converge_bootstrap_secret_stores(cluster)
+    if glitchtip_enabled:
+        _converge_glitchtip(cluster)
+        print(
+            "GlitchTip generated database credential delivery verified; enter SMTP and initial "
+            "owner credentials separately with secret set glitchtip-smtp and secret set "
+            "glitchtip-owner. App provisioning and adapter DSN handoff remain separate."
+        )
     if tailscale_enabled:
         cluster.ensure_secret_store_ready(
             TAILSCALE_SECRET_STORE.name, TAILSCALE_SECRET_STORE.namespace
@@ -969,10 +998,6 @@ def _converge_runtime(
     if contextforge_admin_email is not None:
         cluster.ensure_secret_store_ready(
             CONTEXTFORGE_SECRET_STORE.name, CONTEXTFORGE_SECRET_STORE.namespace
-        )
-    if rejection_debug_enabled:
-        cluster.ensure_secret_store_ready(
-            REJECTION_DEBUG_SECRET_STORE.name, REJECTION_DEBUG_SECRET_STORE.namespace
         )
     _refresh_bootstrap_external_secrets(
         cluster,

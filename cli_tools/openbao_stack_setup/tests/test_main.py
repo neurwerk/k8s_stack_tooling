@@ -561,6 +561,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     seal_file = tmp_path / "seal.json"
     paths = CustodyPaths(tmp_path, seal_file, tmp_path / "packages")
     cluster = MagicMock()
+    cluster.glitchtip_enabled.return_value = True
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.seal_exists.return_value = False
@@ -647,6 +648,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=True,
+        glitchtip_enabled=True,
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -655,6 +657,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
     recovery_file = tmp_path / "recovery.json"
     recovery_file.write_text("existing", encoding="utf-8")
     cluster = MagicMock()
+    cluster.glitchtip_enabled.return_value = True
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
@@ -689,6 +692,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=False,
+        glitchtip_enabled=True,
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -700,6 +704,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     seal_file.write_text("existing", encoding="utf-8")
     paths = CustodyPaths(tmp_path, seal_file, tmp_path / "packages")
     cluster = MagicMock()
+    cluster.glitchtip_enabled.return_value = False
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
@@ -744,6 +749,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=False,
+        glitchtip_enabled=False,
     )
 
 
@@ -1309,6 +1315,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         cluster.contextforge_admin_email.return_value,
         debug_enabled,
         tailscale_enabled=True,
+        glitchtip_enabled=False,
     )
 
 
