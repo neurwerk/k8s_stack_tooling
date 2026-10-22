@@ -97,6 +97,7 @@ def reconcile_internal_credentials(
     docling_enabled: bool = False,
     addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
+    glitchtip_enabled: bool = False,
 ) -> InternalResult:
     """Add every missing internal field while preserving all existing values."""
     _validate_bootstrap_passwords(bootstrap_passwords)
@@ -314,10 +315,64 @@ def reconcile_internal_credentials(
         _, count = _upsert(client, path, {}, {"doclingApiKey": api_key})
         _record_change(changed, path, count)
         added += count
-    contextforge_result = _reconcile_contextforge(client, contextforge_admin_email)
-    changed = list(dict.fromkeys((*changed, *contextforge_result.changed_paths)))
-    added += contextforge_result.added_fields
+    for result in (
+        _reconcile_contextforge(client, contextforge_admin_email),
+        _reconcile_glitchtip(client, enabled=glitchtip_enabled),
+    ):
+        changed = list(dict.fromkeys((*changed, *result.changed_paths)))
+        added += result.added_fields
     return InternalResult(tuple(changed), added)
+
+
+def _reconcile_glitchtip(client: OpenBaoClient, *, enabled: bool) -> InternalResult:
+    if not enabled:
+        return InternalResult((), 0)
+    changed: list[str] = []
+    added = 0
+    password = _glitchtip_database_password(client)
+    for path, generators, fixed in (
+        ("glitchtip/internal", _random_fields("secretKey"), {"databasePassword": password}),
+        ("infra-postgres-operations/internal", {}, {"glitchtipPassword": password}),
+        (
+            "glitchtip/adapter",
+            _random_fields("opensearchPassword"),
+            {"opensearchUsername": "glitchtip-adapter"},
+        ),
+    ):
+        values, count = _upsert(client, path, generators, fixed)
+        for field in generators:
+            value = _required_text(values, field)
+            if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise OpenBaoError("GlitchTip internal credential is invalid; refusing replacement")
+        _record_change(changed, path, count)
+        added += count
+    for path, fields in (
+        ("glitchtip/adapter", ("dsn",)),
+        ("glitchtip/external", ("smtpUsername", "smtpPassword")),
+        ("glitchtip/owner", ("email", "password")),
+    ):
+        _, count = _upsert(client, path, dict.fromkeys(fields, lambda: ""))
+        _record_change(changed, path, count)
+        added += count
+    return InternalResult(tuple(changed), added)
+
+
+def _glitchtip_database_password(client: OpenBaoClient) -> str:
+    """Preserve either existing copy and reject conflicts before changing either record."""
+    copies = []
+    for path, field in (
+        ("glitchtip/internal", "databasePassword"),
+        ("infra-postgres-operations/internal", "glitchtipPassword"),
+    ):
+        current = client.read_secret(path)
+        if current is not None and field in current.values:
+            value = _required_text(current.values, field)
+            if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise OpenBaoError("GlitchTip database credential is invalid; refusing replacement")
+            copies.append(value)
+    if len(set(copies)) > 1:
+        raise OpenBaoError("GlitchTip database credential copies conflict; refusing replacement")
+    return copies[0] if copies else _random_secret()
 
 
 def _reconcile_contextforge(client: OpenBaoClient, admin_email: str | None) -> InternalResult:

@@ -143,6 +143,10 @@ def test_smtp_update_replaces_the_managed_record(tmp_path: Path) -> None:
 def test_secret_operator_policy_allows_only_managed_records() -> None:
     policy = _secret_operator_policy()
     assert set(re.findall(r'^path "([^"]+)"', policy, re.MULTILINE)) == {
+        "secret/data/glitchtip/external",
+        "secret/metadata/glitchtip/external",
+        "secret/data/glitchtip/owner",
+        "secret/metadata/glitchtip/owner",
         "secret/data/auth-keycloak/external",
         "secret/metadata/auth-keycloak/external",
         "secret/data/infra-agentgateway/external",

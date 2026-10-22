@@ -64,6 +64,7 @@ from openbao_stack_setup.custody import (
     validate_package_set,
     write_custodian_package,
 )
+from openbao_stack_setup.glitchtip import parse_dsn_export, provisioning_payload, store_project_dsn
 from openbao_stack_setup.mcp import reconcile_mcp
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
 from openbao_stack_setup.reconcile import ReconciliationIdentity, reconcile_openbao
@@ -136,6 +137,9 @@ def _arguments() -> argparse.ArgumentParser:
     set_command.add_argument("provider", choices=sorted(MANAGED_CREDENTIALS))
     oauth = _guarded(secret_commands.add_parser("set-contextforge-oauth"))
     oauth.add_argument("integration_id")
+    dsn = _guarded(secret_commands.add_parser("import-glitchtip-dsn"))
+    for field in ("organization", "project", "project-name", "team"):
+        dsn.add_argument(f"--{field}", required=True)
     addon = commands.add_parser("addon")
     addon_commands = addon.add_subparsers(dest="addon_command", required=True)
     refresh = _guarded(addon_commands.add_parser("refresh"))
@@ -175,6 +179,8 @@ def main() -> None:
             _refresh_addon(args.context, args.client, args.addon_id)
         elif getattr(args, "secret_command", None) == "set-contextforge-oauth":
             _set_contextforge_oauth(args.context, args.client, args.integration_id)
+        elif getattr(args, "secret_command", None) == "import-glitchtip-dsn":
+            _import_glitchtip_dsn(args)
         else:
             _set_provider(args.context, args.client, args.provider)
     except (ClusterError, CustodyError, OpenBaoError, RecoveryKitError, SetupError) as exc:
@@ -386,6 +392,7 @@ def _seed_and_finish(
                 bootstrap_passwords,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
                 active_directory=active_directory,
+                glitchtip_enabled=cluster.glitchtip_enabled(),
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
@@ -404,6 +411,7 @@ def _seed_and_finish(
             reconciled = reconcile_openbao(
                 root,
                 ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
+                glitchtip_enabled=cluster.glitchtip_enabled(),
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
@@ -487,6 +495,7 @@ def _reconcile(
                     identity.cluster_id,
                     identity.namespace_uid,
                 ),
+                glitchtip_enabled=cluster.glitchtip_enabled(),
                 docling_enabled=docling_enabled,
                 addons=addons,
                 contextforge_admin_email=contextforge_admin_email,
@@ -705,6 +714,8 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
         target = TAILSCALE_EXTERNAL_SECRET
         if not cluster.external_secret_exists(target.name, target.namespace):
             raise SetupError("Approved Tailscale OAuth ExternalSecret is missing")
+    if provider_name.startswith("glitchtip-") and not cluster.glitchtip_enabled():
+        raise SetupError("GlitchTip is not selected for the client")
     if provider_name == "docling-inference" and cluster.docling_inference_mode() != "private-vlm":
         raise SetupError("Docling private-vlm inference is not selected for the client")
     if provider_name == "active-directory" and not cluster.active_directory_required():
@@ -727,6 +738,74 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
             operator.revoke_self()
     _refresh_provider(cluster, provider)
     print(f"Updated OpenBao paths {', '.join(provider.paths)}; refresh requested.")
+
+
+def _import_glitchtip_dsn(args: argparse.Namespace) -> None:
+    """Read the selected project and store its DSN without printing it."""
+    cluster = Cluster(args.context)
+    cluster.identity(args.client)
+    if not cluster.glitchtip_enabled():
+        raise SetupError("GlitchTip is not selected for the client")
+    if not cluster.external_secret_exists("glitchtip-adapter", "glitchtip"):
+        raise SetupError("Approved GlitchTip adapter ExternalSecret is missing")
+    _confirm(args.context, args.client, "Import verified GlitchTip project DSN")
+    dsn = _read_glitchtip_dsn(cluster, args)
+    with _openbao(cluster) as unauthenticated:
+        jwt = cluster.token_request("secret-operator")
+        token = unauthenticated.kubernetes_login("secret-operator", jwt)
+        operator = OpenBaoClient(_ADDRESS, token, unauthenticated.ca_cert, unauthenticated.session)
+        try:
+            store_project_dsn(operator, dsn)
+        finally:
+            operator.revoke_self()
+    cluster.force_external_secret_refresh("glitchtip-adapter", "glitchtip", "glitchtip-adapter")
+    print("Verified GlitchTip DSN handed off; contents hidden; Secret refresh requested.")
+
+
+def _read_glitchtip_dsn(cluster: Cluster, args: argparse.Namespace) -> str:
+    """Run reviewed read-only source over stdin; never log or display captured stdout."""
+    pod = cluster.glitchtip_application_pod()
+    command = [
+        _kubectl_executable(),
+        "--context",
+        cluster.context,
+        "--namespace",
+        "glitchtip",
+        "exec",
+        "-i",
+        pod,
+        "--container",
+        "glitchtip",
+        "--",
+        "env",
+        "PYTHONPATH=/code",
+        "DJANGO_SETTINGS_MODULE=glitchtip.settings",
+        "python",
+        "-",
+        "export-dsn",
+        "--organization",
+        args.organization,
+        "--project",
+        args.project,
+        "--project-name",
+        args.project_name,
+        "--team",
+        args.team,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            input=provisioning_payload(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise SetupError("Private GlitchTip DSN export failed; output hidden") from None
+    if result.returncode != 0:
+        raise SetupError("Private GlitchTip DSN export failed; output hidden")
+    return parse_dsn_export(result.stdout, args.organization, args.project)
 
 
 def _set_contextforge_oauth(context: str, client: str, integration_id: str) -> None:
