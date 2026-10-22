@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from fake import FakeSession, StoredSecret
+from test_cluster import cluster as configured_cluster
 from test_reconcile import client, identity, passwords, source
 
 from openbao_stack_setup import glitchtip
 from openbao_stack_setup import main as cli
 from openbao_stack_setup.client import OpenBaoError
+from openbao_stack_setup.cluster import Cluster, ClusterError
 from openbao_stack_setup.reconcile import reconcile_openbao
 
 DSN = "https://0123456789abcdef0123456789abcdef@glitchtip.test/7"
@@ -129,6 +132,155 @@ def test_conflicting_database_copies_fail_before_changing_either_record(tmp_path
     with pytest.raises(OpenBaoError, match="copies conflict"):
         reconcile_openbao(api, identity(), glitchtip_enabled=True)
     assert session.secrets == before
+
+
+def test_interrupted_database_copy_retry_preserves_the_first_generated_password(tmp_path):
+    session = FakeSession()
+    source(session)
+    api = client(tmp_path, session)
+    reconcile_openbao(api, identity(), passwords())
+    original_postgres = deepcopy(session.secrets["infra-postgres-operations/internal"])
+    session.failure = (
+        "POST",
+        "secret/data/infra-postgres-operations/internal",
+        503,
+        {"errors": ["synthetic interruption"]},
+    )
+    with pytest.raises(OpenBaoError, match="HTTP 503"):
+        reconcile_openbao(api, identity(), glitchtip_enabled=True)
+    original_app = deepcopy(session.secrets["glitchtip/internal"])
+    assert session.secrets["infra-postgres-operations/internal"] == original_postgres
+    session.failure = None
+    reconcile_openbao(api, identity(), glitchtip_enabled=True)
+    assert session.secrets["glitchtip/internal"] == original_app
+    assert session.secrets[
+        "infra-postgres-operations/internal"
+    ].values == original_postgres.values | {
+        "glitchtipPassword": original_app.values["databasePassword"]
+    }
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_staged_convergence_delivers_generated_database_without_waiting_for_blank_inputs(selected):
+    target = MagicMock(spec=Cluster)
+    with (
+        patch("openbao_stack_setup.main._converge_bootstrap_secret_stores"),
+        patch("openbao_stack_setup.main._refresh_bootstrap_external_secrets"),
+        patch("openbao_stack_setup.main._reconcile_bootstrap_helm_releases"),
+    ):
+        cli._converge_runtime(target, False, glitchtip_enabled=selected)
+    assert target.ensure_secret_store_ready.call_args_list == (
+        [call("glitchtip-openbao-secret-store", "glitchtip")] if selected else []
+    )
+    assert target.force_external_secret_refresh.call_args_list == (
+        [
+            call(
+                "glitchtip-postgres-values",
+                "infra-postgres-operations",
+                "glitchtip-postgres-values",
+            )
+        ]
+        if selected
+        else []
+    )
+    target.token_request.assert_not_called()
+    target.wait_helm_release.assert_not_called()
+    target.glitchtip_application_pod.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "order", [("glitchtip-owner", "glitchtip-smtp"), ("glitchtip-smtp", "glitchtip-owner")]
+)
+def test_setters_independently_retry_delivery_after_revocation_in_either_order(
+    monkeypatch, tmp_path, order
+):
+    session = FakeSession()
+    source(session)
+    operator = client(tmp_path, session)
+    reconcile_openbao(operator, identity(), passwords(), glitchtip_enabled=True)
+    original_database = deepcopy(session.secrets["infra-postgres-operations/internal"])
+    values = {
+        "glitchtip-owner": {"email": "synthetic@example.invalid", "password": "synthetic-owner"},
+        "glitchtip-smtp": {
+            "smtpUsername": "synthetic-smtp",
+            "smtpPassword": "synthetic-smtp-password",
+        },
+    }
+    own_targets = {"glitchtip-owner": "glitchtip-owner", "glitchtip-smtp": "glitchtip-runtime"}
+    target = MagicMock(spec=Cluster)
+    target.glitchtip_enabled.return_value = True
+    connection = MagicMock()
+    connection.__enter__.return_value.kubernetes_login.return_value = "synthetic-operator-token"
+    monkeypatch.setattr(cli, "Cluster", lambda context: target)
+    monkeypatch.setattr(cli, "_confirm", lambda *args: None)
+    monkeypatch.setattr(cli, "_prompt_provider", lambda provider: values[provider.name])
+    monkeypatch.setattr(cli, "_openbao", lambda cluster: connection)
+    monkeypatch.setattr(cli, "OpenBaoClient", lambda *args: operator)
+
+    def after_revocation(*args):
+        assert session.calls[-1].path == "auth/token/revoke-self"
+
+    target.ensure_secret_store_ready.side_effect = after_revocation
+    target.force_external_secret_refresh.side_effect = after_revocation
+    for name in order:
+        target.reset_mock()
+        session.calls.clear()
+        cli._set_provider("context", "client", name)
+        assert session.secrets["infra-postgres-operations/internal"] == original_database
+        target.ensure_secret_store_ready.assert_called_once_with(
+            "glitchtip-openbao-secret-store", "glitchtip"
+        )
+        assert target.force_external_secret_refresh.call_args_list == [
+            call(
+                "glitchtip-postgres-values",
+                "infra-postgres-operations",
+                "glitchtip-postgres-values",
+            ),
+            call(own_targets[name], "glitchtip", own_targets[name]),
+        ]
+        assert sum(request.path == "auth/token/revoke-self" for request in session.calls) == 1
+        other = "glitchtip-smtp" if name == "glitchtip-owner" else "glitchtip-owner"
+        if name == order[0]:
+            path = "glitchtip/external" if other == "glitchtip-smtp" else "glitchtip/owner"
+            assert all(value == "" for value in session.secrets[path].values.values())
+        target.glitchtip_application_pod.assert_not_called()
+        target.wait_helm_release.assert_not_called()
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_preflight_reports_actual_glitchtip_selection(monkeypatch, capsys, selected):
+    selector = configured_cluster()
+    selector.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": "glitchtip: {enabled: " + str(selected).lower() + "}"}
+    )
+    target = MagicMock()
+    target.glitchtip_enabled = selector.glitchtip_enabled
+    target.studio_mcp_ids.return_value = ()
+    monkeypatch.setattr(cli, "Cluster", lambda context: target)
+    cli._preflight("context", "client")
+    assert f"GlitchTip staged credential catalog selected={selected}" in capsys.readouterr().out
+    target.token_request.assert_not_called()
+
+
+def test_malformed_glitchtip_selection_stops_before_credentials_or_custody(monkeypatch):
+    selector = configured_cluster()
+    selector.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": 'glitchtip: {enabled: "true"}'}
+    )
+    target = MagicMock()
+    target.glitchtip_enabled = selector.glitchtip_enabled
+    monkeypatch.setattr(cli, "Cluster", lambda context: target)
+    with (
+        patch("openbao_stack_setup.main._prompt_provider") as prompt,
+        patch("openbao_stack_setup.main._openbao") as login,
+        patch("openbao_stack_setup.main.prepare_custody_paths") as custody,
+        pytest.raises(ClusterError, match="GlitchTip"),
+    ):
+        cli._preflight("context", "client")
+    prompt.assert_not_called()
+    login.assert_not_called()
+    custody.assert_not_called()
+    target.token_request.assert_not_called()
 
 
 def test_blank_existing_internal_secret_is_not_silently_replaced(tmp_path):
