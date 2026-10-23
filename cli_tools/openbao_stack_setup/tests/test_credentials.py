@@ -29,6 +29,9 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     reconcile_internal_credentials(api, base_passwords)
     assert "frontend-dify/internal" not in session.secrets
     assert "frontend-librechat/internal" not in session.secrets
+    assert "frontend-open-webui/internal" not in session.secrets
+    assert "openwebuiClientSecret" not in session.secrets["auth-keycloak/internal"].values
+    assert "openwebuiPassword" not in session.secrets["infra-postgres-operations/internal"].values
     assert "librechat-code-interpreter/internal" not in session.secrets
     assert "librechatOidcClientSecret" not in session.secrets["auth-keycloak/internal"].values
     assert "difyOidcClientSecret" not in session.secrets["auth-keycloak/internal"].values
@@ -44,8 +47,10 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert "difyPassword" not in session.secrets["infra-postgres-operations/internal"].values
 
     planned = plan_bootstrap_passwords(api, addons=("dify",))
-    first = reconcile_internal_credentials(api, planned, addons=("dify", "librechat"))
+    first = reconcile_internal_credentials(api, planned, addons=("dify", "librechat", "open-webui"))
     original = {path: dict(record.values) for path, record in session.secrets.items()}
+    selected_again = reconcile_internal_credentials(api, {}, addons=("open-webui",))
+    assert selected_again.changed_paths == ()
     second = reconcile_internal_credentials(api, {})
 
     assert set(first.changed_paths) == {
@@ -54,12 +59,32 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "auth-keycloak-api-key-bridge/internal",
         "infra-postgres-operations/internal",
         "frontend-librechat/internal",
+        "frontend-open-webui/internal",
     }
     assert first.added_fields > 0
     assert set(planned) == {"dify"}
     assert second.changed_paths == ()
     assert second.added_fields == 0
     assert {path: record.values for path, record in session.secrets.items()} == original
+
+    openwebui = original["frontend-open-webui/internal"]
+    assert all(
+        isinstance(openwebui[field], str) and openwebui[field]
+        for field in (
+            "postgresqlPassword",
+            "webuiSecretKey",
+            "oauthSessionTokenEncryptionKey",
+            "oauthClientInfoEncryptionKey",
+        )
+    )
+    assert (
+        openwebui["openidClientSecret"]
+        == original["auth-keycloak/internal"]["openwebuiClientSecret"]
+    )
+    assert (
+        openwebui["postgresqlPassword"]
+        == original["infra-postgres-operations/internal"]["openwebuiPassword"]
+    )
 
     dify = original["frontend-dify/internal"]
     assert all(
@@ -136,6 +161,7 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     postgres_operations = original["infra-postgres-operations/internal"]
     assert set(postgres_auth) == {"adminPassword", "keycloakPassword"}
     assert set(postgres_operations) == {
+        "openwebuiPassword",
         "adminPassword",
         "agentgatewayPassword",
         "apiKeyBridgePassword",
@@ -236,19 +262,23 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
         ("infra-postgres-operations/internal", "documentdbPassword"),
         ("infra-postgres-operations/internal", "difyPassword"),
         ("infra-postgres-operations/internal", "langfusePassword"),
+        ("infra-postgres-operations/internal", "openwebuiPassword"),
+        ("frontend-open-webui/internal", "openidClientSecret"),
     ],
 )
 def test_postgres_consumer_conflicts_are_rejected(tmp_path: Path, path: str, field: str) -> None:
     session = FakeSession()
     api = client(tmp_path, session)
     reconcile_internal_credentials(
-        api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify", "librechat")
+        api,
+        plan_bootstrap_passwords(api, addons=("dify",)),
+        addons=("dify", "librechat", "open-webui"),
     )
     session.secrets[path].values[field] = "conflict"
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match=rf"credential mismatch at {path}/{field}"):
-        reconcile_internal_credentials(api, {}, addons=("dify", "librechat"))
+        reconcile_internal_credentials(api, {}, addons=("dify", "librechat", "open-webui"))
 
     assert session.secrets[path].values == existing
 

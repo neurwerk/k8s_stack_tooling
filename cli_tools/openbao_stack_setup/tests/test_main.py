@@ -124,6 +124,7 @@ def test_addon_refresh_catalog_is_complete_and_selected(addons: tuple[str, ...])
         ("dify", "frontend-dify-postgres"),
         ("knowledge-center", "forgejo-postgres"),
         ("librechat", "librechat-documentdb"),
+        ("open-webui", "open-webui-postgres"),
     ],
 )
 def test_addon_refresh_orders_secrets_database_and_consumers(addon_id: str, database: str) -> None:
