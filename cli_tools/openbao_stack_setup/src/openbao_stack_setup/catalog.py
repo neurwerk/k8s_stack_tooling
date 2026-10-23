@@ -255,6 +255,7 @@ ADDONS = {
         (
             HelmReleaseTarget("keycloak-open-webui-access", "auth-keycloak"),
             HelmReleaseTarget("keycloak-open-webui-oidc", "auth-keycloak"),
+            HelmReleaseTarget("frontend-open-webui-shared", "frontend-open-webui"),
             HelmReleaseTarget("frontend-open-webui", "frontend-open-webui"),
         ),
         ("deployment/frontend-open-webui",),
