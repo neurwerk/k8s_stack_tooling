@@ -581,7 +581,7 @@ def test_internal_ingestion_http_and_redirect_retains_pending(
             # A followed redirect would succeed, making the request-count assertion fail.
             self.send_response(status if self.path == "/api/1/store/" else 200)
             self.send_header("Location", f"http://{host}:8000/redirected")
-            response = json.dumps({"id": json.loads(body)["event_id"]}).encode()
+            response = json.dumps({"event_id": json.loads(body)["event_id"]}).encode()
             self.send_header("Content-Length", str(len(response)))
             self.end_headers()
             self.wfile.write(response)
@@ -661,12 +661,72 @@ def test_ingestion_acknowledgement_requires_matching_event_id(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     transport = Transport(settings)
-    monkeypatch.setattr(transport, "request", lambda *_: {"id": "different"})
+    monkeypatch.setattr(transport, "request", lambda *_: {"event_id": "different"})
     try:
         with pytest.raises(AdapterError, match="acceptance uncertain"):
             transport.deliver('{"event_id":"expected"}')
     finally:
         transport.close()
+
+
+@pytest.mark.parametrize(
+    "acknowledgement",
+    [
+        "native",
+        "missing",
+        "null",
+        "number",
+        "object",
+        "malformed",
+        "foreign",
+        "hyphenated",
+        "id_only",
+    ],
+)
+def test_store_native_acknowledgement_and_immutable_retry(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, acknowledgement: str
+) -> None:
+    state = State(settings, [SCOPE])
+    transport = Transport(settings)
+    sent: list[str] = []
+    try:
+        state.enqueue(SCOPE, [record("one")], {"request 1 failed": "request <*> failed"}, START)
+        source, payload, _ = state.due(0)[0]
+        event_id = json.loads(payload)["event_id"]
+        responses = {
+            "native": {"event_id": event_id, "task_id": None},
+            "missing": {},
+            "null": {"event_id": None},
+            "number": {"event_id": 123},
+            "object": {"event_id": {"id": event_id}},
+            "malformed": {"event_id": "not-a-uuid"},
+            "foreign": {"event_id": ("0" if event_id[0] != "0" else "1") + event_id[1:]},
+            "hyphenated": {
+                "event_id": "-".join(
+                    [event_id[:8], event_id[8:12], event_id[12:16], event_id[16:20], event_id[20:]]
+                )
+            },
+            "id_only": {"id": event_id},
+        }
+
+        def request(_session: requests.Session, _url: str, body: str) -> dict[str, Any]:
+            sent.append(body)
+            return responses[acknowledgement] if len(sent) == 1 else {"event_id": event_id}
+
+        monkeypatch.setattr(transport, "request", request)
+        main.deliver_due(state, transport, 0)
+        if acknowledgement == "native":
+            assert state.pending_count() == 0
+            assert sent == [payload]
+        else:
+            assert state.pending_count() == 1
+            assert state.due(3600) == [(source, payload, 1)]
+            main.deliver_due(state, transport, 3600)
+            assert state.pending_count() == 0
+            assert sent == [payload, payload]
+    finally:
+        transport.close()
+        state.close()
 
 
 def test_native_contract_and_raw_recheck(

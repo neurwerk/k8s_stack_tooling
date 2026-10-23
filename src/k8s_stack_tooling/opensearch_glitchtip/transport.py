@@ -213,7 +213,8 @@ class Transport:
 
     def deliver(self, payload: str) -> None:
         result = self.request(self.sink, self.store_url, payload)
-        if result.get("id") != json.loads(payload)["event_id"]:
+        # GlitchTip 6.2.6 store returns event_id (the envelope API uses id).
+        if result.get("event_id") != json.loads(payload)["event_id"]:
             # The server may already have accepted it. Preserve payload and event ID on retry.
             raise AdapterError("ingestion acknowledgement mismatch; acceptance uncertain")
 
