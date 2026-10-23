@@ -152,6 +152,22 @@ def test_addon_refresh_orders_secrets_database_and_consumers(addon_id: str, data
     upgrades = [item for item in calls if item[0] == "force_reconcile"]
     assert upgrades[0] == call.force_reconcile(database, "infra-postgres-operations")
     assert len(upgrades) > 1
+    if addon_id == "open-webui":
+        producer_index = calls.index(
+            call.force_reconcile("frontend-open-webui-shared", "frontend-open-webui")
+        )
+        producer_ready_index = calls.index(
+            call.wait_helm_release(
+                "frontend-open-webui-shared",
+                "frontend-open-webui",
+                timeout_seconds=900,
+                force_token=cluster.force_reconcile.return_value,
+            )
+        )
+        consumer_index = calls.index(
+            call.force_reconcile("frontend-open-webui", "frontend-open-webui")
+        )
+        assert database_index < producer_index < producer_ready_index < consumer_index
     cluster.reset_mock()
     cluster.force_external_secret_refresh.side_effect = ClusterError("Secret delivery failed")
     with (
