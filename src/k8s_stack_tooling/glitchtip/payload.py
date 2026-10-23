@@ -13,8 +13,10 @@ import logging
 import os
 import re
 import sys
+from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -27,6 +29,60 @@ if TYPE_CHECKING:
 
 class ProvisionError(RuntimeError):
     """Reject unsafe state without including application data in the message."""
+
+
+def _diagnostic_identifier(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", value):
+        return value
+    return "unknown"
+
+
+def _failure_locations(traceback: TracebackType | None) -> list[str]:
+    tail: deque[str] = deque(maxlen=8)
+    project = []
+    walked = 0
+    while traceback is not None and walked < 256:
+        code = traceback.tb_frame.f_code
+        basename = code.co_filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if basename == "<stdin>":
+            basename = "stdin.py"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}\.py", basename):
+            basename = "unknown.py"
+        location = f"  {basename}:{_diagnostic_identifier(code.co_name)}:{traceback.tb_lineno}"
+        tail.append(location)
+        if code.co_filename == __file__ and len(project) < 3:
+            project.append(location)
+        traceback = traceback.tb_next
+        walked += 1
+    lines = project + [location for location in tail if location not in project]
+    if traceback is not None:
+        lines.append("  additional frames omitted")
+    return lines
+
+
+def _failure_details(error: BaseException, limit: int = 4096) -> str:
+    """Emit only bounded code metadata; never format exception values or source lines."""
+    pending = deque([("root", error)])
+    seen: set[int] = set()
+    lines = []
+    while pending and len(seen) < 4:
+        relation, exception = pending.popleft()
+        if id(exception) in seen:
+            continue
+        seen.add(id(exception))
+        lines.append(relation + ": " + _diagnostic_identifier(type(exception).__name__))
+        lines.extend(_failure_locations(exception.__traceback__))
+        for relation, related in (
+            ("cause", exception.__cause__),
+            ("context", exception.__context__),
+        ):
+            if related is not None and id(related) not in seen:
+                pending.append((relation, related))
+    if pending:
+        lines.append("additional exception links omitted")
+    rendered = "\n".join(lines)
+    omitted = "\nadditional diagnostic details omitted"
+    return rendered if len(rendered) <= limit else rendered[: limit - len(omitted)] + omitted
 
 
 def text(value: object) -> str:
@@ -501,13 +557,18 @@ def main() -> int:
                 result = None
             else:
                 result = export_dsn(args.organization, args.project, args.project_name, args.team)
-    except Exception:
+    except Exception as error:
         message = (
             "GlitchTip provisioning committed but post-commit work failed; rerun safely"
             if committed
             else "GlitchTip operation failed; no credentials or native errors displayed"
         )
         print(message, file=sys.stderr)
+        try:
+            details = _failure_details(error, 4096 - len(message) - 2)
+        except Exception:
+            details = "Failure metadata unavailable"
+        print(details, file=sys.stderr)
         return 2 if committed else 1
     if result is not None:
         print(
