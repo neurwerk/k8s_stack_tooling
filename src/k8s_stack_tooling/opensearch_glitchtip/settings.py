@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     opensearch_password: SecretStr
     opensearch_ca_file: Path
     glitchtip_dsn: SecretStr
+    glitchtip_ingest_base_url: str | None = None
     glitchtip_ca_file: Path | None = None
     environment: str
     scopes_file: Path
@@ -132,7 +133,7 @@ class Settings(BaseSettings):
             or source.fragment
         ):
             raise ValueError("OpenSearch URL must be an HTTPS origin")
-        destination(self.glitchtip_dsn.get_secret_value())
+        destination(self.glitchtip_dsn.get_secret_value(), self.glitchtip_ingest_base_url)
         if not self.opensearch_username or not self.opensearch_password.get_secret_value():
             raise ValueError("reader credentials are required")
         for path in (self.opensearch_ca_file, self.glitchtip_ca_file):
@@ -143,7 +144,7 @@ class Settings(BaseSettings):
         return load_scopes(self.scopes_file)
 
 
-def destination(dsn: str) -> tuple[str, str, str]:
+def destination(dsn: str, ingest_base_url: str | None = None) -> tuple[str, str, str]:
     parsed = urlsplit(dsn)
     # Plain HTTP is supported only for a Kubernetes-internal GlitchTip Service.
     internal = bool(parsed.hostname and parsed.hostname.endswith(".svc.cluster.local"))
@@ -163,4 +164,14 @@ def destination(dsn: str) -> tuple[str, str, str]:
         host += f":{parsed.port}"
     origin = f"{parsed.scheme}://{host}"
     project = parsed.path[1:]
-    return f"{origin}/api/{project}/store/", parsed.username, f"{origin}/{project}"
+    ingest_origin = origin
+    if ingest_base_url is not None:
+        # Operator-owned routing only: no credentials, arbitrary paths or public hosts.
+        # Keep the native DSN as the credential/project and durable-state identity.
+        label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        if not re.fullmatch(
+            rf"https?://{label}\.{label}\.svc\.cluster\.local:8000/?", ingest_base_url
+        ):
+            raise ValueError("GlitchTip ingestion base URL must be a Service origin on port 8000")
+        ingest_origin = ingest_base_url.rstrip("/")
+    return f"{ingest_origin}/api/{project}/store/", parsed.username, f"{origin}/{project}"
