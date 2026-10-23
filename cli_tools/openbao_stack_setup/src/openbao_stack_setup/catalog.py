@@ -232,6 +232,33 @@ class AddonCatalog:
 
 
 ADDONS = {
+    "open-webui": AddonCatalog(
+        "frontendOpenWebui",
+        "frontend-open-webui",
+        SecretStoreTarget("frontend-open-webui-openbao-secret-store", "frontend-open-webui"),
+        (
+            ExternalSecretTarget(
+                "frontend-open-webui-runtime-secret",
+                "frontend-open-webui",
+                "frontend-open-webui-runtime-secret",
+            ),
+            ExternalSecretTarget(
+                "open-webui-oidc-secret", "auth-keycloak", "open-webui-oidc-secret"
+            ),
+            ExternalSecretTarget(
+                "open-webui-postgres-password",
+                "infra-postgres-operations",
+                "open-webui-postgres-password",
+            ),
+        ),
+        HelmReleaseTarget("open-webui-postgres", "infra-postgres-operations"),
+        (
+            HelmReleaseTarget("keycloak-open-webui-access", "auth-keycloak"),
+            HelmReleaseTarget("keycloak-open-webui-oidc", "auth-keycloak"),
+            HelmReleaseTarget("frontend-open-webui", "frontend-open-webui"),
+        ),
+        ("deployment/frontend-open-webui",),
+    ),
     "librechat": AddonCatalog(
         "frontendLibrechat",
         "frontend-librechat",

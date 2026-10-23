@@ -35,6 +35,8 @@ CANONICAL_GROUP_PATHS = frozenset(
         "langfuse-admins",
         "librechat-admins",
         "librechat-users",
+        "open-webui-admins",
+        "open-webui-users",
         "opensearch-admins",
         "pii-admins",
         "platform-admins",

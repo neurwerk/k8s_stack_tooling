@@ -106,6 +106,7 @@ def reconcile_internal_credentials(
 
     keycloak_generators = _random_fields("dbPassword", "bridgeOidcClientSecret")
     addon_oidc_fields = {
+        "open-webui": ("openwebuiClientSecret",),
         "librechat": ("librechatOidcClientSecret",),
         "dify": ("difyOidcClientSecret", "difyAgentgatewayClientSecret"),
     }
@@ -162,6 +163,22 @@ def reconcile_internal_credentials(
             },
         )
         _record_change(changed, "frontend-librechat/internal", count)
+        added += count
+
+    openwebui: dict[str, JsonValue] = {}
+    if "open-webui" in addons:
+        openwebui, count = _upsert(
+            client,
+            "frontend-open-webui/internal",
+            _random_fields(
+                "postgresqlPassword",
+                "webuiSecretKey",
+                "oauthSessionTokenEncryptionKey",
+                "oauthClientInfoEncryptionKey",
+            ),
+            {"openidClientSecret": _required_text(keycloak, "openwebuiClientSecret")},
+        )
+        _record_change(changed, "frontend-open-webui/internal", count)
         added += count
 
     langfuse, count = _upsert(
@@ -273,6 +290,7 @@ def reconcile_internal_credentials(
             for addon, field, values, source in (
                 ("dify", "difyPassword", dify, "postgresPassword"),
                 ("librechat", "documentdbPassword", librechat, "documentdbPassword"),
+                ("open-webui", "openwebuiPassword", openwebui, "postgresqlPassword"),
             )
             if addon in addons
         }
