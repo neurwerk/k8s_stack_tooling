@@ -84,6 +84,9 @@ def brain_query(scope: Scope, lower: datetime, upper: datetime) -> str:
 
 class Transport:
     def __init__(self, settings: Settings):
+        self.store_url, public_key, _ = destination(
+            settings.glitchtip_dsn.get_secret_value(), settings.glitchtip_ingest_base_url
+        )
         self.source_url = settings.opensearch_url.rstrip("/")
         self.source = requests.Session()
         self.source.trust_env = False
@@ -95,7 +98,6 @@ class Transport:
         self.sink = requests.Session()
         self.sink.trust_env = False
         self.sink.verify = str(settings.glitchtip_ca_file) if settings.glitchtip_ca_file else True
-        self.store_url, public_key, _ = destination(settings.glitchtip_dsn.get_secret_value())
         self.sink.headers["X-Sentry-Auth"] = (
             "Sentry sentry_version=7, sentry_client=opensearch-glitchtip/1, "
             f"sentry_key={public_key}"

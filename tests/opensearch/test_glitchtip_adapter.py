@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -471,6 +473,166 @@ def test_query_values_and_scope_overlaps_rejected(settings: Settings) -> None:
     assert "`@timestamp` < timestamp(" in query
     with pytest.raises(ValueError):
         destination("http://public.example.test/1")
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_ingestion_override_preserves_native_identity(
+    settings: Settings, scheme: str, suffix: str
+) -> None:
+    dsn = settings.glitchtip_dsn.get_secret_value()
+    canonical = "https://errors.example.test"
+    assert destination(dsn) == (f"{canonical}/api/1/store/", "project-public-key", f"{canonical}/1")
+    default = Transport(settings)
+    try:
+        assert default.store_url == f"{canonical}/api/1/store/"
+    finally:
+        default.close()
+    state = State(settings, [SCOPE])
+    try:
+        state.enqueue(SCOPE, [record("one")], {"request 1 failed": "request <*> failed"}, START)
+        pending = state.due(0)
+        identity = state.key
+    finally:
+        state.close()
+    base = f"{scheme}://glitchtip.monitor-errors.svc.cluster.local:8000"
+    settings.glitchtip_ingest_base_url = base + suffix
+    settings.validate_runtime()
+    assert destination(dsn, base + suffix) == (
+        f"{base}/api/1/store/",
+        "project-public-key",
+        f"{canonical}/1",
+    )
+    state = State(settings, [SCOPE])
+    transport = Transport(settings)
+    try:
+        assert state.key == identity
+        assert state.due(0) == pending
+        assert (
+            state.enqueue(SCOPE, [record("one")], {"request 1 failed": "request <*> failed"}, START)
+            == 0
+        )
+        assert settings.glitchtip_dsn.get_secret_value() == dsn
+        assert transport.store_url == f"{base}/api/1/store/"
+        assert transport.sink.verify is True
+        assert transport.sink.headers["X-Sentry-Auth"].endswith("sentry_key=project-public-key")
+    finally:
+        transport.close()
+        state.close()
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://key@glitchtip.monitor-errors.svc.cluster.local:8000",
+        "http://key:password@glitchtip.monitor-errors.svc.cluster.local:8000",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000?query=1",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000#fragment",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000/api/2/store/",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000/../",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000/%2f",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000//",
+        "http://glitchtip.monitor-errors.svc.cluster.local:80",
+        "http://glitchtip.monitor-errors.svc.cluster.local",
+        "http://glitchtip.monitor-errors.svc.cluster.local.:8000",
+        "http://glitchtip.monitor-errors.svc.cluster.local.attacker.test:8000",
+        "https://errors.example.test:8000",
+        "http://127.0.0.1:8000",
+        "http://glitch_tip.monitor-errors.svc.cluster.local:8000",
+        "http://glitchtip.monitor_errors.svc.cluster.local:8000",
+        "http://-glitchtip.monitor-errors.svc.cluster.local:8000",
+        "http://glitchtip.monitor-errors-.svc.cluster.local:8000",
+        "http://glitchtip.extra.monitor-errors.svc.cluster.local:8000",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000\n",
+        "http://glitchtip.monitor-errors.svc.cluster.local:8000\\@attacker.test",
+        "http://" + "a" * 64 + ".monitor-errors.svc.cluster.local:8000",
+        "http://glitchtip." + "a" * 64 + ".svc.cluster.local:8000",
+        "",
+    ],
+)
+def test_unsafe_ingestion_override_rejected(settings: Settings, base: str) -> None:
+    settings.glitchtip_ingest_base_url = base
+    with pytest.raises(ValueError, match="Service origin on port 8000"):
+        settings.validate_runtime()
+    with pytest.raises(ValueError, match="Service origin on port 8000"):
+        Transport(settings)
+
+
+@pytest.mark.parametrize("status", [200, 302, 307])
+def test_internal_ingestion_http_and_redirect_retains_pending(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    host = "glitchtip.monitor-errors.svc.cluster.local"
+    settings.glitchtip_ingest_base_url = f"http://{host}:8000"
+    settings.validate_runtime()
+    seen: list[tuple[str, dict[str, str], str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append((self.path, dict(self.headers), ""))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+            seen.append((self.path, dict(self.headers), body))
+            # A followed redirect would succeed, making the request-count assertion fail.
+            self.send_response(status if self.path == "/api/1/store/" else 200)
+            self.send_header("Location", f"http://{host}:8000/redirected")
+            response = json.dumps({"id": json.loads(body)["event_id"]}).encode()
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    resolve = socket.getaddrinfo
+
+    def local_service(hostname: str, port: int, *args: Any, **kwargs: Any):
+        assert (hostname, port) == (host, 8000)
+        return resolve("127.0.0.1", server.server_port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", local_service)
+    monkeypatch.setenv("HTTP_PROXY", "http://unreachable.example.test:9999")
+    monkeypatch.setenv("ALL_PROXY", "http://unreachable.example.test:9999")
+    monkeypatch.setenv("NO_PROXY", "")
+    netrc = settings.state_path.parent / "synthetic.netrc"
+    netrc.write_text(f"machine {host} login unexpected password unexpected\n")
+    monkeypatch.setenv("NETRC", str(netrc))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state = State(settings, [SCOPE])
+    transport = Transport(settings)
+    try:
+        state.enqueue(SCOPE, [record("one")], {"request 1 failed": "request <*> failed"}, START)
+        payload = state.due(0)[0][1]
+        assert transport.sink.verify is True
+        assert not transport.sink.trust_env
+        main.deliver_due(state, transport, 0)
+        assert len(seen) == 1
+        path, headers, body = seen[0]
+        assert path == "/api/1/store/"
+        assert headers["Host"] == f"{host}:8000"
+        assert headers["X-Sentry-Auth"] == (
+            "Sentry sentry_version=7, sentry_client=opensearch-glitchtip/1, "
+            "sentry_key=project-public-key"
+        )
+        assert "Authorization" not in headers
+        assert "Proxy-Authorization" not in headers
+        assert body == payload
+        assert state.pending_count() == (0 if status == 200 else 1)
+        if status != 200:
+            assert state.due(3600)[0][1] == payload
+    finally:
+        transport.close()
+        state.close()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def test_tls_and_request_errors_never_expose_secrets_or_payload(
