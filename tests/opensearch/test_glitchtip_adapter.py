@@ -118,14 +118,33 @@ def search(records: list[Record]) -> dict[str, Any]:
 
 def test_distinct_occurrences_overlap_and_restart(settings: Settings) -> None:
     state = State(settings, [SCOPE])
-    records = [record("one"), record("two")]
+    raw = "\x1b[31m2026-01-01T00:00:00Z ERROR example::api: request 1 failed\x1b[0m"
+    records = [record("one", raw), record("two", raw)]
     upper = START + timedelta(minutes=5)
     assert state.enqueue(SCOPE, records, {records[0].message: "request <*> failed"}, upper) == 2
     events = payloads(state)
     assert len({event["event_id"] for event in events}) == 2
     assert len({tuple(event["fingerprint"]) for event in events}) == 1
+    assert events[0]["fingerprint"] == [
+        state.digest("issue", SCOPE.id, state.digest("template", SCOPE.id, "request <*> failed"))
+    ]
+    assert all(event["message"] == "request 1 failed" for event in events)
+    assert state.db.execute("SELECT digest FROM messages").fetchall() == [
+        (state.digest("message", SCOPE.id, raw),)
+    ]
+    source = state.digest("source", SCOPE.id, records[0].index, records[0].id)
+    assert events[0]["event_id"] == state.digest("event", source)[:32]
     assert events[0]["timestamp"] == stamp(START)
-    assert events[0]["tags"]["application"] == "chat"
+    assert events[0]["tags"] == {
+        "application": "chat",
+        "service": "api",
+        "namespace": "chat",
+        "container": "api",
+        "failure_type": "application_error",
+    }
+    assert events[0]["environment"] == "test"
+    assert events[0]["level"] == "error"
+    assert events[0]["platform"] == "other"
     assert events[0]["release"] == "api:1.0"
     assert "user" not in events[0]
     for source, _, _ in state.due(0):
@@ -184,7 +203,17 @@ def test_lost_ack_retry_is_immutable_and_pending_never_expires(
             raise AdapterError("ingestion acknowledgement mismatch; acceptance uncertain")
 
     monkeypatch.setattr(transport, "deliver", deliver)
-    state.enqueue(SCOPE, [record("one")], {"request 1 failed": "request <*> failed"}, START)
+    raw = "\x1b[31m2026-01-01T00:00:00Z ERROR example::api: request 1 failed\x1b[0m"
+    legacy_record = record("one", raw)
+    # Persist the genuine old payload contract before restoring the new
+    # formatter. Retry must deliver these original bytes, not clean them.
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            "k8s_stack_tooling.opensearch_glitchtip.state.display_message", lambda message: message
+        )
+        state.enqueue(SCOPE, [legacy_record], {raw: "request <*> failed"}, START)
+    legacy_payload = state.due(0)[0][1]
+    assert json.loads(legacy_payload)["message"] == raw
     main.deliver_due(state, transport, 0)
     assert state.pending_count() == 1
     assert not state.due(1)
@@ -192,9 +221,9 @@ def test_lost_ack_retry_is_immutable_and_pending_never_expires(
     state = State(settings, [SCOPE])
     try:
         # A changed template during overlap must not rewrite the pending payload.
-        state.enqueue(SCOPE, [record("one")], {"request 1 failed": "changed"}, START)
+        assert state.enqueue(SCOPE, [legacy_record], {raw: "changed"}, START) == 0
         main.deliver_due(state, transport, 10**10)
-        assert sent[0] == sent[1]
+        assert sent[0] == sent[1] == legacy_payload
         assert state.pending_count() == 0
         assert "acceptance uncertain" in capsys.readouterr().out
     finally:
