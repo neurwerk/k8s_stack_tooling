@@ -41,9 +41,9 @@ def browser_urls(plural: str, singular: str, *, origin: bool = False) -> list[st
         if (
             parsed.scheme != "https"
             or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+            or "#" in value
             or any(c.isspace() or c in "*\\" for c in value)
             or (origin and (parsed.path or parsed.query))
         ):
@@ -86,6 +86,16 @@ def reconcile() -> None:
         raise ValueError("Reserved OIDC role claim")
     callbacks = browser_urls("KC_REDIRECT_URIS", "KC_REDIRECT_URI")
     origins = browser_urls("KC_WEB_ORIGINS", "KC_WEB_ORIGIN", origin=True)
+    logout_uris = origins
+    if "KC_POST_LOGOUT_REDIRECT_URIS" in os.environ:
+        if "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS" not in os.environ:
+            raise ValueError("Missing approved OIDC post-logout redirect URIs")
+        logout_uris = browser_urls("KC_POST_LOGOUT_REDIRECT_URIS", "KC_POST_LOGOUT_REDIRECT_URIS")
+        approved_logout_uris = browser_urls(
+            "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS", "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS"
+        )
+        if not set(logout_uris) <= set(approved_logout_uris):
+            raise ValueError("Unapproved OIDC post-logout redirect URI")
     rotation = os.environ.get("KC_REFRESH_TOKEN_ROTATION_ENABLED", "false")
     if rotation not in ("true", "false"):
         raise ValueError("Invalid refresh token rotation setting")
@@ -193,7 +203,7 @@ def reconcile() -> None:
         "webOrigins": origins,
     }
     attributes = {
-        "post.logout.redirect.uris": "##".join(origins),
+        "post.logout.redirect.uris": "##".join(logout_uris),
         "oauth2.device.authorization.grant.enabled": "false",
         "oidc.ciba.grant.enabled": "false",
         "client.use.refresh.tokens": "true",

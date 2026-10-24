@@ -24,6 +24,7 @@ class Prerequisites(Contract):
     tooling: str
     stack_setup: str = Field(alias="stackSetup")
     base_charts: list[str] = Field(alias="baseCharts")
+    base_chart_versions: dict[str, str] = Field(default_factory=dict, alias="baseChartVersions")
 
     @field_validator("base", "tooling", "stack_setup")
     @classmethod
@@ -31,6 +32,20 @@ class Prerequisites(Contract):
         if not re.fullmatch(r"\d+\.\d+\.\d+", value):
             raise ValueError("expected an exact release version")
         return value
+
+    @model_validator(mode="after")
+    def chart_versions(self):
+        number = r"(?:0|[1-9][0-9]*)"
+        identifier = rf"(?:{number}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+        semver = (
+            rf"{number}\.{number}\.{number}(?:-{identifier}(?:\.{identifier})*)?"
+            r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        )
+        if not self.base_chart_versions.keys() <= set(self.base_charts) or any(
+            not re.fullmatch(semver, version) for version in self.base_chart_versions.values()
+        ):
+            raise ValueError("expected declared Base charts and exact chart versions")
+        return self
 
 
 class HelmOutput(Contract):
@@ -334,18 +349,93 @@ def check(root: Path, *, installable: bool = False, base: Path | None = None) ->
             ):
                 raise ContractError("missing Helm output readiness dependency")
     if base is not None:
-        base = base.resolve()
-        manifest = load(base / "release/manifest.yaml")
-        if manifest["spec"]["version"] != addon.spec.prerequisites.base:
-            raise ContractError("Base revision is not the reviewed prerequisite")
-        for path in addon.spec.prerequisites.base_charts:
-            if not (inside(base, path) / "Chart.yaml").is_file():
-                raise ContractError("required Base chart is missing")
+        check_base(addon, base)
     return addon
 
 
+def check_base(addon: Addon, base: Path, revision: str | None = None) -> None:
+    """Check chart prerequisites in the candidate tree or a resolved local Git commit."""
+    base = base.resolve()
+
+    def document(path: str):
+        local = inside(base, path)
+        if revision is None:
+            return load(local)
+        result = subprocess.run(
+            ["git", "-C", str(base), "show", f"{revision}:{path}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode:
+            raise ContractError("required Base file is missing at the selected revision")
+        try:
+            return yaml.safe_load(result.stdout)
+        except yaml.YAMLError:
+            raise ContractError("invalid Base prerequisite YAML") from None
+
+    prerequisites = addon.spec.prerequisites
+    if document("release/manifest.yaml")["spec"]["version"] != prerequisites.base:
+        raise ContractError("Base revision is not the reviewed prerequisite")
+    for path in prerequisites.base_charts:
+        chart = document(f"{path}/Chart.yaml")
+        if path in prerequisites.base_chart_versions and (
+            not isinstance(chart, dict)
+            or chart.get("version") != prerequisites.base_chart_versions[path]
+        ):
+            raise ContractError("Base chart version is not the reviewed prerequisite")
+
+
+def base_revision(base: Path, ref: dict) -> str:
+    """Resolve the selected Flux ref using existing local refs only."""
+    if len(ref) != 1:
+        raise ContractError("Base source must select one tag, commit or branch")
+    if "tag" in ref:
+        candidates = ["refs/tags/" + ref["tag"]]
+    elif "branch" in ref:
+        candidates = ["refs/remotes/origin/" + ref["branch"], "refs/heads/" + ref["branch"]]
+    elif "commit" in ref and re.fullmatch(r"[a-f0-9]{40}", ref["commit"]):
+        candidates = [ref["commit"]]
+    else:
+        raise ContractError("Base source must select one tag, commit or branch")
+    for candidate in candidates:
+        if "commit" not in ref:
+            valid_ref = subprocess.run(
+                ["git", "check-ref-format", candidate],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            if valid_ref.returncode:
+                raise ContractError("invalid Base source branch or tag ref")
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(base),
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                candidate + "^{commit}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        revision = result.stdout.strip()
+        if not result.returncode and re.fullmatch(r"[a-f0-9]{40}", revision):
+            return revision
+    raise ContractError("selected Base source revision cannot be resolved locally")
+
+
 def check_client(
-    addons: list[tuple[Path, Addon]], client: Path, *, installable: bool = False
+    addons: list[tuple[Path, Addon]],
+    client: Path,
+    *,
+    installable: bool = False,
+    base: Path | None = None,
 ) -> None:
     """Require enabled packages and their dependency edges in the effective client graph."""
     resources = render(client.resolve() / "clusters/prod-eu-1")
@@ -399,6 +489,14 @@ def check_client(
         platform_ref = sources.get("k8s-stack", {}).get("spec", {}).get("ref", {})
         if "tag" in platform_ref and platform_ref["tag"] != "v" + addon.spec.prerequisites.base:
             raise ContractError("client Base release is not the reviewed prerequisite")
+        if addon.spec.prerequisites.base_chart_versions:
+            if base is None:
+                raise ContractError(
+                    "versioned Base chart prerequisites require --base with --client"
+                )
+            check_base(addon, base, base_revision(base, platform_ref))
+        elif base is not None:
+            check_base(addon, base)
         if installable:
             revision = subprocess.run(
                 ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -451,10 +549,14 @@ def main() -> None:
     args = parser.parse_args()
     try:
         addons = [
-            (root, check(root, installable=args.installable, base=args.base)) for root in args.roots
+            (
+                root,
+                check(root, installable=args.installable, base=None if args.client else args.base),
+            )
+            for root in args.roots
         ]
         if args.client:
-            check_client(addons, args.client, installable=args.installable)
+            check_client(addons, args.client, installable=args.installable, base=args.base)
     except (ContractError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
         message = str(error) if isinstance(error, ContractError) else "invalid addon inputs"
         parser.exit(1, f"Addon check failed: {message}\n")
