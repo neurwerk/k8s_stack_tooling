@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .display import display_message
 from .settings import Scope, Settings, destination, stamp
 
 
@@ -172,7 +173,7 @@ class State:
                 event_id = self.digest("event", source)[:32]
                 payload: dict[str, Any] = {
                     "event_id": event_id,
-                    "message": record.message,
+                    "message": display_message(record.message),
                     "timestamp": record.timestamp,
                     "platform": "other",
                     "level": "error",
