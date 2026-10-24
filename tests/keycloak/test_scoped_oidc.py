@@ -165,6 +165,10 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                     self.client["fullScopeAllowed"] = True
                 if self.fault == "refresh-readback" and "attributes" in body:
                     self.client["attributes"]["client.refresh.token.rotation.enabled"] = "false"
+                if self.fault == "logout-readback" and "attributes" in body:
+                    self.client["attributes"]["post.logout.redirect.uris"] = (
+                        "https://wrong.example.com"
+                    )
                 return 204, None
             result = copy.deepcopy(self.client)
             if self.fault == "reordered-urls":
@@ -554,6 +558,94 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Client readback mismatch"):
                     self.reconcile()
                 self.assertFalse(self.client["enabled"])
+
+    def test_explicit_logout_redirects_register_verify_correct_drift_and_remain_noop(self):
+        logout_uris = ["https://app.example.com/auth", "https://second.example.com/signed-out"]
+        env = {
+            "KC_POST_LOGOUT_REDIRECT_URIS": json.dumps(logout_uris),
+            "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS": json.dumps(logout_uris),
+        }
+        self.clients = []
+        with patch.dict(os.environ, env):
+            self.reconcile()
+            self.assertEqual(
+                self.client["attributes"]["post.logout.redirect.uris"], "##".join(logout_uris)
+            )
+            self.assertTrue(self.client["enabled"])
+            self.calls.clear()
+            self.reconcile()
+            self.assertTrue(all(method == "GET" for method, _, _ in self.calls))
+
+            self.client["attributes"]["post.logout.redirect.uris"] = "https://stale.example.com"
+            self.calls.clear()
+            self.reconcile()
+            self.assertEqual(
+                self.client["attributes"]["post.logout.redirect.uris"], "##".join(logout_uris)
+            )
+            writes = [(method, body) for method, _, body in self.calls if method != "GET"]
+            self.assertEqual(writes[0], ("PUT", {"enabled": False}))
+            self.assertTrue(self.client["enabled"])
+
+            self.client["attributes"]["post.logout.redirect.uris"] = "https://stale.example.com"
+            self.fault = "logout-readback"
+            with self.assertRaisesRegex(RuntimeError, "attribute readback"):
+                self.reconcile()
+            self.assertFalse(self.client["enabled"])
+
+        self.fault = None
+        self.reconcile()
+        self.assertEqual(
+            self.client["attributes"]["post.logout.redirect.uris"], os.environ["KC_WEB_ORIGIN"]
+        )
+
+    def test_invalid_or_unapproved_logout_redirects_never_contact_keycloak(self):
+        valid = json.dumps(["https://app.example.com/auth"])
+        invalid = [
+            "invalid",
+            *(
+                json.dumps(value)
+                for value in (
+                    [],
+                    {},
+                    [4],
+                    ["https://app.example.com/auth", "https://app.example.com/auth"],
+                    ["http://app.example.com/auth"],
+                    ["https://app.example.com/*"],
+                    ["https://user@app.example.com/auth"],
+                    ["https://@app.example.com/auth"],
+                    ["https://app.example.com/auth#fragment"],
+                    ["https://app.example.com/auth#"],
+                    ["https://app.example.com/auth "],
+                    ["https://app.example.com/au\\th"],
+                )
+            ),
+        ]
+        cases = [
+            {"KC_POST_LOGOUT_REDIRECT_URIS": valid},
+            {
+                "KC_POST_LOGOUT_REDIRECT_URIS": valid,
+                "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS": '["https://other.example.com/auth"]',
+            },
+        ]
+        for value in invalid:
+            cases.extend(
+                (
+                    {
+                        "KC_POST_LOGOUT_REDIRECT_URIS": value,
+                        "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS": valid,
+                    },
+                    {
+                        "KC_POST_LOGOUT_REDIRECT_URIS": valid,
+                        "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS": value,
+                    },
+                )
+            )
+        for env in cases:
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                with self.assertRaises(ValueError):
+                    self.reconcile()
+                self.assertEqual(self.calls, [])
+        self.helpers.get_admin_token.assert_not_called()
 
     def test_invalid_browser_gateway_and_claim_inputs_never_contact_keycloak(self):
         invalid = (

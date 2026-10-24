@@ -1,13 +1,20 @@
 """Exercise addon composition failures with synthetic packages."""
 
 import copy
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-from k8s_stack_tooling.addons import Authentication, ContractError, check, check_client
+from k8s_stack_tooling.addons import (
+    Authentication,
+    ContractError,
+    base_revision,
+    check,
+    check_client,
+)
 
 
 @pytest.fixture
@@ -235,6 +242,126 @@ def test_incompatible_base(package, tmp_path):
     (base / "release/manifest.yaml").write_text("spec:\n  version: 0.1.0\n")
     with pytest.raises(ContractError, match="reviewed prerequisite"):
         check(root, base=base)
+
+
+@pytest.mark.parametrize(
+    "versions",
+    [
+        {"charts/undeclared": "0.1.4"},
+        {"charts/postgres/addon": ">=0.1.4"},
+        {"charts/postgres/addon": "0.1"},
+        {"charts/postgres/addon": "00.1.4"},
+    ],
+)
+def test_invalid_base_chart_version_prerequisites(package, versions):
+    root, manifest, _, save = package
+    manifest["spec"]["prerequisites"]["baseChartVersions"] = versions
+    save()
+    with pytest.raises(ContractError, match="invalid addon release contract"):
+        check(root)
+
+
+@pytest.mark.parametrize("selection", ["tag", "commit", "branch", "unresolved", "missing-base"])
+def test_chart_versions_check_selected_base_revision_not_candidate_tree(
+    package, tmp_path, selection
+):
+    root, manifest, documents, save = package
+    chart_path = "charts/postgres/addon"
+    base = tmp_path / "base"
+    (base / "release").mkdir(parents=True)
+    (base / "release/manifest.yaml").write_text("spec: {version: 0.3.26}\n")
+    chart = base / chart_path / "Chart.yaml"
+    chart.parent.mkdir(parents=True)
+    chart.write_text("version: 0.1.3\n")
+
+    def git(repo, *args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    def commit(repo):
+        git(repo, "add", ".")
+        git(
+            repo,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "fixture",
+        )
+        return git(repo, "rev-parse", "HEAD")
+
+    git(base, "init", "-b", "reviewed")
+    commit(base)
+    git(base, "tag", "v0.3.26")
+    check(root, base=base)  # Legacy prerequisites still accept an unversioned chart.
+    manifest["spec"]["prerequisites"]["baseChartVersions"] = {chart_path: "0.1.4"}
+    save()
+    with pytest.raises(ContractError, match="Base chart version"):
+        check(root, base=base)
+    chart.write_text("version: 0.1.4\n")
+    reviewed = commit(base)
+    addon = check(root, base=base)
+    git(root, "init", "-b", "main")
+    addon_revision = commit(root)
+
+    client = tmp_path / "client"
+    (client / "config").mkdir(parents=True)
+    (client / "config/client.yaml").write_text("example: {enabled: true, hostname: example.test}\n")
+    ref = {
+        "tag": {"tag": "v0.3.26"},
+        "commit": {"commit": reviewed},
+        "branch": {"branch": "reviewed"},
+        "unresolved": {"commit": "a" * 40},
+        "missing-base": {"commit": reviewed},
+    }[selection]
+    resources: list[dict] = [
+        {"kind": "GitRepository", "metadata": {"name": name}, "spec": {"ref": source_ref}}
+        for name, source_ref in (("example", {"commit": addon_revision}), ("k8s-stack", ref))
+    ]
+    resources += [
+        {
+            "kind": "Kustomization",
+            "metadata": {"name": package["name"]},
+            "spec": {
+                "path": package["path"],
+                "sourceRef": {"name": "example"},
+                "wait": True,
+                "dependsOn": [{"name": name} for name in package.get("dependsOn", [])],
+            },
+        }
+        for package in manifest["spec"]["packages"]
+    ]
+    with patch(
+        "k8s_stack_tooling.addons.render",
+        side_effect=lambda path: resources if path.name == "prod-eu-1" else documents[path.name],
+    ):
+        if selection in ("commit", "branch"):
+            check_client([(root, addon)], client, base=base, installable=True)
+        else:
+            error = {
+                "tag": "Base chart version",
+                "unresolved": "resolved locally",
+                "missing-base": "--base",
+            }
+            with pytest.raises(ContractError, match=error[selection]):
+                check_client(
+                    [(root, addon)],
+                    client,
+                    base=None if selection == "missing-base" else base,
+                    installable=True,
+                )
+
+
+@pytest.mark.parametrize("kind", ["branch", "tag"])
+@pytest.mark.parametrize("suffix", ["~1", "^", "^{commit}", "@{1}"])
+def test_base_source_refs_reject_revision_expressions(tmp_path, kind, suffix):
+    with pytest.raises(ContractError, match="invalid Base source branch or tag ref"):
+        base_revision(tmp_path, {kind: "main" + suffix})
 
 
 def test_client_requires_dependency_and_single_owner(package, tmp_path):
