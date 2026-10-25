@@ -84,6 +84,9 @@ def reconcile() -> None:
         raise ValueError("Invalid OIDC role claim")
     if claim.split(".")[0] in {"sub", "aud", "azp", "iss", "exp", "iat", "nbf", "resource_access"}:
         raise ValueError("Reserved OIDC role claim")
+    groups_claim = os.environ.get("KC_GROUPS_CLAIM", "")
+    if groups_claim not in ("", "groups") or (groups_claim and claim.split(".")[0] == groups_claim):
+        raise ValueError("Invalid OIDC groups claim")
     callbacks = browser_urls("KC_REDIRECT_URIS", "KC_REDIRECT_URI")
     origins = browser_urls("KC_WEB_ORIGINS", "KC_WEB_ORIGIN", origin=True)
     logout_uris = origins
@@ -117,6 +120,23 @@ def reconcile() -> None:
         },
     }
     desired_mappers: list[dict[str, Any]] = [realm_mapper]
+    if groups_claim:
+        desired_mappers.append(
+            {
+                "name": client_id + "-full-path-groups",
+                "protocol": "openid-connect",
+                "protocolMapper": "oidc-group-membership-mapper",
+                "consentRequired": False,
+                "config": {
+                    "claim.name": groups_claim,
+                    "full.path": "true",
+                    "id.token.claim": "true",
+                    "access.token.claim": "true",
+                    "userinfo.token.claim": "true",
+                    "introspection.token.claim": "false",
+                },
+            }
+        )
     for audience in audiences:
         desired_mappers.append(
             {
@@ -355,6 +375,10 @@ def reconcile() -> None:
                 "resource_access",
                 "realm_access",
             }
+            or (
+                groups_claim
+                and m.get("config", {}).get("claim.name", "").split(".")[0] == groups_claim
+            )
             or m.get("protocolMapper")
             not in {
                 "oidc-sub-mapper",
@@ -419,6 +443,8 @@ def reconcile() -> None:
                     if desired is realm_mapper
                     else "Gateway role"
                     if desired["name"] == gateway_mapper_name
+                    else "Groups"
+                    if desired["protocolMapper"] == "oidc-group-membership-mapper"
                     else "Audience"
                 )
                 raise ScopeDriftError(label + " mapper readback mismatch")

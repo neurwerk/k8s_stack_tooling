@@ -96,6 +96,38 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
         self.addCleanup(modules.stop)
         self.reconcile = runpy.run_path(str(SCRIPT))["reconcile"]
 
+    def test_opt_in_full_path_groups_mapper_preserves_narrow_role_scope(self):
+        with patch.dict(os.environ, {"KC_GROUPS_CLAIM": "groups"}):
+            self.reconcile()
+            groups = next(
+                m for m in self.mappers if m["protocolMapper"] == "oidc-group-membership-mapper"
+            )
+            self.assertEqual(
+                groups["config"],
+                {
+                    "claim.name": "groups",
+                    "full.path": "true",
+                    "id.token.claim": "true",
+                    "access.token.claim": "true",
+                    "userinfo.token.claim": "true",
+                    "introspection.token.claim": "false",
+                },
+            )
+            self.assertFalse(self.client["fullScopeAllowed"])
+            self.assertEqual(
+                {r["name"] for r in self.realm_mappings}, {"forgejo-user", "forgejo-admin"}
+            )
+            self.reconcile()
+            self.assertEqual(
+                sum(m["protocolMapper"] == "oidc-group-membership-mapper" for m in self.mappers), 1
+            )
+        for name in ("realm_access", "sub", "custom_groups"):
+            with self.subTest(name=name), patch.dict(os.environ, {"KC_GROUPS_CLAIM": name}):
+                self.calls.clear()
+                with self.assertRaisesRegex(ValueError, "Invalid OIDC groups claim"):
+                    self.reconcile()
+                self.assertEqual(self.calls, [])
+
     def request(self, url, method="GET", body: Any = None, headers=None):
         self.assertEqual(headers, {"Authorization": "Bearer fixture-token"})
         path = url.removeprefix("http://keycloak/admin/realms/test")
