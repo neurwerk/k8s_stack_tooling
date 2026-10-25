@@ -348,8 +348,11 @@ def _reconcile_glitchtip(client: OpenBaoClient, *, enabled: bool) -> InternalRes
     changed: list[str] = []
     added = 0
     password = _glitchtip_database_password(client)
+    admission_secret = _glitchtip_admission_secret(client)
     for path, generators, fixed in (
         ("glitchtip/internal", _random_fields("secretKey"), {"databasePassword": password}),
+        ("glitchtip/admission", _random_fields("cookieSecret"), {"clientSecret": admission_secret}),
+        ("auth-keycloak/glitchtip", {}, {"clientSecret": admission_secret}),
         ("infra-postgres-operations/internal", {}, {"glitchtipPassword": password}),
         (
             "glitchtip/adapter",
@@ -373,6 +376,23 @@ def _reconcile_glitchtip(client: OpenBaoClient, *, enabled: bool) -> InternalRes
         _record_change(changed, path, count)
         added += count
     return InternalResult(tuple(changed), added)
+
+
+def _glitchtip_admission_secret(client: OpenBaoClient) -> str:
+    """Keep proxy and Keycloak client credentials equal without rotating either copy."""
+    copies = []
+    for path in ("glitchtip/admission", "auth-keycloak/glitchtip"):
+        current = client.read_secret(path)
+        if current is not None and "clientSecret" in current.values:
+            value = _required_text(current.values, "clientSecret")
+            if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise OpenBaoError(
+                    "GlitchTip admission credential is invalid; refusing replacement"
+                )
+            copies.append(value)
+    if len(set(copies)) > 1:
+        raise OpenBaoError("GlitchTip admission credential copies conflict; refusing replacement")
+    return copies[0] if copies else _random_secret()
 
 
 def _glitchtip_database_password(client: OpenBaoClient) -> str:
