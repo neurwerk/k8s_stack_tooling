@@ -686,7 +686,7 @@ def check_secret_deliveries(
 
 
 def secret_template_keys(resource: dict, resources: list[dict]) -> set[str]:
-    """Prove final keys for inline data plus literal ConfigMap Data/Values sources only."""
+    """Prove v2 Merge/Replace keys without evaluating inline or imported template values."""
     spec = resource["spec"]
     namespace = resource["metadata"].get("namespace", "")
     template = spec.get("target", {}).get("template", {})
@@ -743,14 +743,18 @@ def secret_template_keys(resource: dict, resources: list[dict]) -> set[str]:
             if not isinstance(value, str) or len(value) > 16384 or "{{" in value or "}}" in value:
                 raise ContractError("template ConfigMap key is missing or is not a bounded literal")
             keys.add(key)
-    if template:
-        if (
-            template.get("mergePolicy", "Replace") != "Replace"
-            or template.get("engineVersion", "v2") != "v2"
-        ):
-            raise ContractError("target template requires v2 Replace semantics")
-        return keys
-    return {entry["secretKey"] for entry in spec.get("data", [])}
+    policy = template.get("mergePolicy", "Replace")
+    if policy not in {"Merge", "Replace"} or template.get("engineVersion", "v2") != "v2":
+        raise ContractError("target template requires v2 Merge or Replace semantics")
+    if policy == "Merge" or (not inline and not sources):
+        # ESO v2 preserves fetched data in Merge, and when no data template exists.
+        # Template results override fetched values on overlap; only their key union is proved here.
+        for entry in spec.get("data", []):
+            key = entry.get("secretKey")
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", key):
+                raise ContractError("direct delivery keys are invalid")
+            keys.add(key)
+    return keys
 
 
 def _check_secret_deliveries(

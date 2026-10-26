@@ -58,6 +58,90 @@ def test_three_literal_settings_and_eight_inline_keys_produce_eleven_final_keys(
     }
 
 
+def test_webui_metadata_only_merge_preserves_its_actual_five_direct_keys():
+    expected = {
+        "DATABASE_PASSWORD",
+        "OAUTH_CLIENT_SECRET",
+        "WEBUI_SECRET_KEY",
+        "OAUTH_SESSION_TOKEN_ENCRYPTION_KEY",
+        "OAUTH_CLIENT_INFO_ENCRYPTION_KEY",
+    }
+    resource = {
+        "metadata": {"namespace": "frontend-open-webui"},
+        "spec": {
+            "data": [{"secretKey": key} for key in sorted(expected)],
+            "target": {
+                "template": {
+                    "engineVersion": "v2",
+                    "mergePolicy": "Merge",
+                    "type": "Opaque",
+                    "metadata": {"labels": {"reconcile.fluxcd.io/watch": "Enabled"}},
+                }
+            },
+        },
+    }
+    assert secret_template_keys(resource, []) == expected
+
+
+def test_dify_replace_retains_exact_actual_eleven_target_keys_not_fetch_aliases():
+    _, external, _, configmap = template_delivery()
+    inline = {
+        "SECRET_KEY",
+        "DB_PASSWORD",
+        "REDIS_PASSWORD",
+        "SANDBOX_API_KEY",
+        "PLUGIN_DAEMON_KEY",
+        "DIFY_AGENT_API_TOKEN",
+        "DIFY_AGENT_SERVER_SECRET_KEY",
+        "DIFY_AGENT_SANDBOX_AUTH_TOKEN",
+    }
+    settings = {"KEYCLOAK_OIDC_ISSUER_URL", "KEYCLOAK_OIDC_CLIENT_ID", "LLM_PROXY_ENDPOINT"}
+    template = external["spec"]["target"]["template"]
+    template["data"] = {key: "{{ .raw0 }}" for key in inline}
+    template["templateFrom"][0]["configMap"]["items"] = [
+        {"key": key, "templateAs": "Values"} for key in sorted(settings)
+    ]
+    configmap["data"] = dict.fromkeys(settings, "nonsecret-setting")
+    assert secret_template_keys(external, [configmap]) == inline | settings
+
+
+@pytest.mark.parametrize("policy", [None, "Replace", "Merge"])
+def test_metadata_type_only_templates_keep_direct_data_without_a_data_template(policy):
+    resource = {
+        "metadata": {"namespace": "app"},
+        "spec": {
+            "data": [{"secretKey": "direct"}],
+            "target": {"template": {"type": "Opaque"}},
+        },
+    }
+    if policy is not None:
+        resource["spec"]["target"]["template"]["mergePolicy"] = policy
+    assert secret_template_keys(resource, []) == {"direct"}
+
+
+def test_merge_accounts_for_template_precedence_on_direct_key_overlap_without_execution():
+    addon, external, base, configmap = template_delivery()
+    external["spec"]["target"]["template"]["mergePolicy"] = "Merge"
+    external["spec"]["target"]["template"]["data"]["raw0"] = "{{ .raw0 }}"
+    before = copy.deepcopy(external)
+    check_secret_deliveries(addon, [external, configmap], base)
+    assert secret_template_keys(external, [configmap]) == {
+        *(f"raw{index}" for index in range(8)),
+        *(f"INLINE_{index}" for index in range(8)),
+        *(f"SETTING_{index}" for index in range(3)),
+    }
+    # The overlapping template has precedence in ESO, not an extra key or a local evaluation.
+    assert external == before
+
+
+@pytest.mark.parametrize("field,value", [("mergePolicy", "Unknown"), ("engineVersion", "v1")])
+def test_template_key_accounting_rejects_unsupported_modes(field, value):
+    _, external, _, configmap = template_delivery()
+    external["spec"]["target"]["template"][field] = value
+    with pytest.raises(ContractError, match="v2 Merge or Replace"):
+        secret_template_keys(external, [configmap])
+
+
 @pytest.mark.parametrize("owner", ["base", "client"])
 def test_template_configmap_from_other_owner_requires_explicit_input(owner):
     addon, external, base, configmap = template_delivery()
