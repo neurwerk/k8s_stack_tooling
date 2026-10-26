@@ -8,8 +8,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+import yaml
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
+from k8s_stack_tooling.gateway_model_metadata import MetadataError
+from pydantic import ValidationError
 
 from openrouter_catalog_sync.sync import (
     DEFAULT_SOURCE_URL,
@@ -35,6 +38,14 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
     parser.add_argument("--pricing-output", required=True, type=Path)
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--source-url", default=DEFAULT_SOURCE_URL)
+    parser.add_argument(
+        "--metadata-values",
+        action="append",
+        type=Path,
+        help="Merge ordered client values to resolve selected OpenRouter binding IDs.",
+    )
+    parser.add_argument("--metadata-observed-at", help="Explicit UTC RFC3339 snapshot time.")
+    parser.add_argument("--metadata-valid-until", help="Explicit UTC RFC3339 review expiry.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--select", action="store_true", help="Interactively select models.")
     mode.add_argument(
@@ -56,12 +67,36 @@ def main(arguments: Sequence[str] | None = None) -> None:
             selected = _prompt_for_models(available, policy.selected_models)
             policy = with_selected_models(policy, selected)
         generated = generate(models, policy)
+        from openrouter_catalog_sync.metadata import retain_metadata
+
+        generated = retain_metadata(generated, args.catalog_output)
+        if args.metadata_values:
+            from openrouter_catalog_sync.metadata import with_metadata
+
+            generated = with_metadata(
+                generated,
+                models,
+                args.metadata_values,
+                args.metadata_observed_at,
+                args.metadata_valid_until,
+            )
         if args.write or args.select:
             write_files(generated, args.policy, args.catalog_output, args.pricing_output)
         else:
             check_files(generated, args.policy, args.catalog_output, args.pricing_output)
     except CatalogSyncError as error:
         print(f"error: {error}", file=sys.stderr)  # noqa: T201 -- Explicit CLI diagnostics.
+        raise SystemExit(1) from None
+    except (
+        MetadataError,
+        ValidationError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        yaml.YAMLError,
+    ):
+        print("error: invalid metadata source or binding configuration", file=sys.stderr)  # noqa: T201
         raise SystemExit(1) from None
 
 
