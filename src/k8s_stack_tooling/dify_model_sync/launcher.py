@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import time
 import uuid
 from typing import Any
@@ -158,49 +157,45 @@ def launch(
         return {**result, "status": "uncertain", "phase": phase}
     if wait_seconds:
         try:
-            result.update(wait_result(core, batch, name, namespace, wait_seconds))
+            result.update(wait_result(core, batch, name, namespace, wait_seconds, mode=mode))
         except ApiException:
             return {**result, "status": "uncertain", "phase": "wait"}
     return result
 
 
-def safe_counts(logs: str) -> dict[str, int]:
-    """Only forward bounded numeric summary fields, never raw plugin/provider errors."""
-    allowed = {
-        "selected",
-        "eligible",
-        "created",
-        "updated",
-        "unchanged",
-        "skipped",
-        "failed",
-        "enabled",
-        "validated",
-        "errors",
-        "planned",
-        "processed",
-    }
-    counts: dict[str, int] = {}
+def safe_summary(logs: str, *, mode: str) -> dict[str, Any]:
+    """Keep completed and planned counts separate; suppress every other log field."""
+    allowed = {"created", "updated", "unchanged", "skipped"}
+    summary: dict[str, Any] = {}
     for line in logs.splitlines():
         candidate = line.removeprefix("DIFY_MODEL_SYNC_RESULT ")
         try:
-            value = json.loads(candidate)
-        except ValueError:
+            value = load_json(candidate, max_bytes=16384)
+        except (ValueError, RecursionError):
             continue
-        if isinstance(value, dict):
-            value = value.get("counts", value)
-            if isinstance(value, dict):
-                found = {
-                    k: v
-                    for k, v in value.items()
-                    if k in allowed and type(v) is int and 0 <= v <= 256
-                }
-                if found:
-                    counts = found
-    return counts
+        if not isinstance(value, dict) or value.get("mode") != mode:
+            continue
+        counts, planned_counts = value.get("counts"), value.get("planned_counts")
+        if not isinstance(counts, dict) or not isinstance(planned_counts, dict):
+            continue
+        if any(
+            any(type(group.get(key)) is not int or not 0 <= group[key] <= 256 for key in allowed)
+            for group in (counts, planned_counts)
+        ):
+            continue
+        if mode == "preview" and (counts["created"] or counts["updated"]):
+            continue
+        summary = {
+            "mode": mode,
+            "counts": {k: counts[k] for k in sorted(allowed)},
+            "planned_counts": {k: planned_counts[k] for k in sorted(allowed)},
+        }
+    return summary
 
 
-def wait_result(core: Any, batch: Any, name: str, namespace: str, seconds: int) -> dict[str, Any]:
+def wait_result(
+    core: Any, batch: Any, name: str, namespace: str, seconds: int, *, mode: str
+) -> dict[str, Any]:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         status = batch.read_namespaced_job_status(name, namespace, _request_timeout=TIMEOUT).status
@@ -211,16 +206,15 @@ def wait_result(core: Any, batch: Any, name: str, namespace: str, seconds: int) 
             pods = core.list_namespaced_pod(
                 namespace, label_selector=f"job-name={name}", _request_timeout=TIMEOUT
             ).items
-            counts: dict[str, int] = {}
+            summary: dict[str, Any] = {}
             if len(pods) == 1:
                 logs = core.read_namespaced_pod_log(
                     pods[0].metadata.name, namespace, limit_bytes=16384, _request_timeout=TIMEOUT
                 )
-                counts = safe_counts(logs)
-            reported_errors = counts.get("failed", 0) + counts.get("errors", 0)
+                summary = safe_summary(logs, mode=mode)
             return {
-                "status": "failed" if failed or reported_errors else "complete",
-                "counts": counts,
+                "status": "failed" if failed else ("complete" if summary else "uncertain"),
+                **(summary or {"counts": {}, "planned_counts": {}}),
             }
         time.sleep(min(2, max(0, deadline - time.monotonic())))
     return {"status": "timeout"}

@@ -353,11 +353,56 @@ def test_launcher_fail_closed_before_creating_resources(mutation):
     batch.create_namespaced_job.assert_not_called()
 
 
-def test_result_only_exposes_numeric_counts():
-    assert launcher.safe_counts(
-        "sensitive provider error\n"
-        '{"counts":{"created":2,"failed":1,"secret":"hidden","updated":true}}'
-    ) == {"created": 2, "failed": 1}
+def helper_summary(mode="apply"):
+    return {
+        "mode": mode,
+        "counts": {
+            "created": 0 if mode == "preview" else 1,
+            "updated": 0,
+            "unchanged": 3,
+            "skipped": 1,
+        },
+        "planned_counts": {"created": 2, "updated": 1, "unchanged": 3, "skipped": 1},
+    }
+
+
+@pytest.mark.parametrize("mode", ["preview", "apply"])
+def test_result_keeps_helper_completed_and_planned_counts_separate(mode):
+    summary = helper_summary(mode)
+    noisy = copy.deepcopy(summary)
+    noisy["private_reason"] = "not forwarded"
+    noisy["counts"]["private_errors"] = 1
+    assert launcher.safe_summary("private error line\n" + json.dumps(noisy), mode=mode) == summary
+
+
+@pytest.mark.parametrize("invalid", [True, -1, 257, 1.5, "1", None])
+def test_result_uses_last_valid_bounded_summary_not_malformed_trailing_counts(invalid):
+    valid = helper_summary()
+    malformed = copy.deepcopy(valid)
+    malformed["planned_counts"]["created"] = invalid
+    logs = json.dumps(valid) + "\n" + json.dumps(malformed)
+    assert launcher.safe_summary(logs, mode="apply") == valid
+
+
+def test_result_rejects_wrong_mode_incomplete_oversized_or_mutating_preview_summary():
+    assert launcher.safe_summary(json.dumps(helper_summary("preview")), mode="apply") == {}
+    incomplete = helper_summary()
+    incomplete.pop("planned_counts")
+    assert launcher.safe_summary(json.dumps(incomplete), mode="apply") == {}
+    oversized = {**helper_summary(), "private_detail": "x" * 16384}
+    assert launcher.safe_summary(json.dumps(oversized), mode="apply") == {}
+    preview = helper_summary("preview")
+    preview["counts"]["created"] = 1
+    assert launcher.safe_summary(json.dumps(preview), mode="preview") == {}
+
+
+def test_result_keeps_last_valid_summary_including_plans():
+    first = helper_summary()
+    last = helper_summary()
+    last["counts"]["created"] = 2
+    last["planned_counts"]["created"] = 3
+    logs = json.dumps(first) + "\nDIFY_MODEL_SYNC_RESULT " + json.dumps(last)
+    assert launcher.safe_summary(logs, mode="apply") == last
 
 
 def test_uncertain_job_creation_is_named_and_not_retried():
@@ -380,16 +425,29 @@ def test_uncertain_job_creation_is_named_and_not_retried():
     assert batch.create_namespaced_job.call_count == 1
 
 
-def test_wait_does_not_report_partial_errors_as_success():
+@pytest.mark.parametrize(
+    ("mode", "condition", "expected_status"),
+    [
+        ("preview", "Complete", "complete"),
+        ("apply", "Complete", "complete"),
+        ("apply", "Failed", "failed"),
+    ],
+)
+def test_wait_reports_helper_plans_separately_on_preview_apply_and_partial_failure(
+    mode, condition, expected_status
+):
     core, batch = Mock(), Mock()
     batch.read_namespaced_job_status.return_value = NS(
-        status=NS(conditions=[NS(type="Complete", status="True")])
+        status=NS(conditions=[NS(type=condition, status="True")])
     )
     core.list_namespaced_pod.return_value = NS(items=[NS(metadata=NS(name="run-pod"))])
-    core.read_namespaced_pod_log.return_value = '{"counts":{"created":1,"failed":1}}'
-    assert launcher.wait_result(core, batch, "run", "dify", 1) == {
-        "status": "failed",
-        "counts": {"created": 1, "failed": 1},
+    summary = helper_summary(mode)
+    if mode == "apply" and condition == "Complete":
+        summary["counts"] = copy.deepcopy(summary["planned_counts"])
+    core.read_namespaced_pod_log.return_value = json.dumps({**summary, "private_error": "omitted"})
+    assert launcher.wait_result(core, batch, "run", "dify", 1, mode=mode) == {
+        "status": expected_status,
+        **summary,
     }
 
 
