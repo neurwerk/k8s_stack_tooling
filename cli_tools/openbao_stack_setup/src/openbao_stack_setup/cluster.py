@@ -17,6 +17,7 @@ from kubernetes.client.exceptions import ApiException
 
 from openbao_stack_setup.client import OpenBaoError
 from openbao_stack_setup.mcp import shared_ids
+from openbao_stack_setup.pipecat import PipecatSelection, select_pipecat_values
 
 
 class ClusterError(RuntimeError):
@@ -222,6 +223,17 @@ class Cluster:
         if not isinstance(enabled, bool):
             raise ClusterError("GlitchTip enabled value must be a boolean")
         return enabled
+
+    def pipecat_selection(self) -> PipecatSelection:
+        """Read only fixed client/product ConfigMaps, merging Helm's feature settings."""
+        client_values = self._product_values("client-values", "pipecat", "Pipecat")
+        product_values = self._product_values("pipecat-product-values", "pipecat", "Pipecat")
+        try:
+            return select_pipecat_values(client_values, product_values)
+        except OpenBaoError:
+            raise ClusterError(
+                "Pipecat product values contain an invalid credential catalog"
+            ) from None
 
     def glitchtip_application_pod(self) -> str:
         """Select exactly one Ready pinned application Pod, never a provisioning Job."""

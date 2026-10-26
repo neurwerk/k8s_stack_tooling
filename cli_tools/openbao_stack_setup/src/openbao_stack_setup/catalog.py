@@ -232,6 +232,15 @@ class AddonCatalog:
 
 
 ADDONS = {
+    "pipecat": AddonCatalog(
+        "pipecat",
+        "pipecat",
+        SecretStoreTarget("pipecat-openbao-secret-store", "pipecat"),
+        (),
+        None,
+        (),
+        (),
+    ),
     "open-webui": AddonCatalog(
         "frontendOpenWebui",
         "frontend-open-webui",
@@ -442,6 +451,9 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
 
 def namespace_policy(namespace: str) -> str:
     """Return the exact namespace-scoped External Secrets read policy."""
+    if namespace == "pipecat":
+        # Dynamic exact grants replace this policy only after validated selection.
+        return 'path "secret/data/addons/pipecat/*" { capabilities = ["deny"] }\n'
     if namespace == "tailscale":
         return f"""path "secret/data/{TAILSCALE_OAUTH_PATH}" {{
   capabilities = ["read"]

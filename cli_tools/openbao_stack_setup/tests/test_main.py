@@ -701,6 +701,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=True,
         glitchtip_enabled=True,
+        pipecat=None,
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -745,6 +746,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=False,
         glitchtip_enabled=True,
+        pipecat=None,
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -802,6 +804,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=False,
         glitchtip_enabled=False,
+        pipecat=None,
     )
 
 
@@ -1368,6 +1371,7 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         debug_enabled,
         tailscale_enabled=True,
         glitchtip_enabled=False,
+        pipecat=None,
     )
 
 

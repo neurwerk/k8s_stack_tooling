@@ -39,6 +39,7 @@ from openbao_stack_setup.catalog import (
     REJECTION_DEBUG_EXTERNAL_SECRETS,
     TAILSCALE_EXTERNAL_SECRET,
     TAILSCALE_SECRET_STORE,
+    AddonCatalog,
     HelmReleaseTarget,
     addon_catalogs,
 )
@@ -67,6 +68,7 @@ from openbao_stack_setup.custody import (
 )
 from openbao_stack_setup.glitchtip import parse_dsn_export, provisioning_payload, store_project_dsn
 from openbao_stack_setup.mcp import reconcile_mcp
+from openbao_stack_setup.pipecat import PipecatSelection, reconcile_pipecat
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
 from openbao_stack_setup.reconcile import ReconciliationIdentity, reconcile_openbao
 from openbao_stack_setup.recovery import (
@@ -213,6 +215,8 @@ def _preflight(context: str, client: str) -> None:
     mcp_ids = cluster.studio_mcp_ids()
     rejection_debug_enabled = cluster.rejection_debug_enabled()
     endpoint = cluster.validate_kubernetes_api_endpoint()
+    if "pipecat" in addons:
+        cluster.pipecat_selection()
     print(
         "Preflight passed for "
         f"client={identity.client} cluster={identity.cluster_id} context={context}"
@@ -246,6 +250,7 @@ def _bootstrap(
     docling_enabled = cluster.docling_enabled()
     glitchtip_enabled = cluster.glitchtip_enabled()
     addons = cluster.selected_addons()
+    pipecat = cluster.pipecat_selection() if "pipecat" in addons else None
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     rejection_debug_enabled = cluster.rejection_debug_enabled()
@@ -316,6 +321,7 @@ def _bootstrap(
                 rejection_debug_enabled,
                 tailscale_enabled=tailscale_enabled,
                 glitchtip_enabled=glitchtip_enabled,
+                pipecat=pipecat,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -343,6 +349,7 @@ def _bootstrap(
                 rejection_debug_enabled,
                 tailscale_enabled=tailscale_enabled,
                 glitchtip_enabled=glitchtip_enabled,
+                pipecat=pipecat,
             )
             return
         if kit.checkpoint == "complete":
@@ -364,6 +371,7 @@ def _bootstrap(
             rejection_debug_enabled,
             tailscale_enabled=tailscale_enabled,
             glitchtip_enabled=glitchtip_enabled,
+            pipecat=pipecat,
         )
 
 
@@ -382,6 +390,7 @@ def _seed_and_finish(
     *,
     tailscale_enabled: bool = False,
     glitchtip_enabled: bool = False,
+    pipecat: PipecatSelection | None = None,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
@@ -433,6 +442,7 @@ def _seed_and_finish(
                 f"internal_fields_added={reconciled.internal_fields_added}"
             )
         _prepare_mcp_credentials(root, mcp_ids)
+        _prepare_pipecat_credentials(root, pipecat)
         if contextforge_admin_email is not None:
             _prepare_contextforge_token(root, kit.client, kit.cluster_id, kit.namespace_uid)
         print("Verifying restricted secret-operator access and revoking other root tokens...")
@@ -449,6 +459,7 @@ def _seed_and_finish(
         rejection_debug_enabled,
         tailscale_enabled=tailscale_enabled,
         glitchtip_enabled=glitchtip_enabled,
+        pipecat=pipecat,
     )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
@@ -471,6 +482,7 @@ def _reconcile(
     docling_enabled = cluster.docling_enabled()
     glitchtip_enabled = cluster.glitchtip_enabled()
     addons = cluster.selected_addons()
+    pipecat = cluster.pipecat_selection() if "pipecat" in addons else None
     contextforge_admin_email = cluster.contextforge_admin_email()
     if rotate_contextforge_token:
         if contextforge_admin_email is None:
@@ -513,6 +525,7 @@ def _reconcile(
                 tailscale_enabled=tailscale_enabled,
             )
             _prepare_mcp_credentials(root, mcp_ids)
+            _prepare_pipecat_credentials(root, pipecat)
             if contextforge_admin_email is not None:
                 if rotate_contextforge_token:
                     cluster.require_contextforge_stopped()
@@ -542,8 +555,19 @@ def _reconcile(
         rejection_debug_enabled,
         tailscale_enabled=tailscale_enabled,
         glitchtip_enabled=glitchtip_enabled,
+        pipecat=pipecat,
     )
     print("OpenBao reconciliation completed.")
+
+
+def _prepare_pipecat_credentials(root: OpenBaoClient, selection: PipecatSelection | None) -> None:
+    reconcile_pipecat(
+        root,
+        selection,
+        lambda bot, field: _ask_password(f"Pipecat bot {bot} {field} (speech provider key):"),
+    )
+    if selection is not None:
+        print("Pipecat credential selection reconciled; existing values retained without rotation.")
 
 
 def _prepare_contextforge_token(
@@ -970,6 +994,7 @@ def _converge_runtime(
     *,
     tailscale_enabled: bool = False,
     glitchtip_enabled: bool = False,
+    pipecat: PipecatSelection | None = None,
 ) -> None:
     """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
     print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
@@ -990,6 +1015,8 @@ def _converge_runtime(
             "Operator activation remains separate."
         )
     for catalog in addon_catalogs(addons):
+        if catalog.configuration_key == "pipecat":
+            continue
         store = catalog.secret_store
         cluster.ensure_secret_store_ready(store.name, store.namespace)
     if docling_enabled:
@@ -1007,6 +1034,8 @@ def _converge_runtime(
         contextforge_admin_email,
         rejection_debug_enabled,
     )
+    if pipecat is not None:
+        _refresh_pipecat_delivery(cluster, pipecat)
     print(
         "Reconciling infrastructure releases blocked on generated Secrets; "
         "this usually takes a few minutes. OpenSearch hooks may take 1-2 minutes; "
@@ -1042,22 +1071,43 @@ def _force_helm_release(cluster: Cluster, target: HelmReleaseTarget) -> None:
     )
 
 
+def _refresh_pipecat_delivery(cluster: Cluster, selection: PipecatSelection) -> None:
+    catalog = selection.catalog()
+    if catalog.external_secrets:
+        cluster.ensure_secret_store_ready(catalog.secret_store.name, catalog.secret_store.namespace)
+    for target in catalog.external_secrets:
+        cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
+
+
 def _refresh_addon(context: str, client: str, addon_id: str) -> None:
     cluster = Cluster(context)
     cluster.identity(client)
     if addon_id not in cluster.selected_addons():
         raise SetupError("Addon is not selected for this client")
     catalog = addon_catalogs((addon_id,))[0]
+    pipecat = cluster.pipecat_selection() if addon_id == "pipecat" else None
+    if pipecat is not None:
+        catalog = pipecat.catalog()
     kubectl = _kubectl_executable()
     _confirm(context, client, "Refresh addon credentials and consumers")
-    store = catalog.secret_store
-    cluster.ensure_secret_store_ready(store.name, store.namespace)
-    for target in catalog.external_secrets:
-        cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
+    if pipecat is not None:
+        _refresh_pipecat_delivery(cluster, pipecat)
+    else:
+        store = catalog.secret_store
+        cluster.ensure_secret_store_ready(store.name, store.namespace)
+        for target in catalog.external_secrets:
+            cluster.force_external_secret_refresh(
+                target.name, target.namespace, target.target_secret
+            )
     if catalog.database_release is not None:
         _force_helm_release(cluster, catalog.database_release)
     for target in catalog.consumers:
         _force_helm_release(cluster, target)
+    _restart_addon_workloads(context, catalog, kubectl)
+    print("Addon credential delivery and consumers reconciled.")
+
+
+def _restart_addon_workloads(context: str, catalog: AddonCatalog, kubectl: str) -> None:
     try:
         for action in ("restart", "status"):
             for workload in catalog.workloads:
@@ -1082,7 +1132,6 @@ def _refresh_addon(context: str, client: str, addon_id: str) -> None:
                 )
     except (OSError, subprocess.SubprocessError):
         raise SetupError("Addon workload restart or readiness check failed") from None
-    print("Addon credential delivery and consumers reconciled.")
 
 
 def _bound_kit(path: Path, identity: StackIdentity) -> RecoveryKit:
