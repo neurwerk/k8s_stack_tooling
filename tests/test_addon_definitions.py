@@ -263,7 +263,9 @@ def claim(owner, name, engine="postgresql", service="postgres"):
         "role": name,
         "owner": owner,
         "package": "app",
-        "baseChart": "charts/postgres/addon",
+        "baseChart": "charts/postgres/documentdb-addon"
+        if engine == "documentdb"
+        else "charts/postgres/addon",
         "exclusive": engine == "documentdb",
     }
 
@@ -282,6 +284,8 @@ def test_sql_claims_and_documentdb_exclusivity():
         check_database_claims([addon, Addon.model_validate(other)])
     data["spec"]["databases"] = [claim("synthetic", "chat", "documentdb", "documents")]
     other["spec"]["databases"] = [claim("other", "other", "documentdb", "documents")]
+    for item in (data, other):
+        item["spec"]["prerequisites"]["baseCharts"].append("charts/postgres/documentdb-addon")
     with pytest.raises(ContractError, match="exclusive"):
         check_database_claims([Addon.model_validate(data), Addon.model_validate(other)])
     other["spec"]["databases"][0]["service"]["name"] = "separate-documents"
@@ -323,6 +327,14 @@ def test_shared_service_accepts_postgresql_and_exclusive_documentdb_endpoints(re
     check_database_claims(list(reversed(selected)) if reverse else selected)
 
 
+def test_document_store_cannot_escape_exclusivity_by_relabelling_its_engine():
+    first = shared_endpoint_addon("documents", "first", "documentdb")
+    second = shared_endpoint_addon("other", "second", "documentdb").model_dump(by_alias=True)
+    second["spec"]["databases"][0]["engine"] = "postgresql"
+    with pytest.raises(ContractError, match="engine.*provisioning interface"):
+        check_database_claims([first, Addon.model_validate(second)])
+
+
 @pytest.mark.parametrize("sql_position", [0, 1, 2])
 def test_second_documentdb_consumer_is_rejected_even_with_sql_on_shared_service(sql_position):
     selected = [
@@ -349,6 +361,7 @@ def test_same_sql_endpoint_database_collision_and_cross_engine_role_collision_ar
 @pytest.mark.parametrize("change", ["exclusive", "extensions", "owner", "prerequisite"])
 def test_database_claims_require_valid_ownership_and_capability(change):
     data = manifest()
+    data["spec"]["prerequisites"]["baseCharts"].append("charts/postgres/documentdb-addon")
     database = claim("synthetic", "chat", "documentdb", "documents")
     data["spec"]["databases"] = [database]
     if change == "exclusive":
@@ -677,6 +690,7 @@ def test_upstream_tag_and_command_consumer_without_kubernetes_workload(tag):
 
 def test_documentdb_keeps_mixed_case_name_and_sql_stays_strict():
     data = manifest()
+    data["spec"]["prerequisites"]["baseCharts"].append("charts/postgres/documentdb-addon")
     database = claim("synthetic", "chat", "documentdb", "postgres-operations")
     database["database"] = "LibreChat"
     database["service"]["namespace"] = "infra-postgres-operations"

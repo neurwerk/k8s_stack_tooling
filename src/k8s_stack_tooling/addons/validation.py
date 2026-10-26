@@ -642,12 +642,18 @@ def check_browser_bindings(addon: Addon, packages: dict[str, list[dict]]) -> Non
 
 
 def check_database_claims(addons: list[Addon]) -> None:
-    """Check engine endpoints, shared SQL role ownership, and DocumentDB exclusivity."""
+    """Check declared ownership; source composition additionally binds actual endpoints."""
     databases = set()
     roles = {}
     endpoints = {}
     for addon in addons:
         for claim in addon.spec.databases:
+            expected_chart = {
+                "postgresql": "charts/postgres/addon",
+                "documentdb": "charts/postgres/documentdb-addon",
+            }[claim.engine]
+            if claim.base_chart != expected_chart:
+                raise ContractError("database engine does not match its provisioning interface")
             service = (claim.service.namespace, claim.service.name)
             # Base exposes PostgreSQL and DocumentDB on distinct ports of one Service.
             endpoint = (*service, claim.engine)
