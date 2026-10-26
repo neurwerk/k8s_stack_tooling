@@ -11,6 +11,7 @@ import tempfile
 import time
 import wave
 import zlib
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from struct import pack
@@ -24,6 +25,7 @@ from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.installer.assignments import assigned_recipe, load_deployment
 from inference_runtime_manager.installer.audio import play
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
+from inference_runtime_manager.installer.streaming import chat_tokens, request_stream
 
 LIMIT = 16 * 1024 * 1024
 MAX_OCR_PROMPT_CHARS = 4096
@@ -744,6 +746,7 @@ def tts_menu() -> None:
             choices=[
                 questionary.Choice("Run standard endpoint test", value="standard"),
                 questionary.Choice("Generate WAV from custom text", value="custom"),
+                questionary.Choice("Kokoro PCM streaming / cancellation checks", value="stream"),
                 questionary.Choice("Back", value="back"),
             ],
         ).ask()
@@ -751,6 +754,9 @@ def tts_menu() -> None:
             return
         if action == "standard":
             test_individual("tts-german")
+            continue
+        if action == "stream":
+            streaming_menu("tts-german")
             continue
         text = questionary.text("Text to synthesize:").ask()
         if text is None:
@@ -787,9 +793,83 @@ def tts_menu() -> None:
         play_saved_wav(output.resolve())
 
 
+def streaming_menu(alias: str = "llm-general") -> None:
+    """Explicit live checks, separate from test-all and the WAV path."""
+    action = questionary.select(
+        f"{alias} streaming check (sends a live inference request)",
+        choices=[
+            questionary.Choice("Read complete stream", value="complete"),
+            questionary.Choice("Cancel after first output", value="cancel"),
+            questionary.Choice("Back", value="back"),
+        ],
+    ).ask()
+    if action in (None, "back"):
+        return
+    docker = enabled_docker(alias)
+    preset = assigned_recipe(
+        management_state(Settings().storage_root), docker.settings.docker_context, alias
+    )
+    if preset is None:
+        raise ValueError(f"{alias} has no saved assignment")
+    if alias == "tts-german" and preset["runtime"] != "kokoro-onnx":
+        raise ValueError("PCM streaming is supported only by the Kokoro adapter, not Chatterbox")
+    describe_assignment(docker, alias, preset)
+    if not questionary.confirm("Send this streaming request now?", default=False).ask():
+        return
+    if alias == "tts-german":
+        path = "/v1/audio/speech"
+        payload = {"model": alias, "input": SENTENCE, "response_format": "pcm"}
+    else:
+        path = "/v1/chat/completions"
+        payload = {
+            "model": alias,
+            "messages": [{"role": "user", "content": "Say hello briefly."}],
+            "stream": True,
+            "max_tokens": 256,
+            "temperature": 0,
+        }
+    started = time.monotonic()
+    first = True
+    audio = bytearray()
+    with closing(request_stream(docker, alias, path, payload)) as chunks:
+        output = chunks if alias == "tts-german" else chat_tokens(chunks)
+        for part in output:
+            if first:
+                print(
+                    f"First {'audio bytes' if alias == 'tts-german' else 'text delta'}: "
+                    f"{(time.monotonic() - started) * 1000:.0f} ms (Docker included)"
+                )
+                first = False
+            if alias == "tts-german":
+                assert isinstance(part, bytes)
+                audio.extend(part)
+            else:
+                print(part, end="", flush=True)
+            if action == "cancel":
+                print("\nClosing stream after first output.")
+                break
+    if first:
+        raise ValueError("Streaming response has no output")
+    if action == "cancel":
+        print(
+            "Cancellation sent; current ONNX work may finish. Review server logs when approved; "
+            "client disconnect alone does not prove server-side cancellation."
+        )
+    elif alias == "tts-german":
+        if len(audio) % 2 or audio.startswith(b"RIFF"):
+            raise ValueError("Expected headerless 16-bit PCM")
+        print(
+            f"Received {len(audio)} PCM bytes; expected contract: mono, 24 kHz, s16le. "
+            "Raw bytes cannot prove sample rate or channel count."
+        )
+    else:
+        print("\nComplete SSE text stream received.")
+
+
 def manual_menu() -> None:
     choices = [
         questionary.Choice("Test all enabled endpoints", value="all"),
+        questionary.Choice("LLM SSE streaming / cancellation checks", value="llm-stream"),
         questionary.Separator(" "),
         questionary.Separator("── Individual Endpoints ──"),
         *[
@@ -809,6 +889,8 @@ def manual_menu() -> None:
             menu()
         elif action == "tts":
             tts_menu()
+        elif action == "llm-stream":
+            streaming_menu()
         else:
             test_individual(action)
 
