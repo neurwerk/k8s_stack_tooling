@@ -26,6 +26,8 @@ For configuration failures, compare the workload's supplied keys with the select
 
 ## Verification
 
+For approved machine identities, see [scoped service clients](scoped-service-clients.md); the legacy OIDC upsert command does not reconcile exact service-account grants.
+
 Use the tool's operation-specific result: maintenance checks routing through HTTPS, directory inspection returns names, and Package Checker reports publication state. `stack-setup status` reports initialization, custody checkpoint, and selections; it does not prove policy, token, or workload health. Follow the shared [post-deployment checks](https://github.com/neurwerk/docs/blob/main/dev/operations/upgrades.md#after-deployment) for application readiness after an approved deployment.
 
 Release publication and deployment selection remain separate. Follow shared [image releases](https://github.com/neurwerk/docs/blob/main/dev/operations/image-releases.md) for registry verification and image-pin changes, and [platform upgrades](https://github.com/neurwerk/docs/blob/main/dev/operations/upgrades.md) for client adoption.
