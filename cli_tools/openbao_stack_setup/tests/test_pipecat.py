@@ -166,9 +166,11 @@ def test_namespace_grants_are_exact_and_no_raw_key_reaches_bridge_or_keycloak() 
     assert "addons/pipecat" not in str(session.policies["auth-keycloak-api-key-bridge"])
 
 
-def test_disabling_secret_sync_preserves_existing_secrets_without_prompt_or_delivery() -> None:
+def test_external_secrets_preserve_active_oidc_turn_refresh_without_credential_mutation() -> None:
     product = deepcopy(PRODUCT)
     product["secretSync"]["enabled"] = False
+    product["oidc"]["secretName"] = "existing-login"
+    product["turn"]["secretName"] = "existing-turn"
     selected = select_pipecat(product)
     session = FakeSession()
     path = "addons/pipecat/oidc"
@@ -177,7 +179,76 @@ def test_disabling_secret_sync_preserves_existing_secrets_without_prompt_or_deli
     assert list(session.secrets) == [path]
     assert session.secrets[path].version == 1
     assert not selected.catalog().external_secrets
-    assert all(not selected.paths(ns) for ns in ("pipecat", "auth-keycloak"))
+    assert all(
+        not selected.paths(ns)
+        for ns in ("pipecat", "auth-keycloak", "auth-keycloak-api-key-bridge")
+    )
+    target = MagicMock()
+    target.selected_addons.return_value = ("pipecat",)
+    target.pipecat_selection.return_value = selected
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=target),
+        patch("openbao_stack_setup.main._confirm"),
+        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
+        patch("openbao_stack_setup.main.subprocess.run") as rollout,
+    ):
+        _refresh_addon("context", "client", "pipecat")
+    target.ensure_secret_store_ready.assert_not_called()
+    target.force_external_secret_refresh.assert_not_called()
+    assert target.force_reconcile.call_args_list == [
+        call("pipecat-oidc-settings", "auth-keycloak"),
+        call("keycloak-pipecat-access", "auth-keycloak"),
+        call("keycloak-pipecat-oidc", "auth-keycloak"),
+        call("pipecat-shared", "pipecat"),
+    ]
+    assert {item.args[0][7] for item in rollout.call_args_list} == {
+        "deployment/pipecat-voice-bot",
+        "deployment/pipecat-protected-bot",
+        "deployment/pipecat-turn",
+    }
+
+
+def test_anonymous_bots_can_offer_optional_oidc_login() -> None:
+    product = {
+        "enabled": True,
+        "secretSync": {"enabled": True},
+        "oidc": {"enabled": True},
+        "bots": [{"id": "public-bot", "urlSlug": "public_bot", "anonymous": True}],
+    }
+    selected = select_pipecat(product)
+    session = FakeSession()
+    reconcile_pipecat(api(session), selected, MagicMock(side_effect=AssertionError))
+    assert set(session.secrets) == {"addons/pipecat/oidc"}
+    assert selected.paths("auth-keycloak") == ("addons/pipecat/oidc",)
+    assert selected.paths("auth-keycloak-api-key-bridge") == ()
+    assert [(target.name, target.namespace) for target in selected.catalog().external_secrets] == [
+        ("pipecat-oidc-secret", "auth-keycloak"),
+        ("pipecat-oidc-secret", "pipecat"),
+    ]
+    assert "keycloak-pipecat-oidc" in {target.name for target in selected.catalog().consumers}
+    product["bots"] = [{"id": "protected-bot", "anonymous": False}]
+    product["oidc"] = {"enabled": False}
+    with pytest.raises(OpenBaoError, match="require OIDC"):
+        select_pipecat(product)
+
+
+@pytest.mark.parametrize("turn_enabled", [False, True])
+@pytest.mark.parametrize("identity", ["turn", "product-values"])
+def test_shared_resource_ids_are_reserved_before_any_credential_writes(
+    turn_enabled: bool, identity: str
+) -> None:
+    client = MagicMock()
+    prompt = MagicMock()
+    product = {
+        "enabled": True,
+        "secretSync": {"enabled": True},
+        "turn": {"enabled": turn_enabled},
+        "bots": [{"id": identity, "anonymous": True}],
+    }
+    with pytest.raises(OpenBaoError, match="Pipecat"):
+        reconcile_pipecat(client, select_pipecat(product), prompt)
+    assert not client.mock_calls
+    prompt.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", [False, True])

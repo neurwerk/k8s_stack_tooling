@@ -24,6 +24,8 @@ _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
 _PROVIDER_GRANT = re.compile(r"provider:[a-z0-9][a-z0-9-]{0,47}:company-use")
 _PREFIX = "addons/pipecat"
 _BRIDGE = "auth-keycloak-api-key-bridge"
+# Shared coturn resources and the required runtime product-values ConfigMap use this prefix.
+_RESERVED_IDS = {"turn", "product-values"}
 
 
 @dataclass(frozen=True)
@@ -36,22 +38,27 @@ class PipecatBot:
 
     def __post_init__(self) -> None:
         """Prevent invalid IDs from becoming resource names or ACL paths."""
-        if not _ID.fullmatch(self.id) or any(
-            field not in ("sttApiKey", "ttsApiKey") for field in self.speech
+        if (
+            not _ID.fullmatch(self.id)
+            or self.id in _RESERVED_IDS
+            or any(field not in ("sttApiKey", "ttsApiKey") for field in self.speech)
         ):
             raise OpenBaoError("Invalid Pipecat bot credential selection")
 
 
 @dataclass(frozen=True)
 class PipecatSelection:
-    """Hold a validated selection without paths, commands, or secret values."""
+    """Separate active runtime features from managed credential ownership."""
 
     oidc: bool
     turn: bool
     bots: tuple[PipecatBot, ...]
+    managed: bool
 
     def paths(self, namespace: str) -> tuple[str, ...]:
         """Derive namespace-exact record reads; bridge never reads raw bot keys."""
+        if not self.managed:
+            return ()
         if namespace == "auth-keycloak":
             return ((f"{_PREFIX}/oidc",) if self.oidc else ()) + tuple(
                 f"{_PREFIX}/machines/{bot.id}" for bot in self.bots if bot.gateway
@@ -71,11 +78,11 @@ class PipecatSelection:
     def catalog(self) -> AddonCatalog:
         """Derive only compiled resource names, never workloads from configuration."""
         targets: list[ExternalSecretTarget] = []
-        if self.oidc:
+        if self.oidc and self.managed:
             targets.extend(
                 _target("pipecat-oidc-secret", ns) for ns in ("auth-keycloak", "pipecat")
             )
-        if self.turn:
+        if self.turn and self.managed:
             targets.append(_target("pipecat-turn-secret", "pipecat"))
         for bot in self.bots:
             name = f"pipecat-bot-{bot.id}"
@@ -153,6 +160,7 @@ def select_pipecat(product: object) -> PipecatSelection:
             not isinstance(identity, str)
             or not _ID.fullmatch(identity)
             or identity in identities
+            or identity in _RESERVED_IDS
             or not isinstance(slug, str)
             or not _SLUG.fullmatch(slug)
             or slug in slugs
@@ -168,8 +176,8 @@ def select_pipecat(product: object) -> PipecatSelection:
         bots.append(_select_bot(row, identity, anonymous, managed))
     oidc = _settings(product, "oidc")
     oidc_enabled = _enabled(oidc, protected)
-    if oidc_enabled != protected:
-        raise OpenBaoError("Pipecat OIDC selection must match the protected bot catalog")
+    if protected and not oidc_enabled:
+        raise OpenBaoError("Protected Pipecat bots require OIDC")
     if (
         managed
         and oidc_enabled
@@ -188,7 +196,7 @@ def select_pipecat(product: object) -> PipecatSelection:
         and turn.get("secretName", "pipecat-turn-secret") != "pipecat-turn-secret"
     ):
         raise OpenBaoError("Managed Pipecat TURN requires the reviewed Secret reference")
-    return PipecatSelection(oidc_enabled and managed, turn_enabled and managed, tuple(bots))
+    return PipecatSelection(oidc=oidc_enabled, turn=turn_enabled, bots=tuple(bots), managed=managed)
 
 
 def _select_bot(
@@ -288,9 +296,9 @@ def reconcile_pipecat(
         client.delete_policy("pipecat")
         client.delete_kubernetes_role("pipecat")
         return
-    if selection.oidc:
+    if selection.oidc and selection.managed:
         _single_record(client, "oidc", "clientSecret", lambda: secrets.token_urlsafe(32))
-    if selection.turn:
+    if selection.turn and selection.managed:
         _single_record(client, "turn", "sharedSecret", lambda: secrets.token_hex(32))
     for bot in selection.bots:
         if bot.gateway or bot.speech:
