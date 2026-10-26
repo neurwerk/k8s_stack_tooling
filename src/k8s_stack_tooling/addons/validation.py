@@ -13,6 +13,7 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from .git import run_git
 from .schema import (
@@ -20,6 +21,8 @@ from .schema import (
     Addon,
     CommandConsumer,
     ContractError,
+    ExternalInput,
+    HelmOutput,
     SourceRef,
     _unique_json,
     load,
@@ -216,6 +219,64 @@ def resource_claims(resource: dict) -> set[tuple[str, str, str, str]]:
     return claims
 
 
+def base_output_claims(base: Path, resources: list[dict], source: tuple[str, str, str]) -> set:
+    """Index declared outputs only for selected Base Helm producers with the exact chart."""
+    manifest = load(inside(base, "release/manifest.yaml"))
+    rows = manifest.get("spec", {}).get("artifacts", {}).get("helmReleases", [])
+    releases = {
+        (obj["metadata"].get("namespace", ""), obj["metadata"]["name"]): obj
+        for obj in resources
+        if obj.get("kind") == "HelmRelease"
+    }
+    claimed = set()
+    for row in rows:
+        outputs = row.get("helmOutputs", [])
+        if not isinstance(outputs, list) or len(outputs) > 100:
+            raise ContractError("invalid Base generated output declarations")
+        producer = releases.get((row.get("namespace"), row.get("name")))
+        if producer is None:
+            continue  # Unselected optional producers cannot satisfy an input.
+        if not outputs:
+            continue
+        chart = producer.get("spec", {}).get("chart", {}).get("spec", {})
+        ref = chart.get("sourceRef", {})
+        actual_source = (
+            ref.get("kind", "GitRepository"),
+            ref.get("namespace", producer["metadata"].get("namespace", "")),
+            ref.get("name"),
+        )
+        if chart.get("chart") != row.get("chart") or actual_source != source:
+            raise ContractError("Base generated output producer chart or source differs")
+        for raw in outputs:
+            try:
+                output = HelmOutput.model_validate(raw)
+            except ValidationError:
+                raise ContractError("invalid Base generated output declaration") from None
+            if (output.namespace, output.helm_release) != (row["namespace"], row["name"]):
+                raise ContractError(
+                    "Base generated output requires its exact namespace-local producer"
+                )
+            key = ("", output.kind, output.namespace, output.name)
+            if key in claimed:
+                raise ContractError("Base generated outputs have overlapping ownership")
+            claimed.add(key)
+    return claimed
+
+
+def validate_external_input(required: ExternalInput, resource: dict) -> None:
+    """Live preflight validates identity/type/keys without displaying or interpreting values."""
+    if (
+        resource.get("apiVersion") != "v1"
+        or resource.get("kind") != required.kind
+        or resource.get("metadata", {}).get("namespace") != required.namespace
+        or resource.get("metadata", {}).get("name") != required.name
+        or resource.get("type") != required.secret_type
+        or not isinstance(resource.get("data"), dict)
+        or not set(required.keys) <= resource["data"].keys()
+    ):
+        raise ContractError("operator external input identity, type, or required keys do not match")
+
+
 def check(
     root: Path,
     *,
@@ -271,7 +332,7 @@ def check(
             outputs[key] = name
             generated[key] = (name, output.helm_release)
     helm_releases: dict[tuple[str, str, str], dict] = {}
-    consumers: list[tuple[str, str, str, dict]] = []
+    consumers: list[tuple[str, str, str, str, dict]] = []
     rendered_packages: dict[str, list[dict]] = {}
     for name, package in packages.items():
         visit(name)
@@ -302,18 +363,38 @@ def check(
                 outputs[output] = name
             if resource["kind"] == "Secret":
                 raise ContractError("release packages must not contain Secret values")
+            if resource["kind"] == "ExternalSecret":
+                for source in (
+                    resource["spec"].get("target", {}).get("template", {}).get("templateFrom", [])
+                ):
+                    configmap = source.get("configMap", {})
+                    consumers.append(
+                        (
+                            name,
+                            namespace,
+                            resource_name,
+                            "ExternalSecret",
+                            {"kind": "ConfigMap", "name": configmap.get("name")},
+                        )
+                    )
             if resource["kind"] != "HelmRelease":
                 continue
             helm_releases[(name, namespace, resource_name)] = resource
             for reference in resource["spec"].get("valuesFrom", []):
                 if not reference.get("optional", False):
-                    consumers.append((name, namespace, resource_name, reference))
+                    consumers.append((name, namespace, resource_name, "HelmRelease", reference))
             password_secret = (
                 resource["spec"].get("values", {}).get("addon", {}).get("passwordSecret")
             )
             if password_secret:
                 consumers.append(
-                    (name, namespace, resource_name, {"kind": "Secret", "name": password_secret})
+                    (
+                        name,
+                        namespace,
+                        resource_name,
+                        "HelmRelease",
+                        {"kind": "Secret", "name": password_secret},
+                    )
                 )
             chart = resource["spec"]["chart"]["spec"]
             source = chart["sourceRef"]["name"]
@@ -334,14 +415,14 @@ def check(
     for (_, namespace, _), (package, release) in generated.items():
         if (package, namespace, release) not in helm_releases:
             raise ContractError("missing namespace-local Helm output producer")
-    for consumer, namespace, release, reference in consumers:
+    for consumer, namespace, release, consumer_kind, reference in consumers:
         key = (reference["kind"], namespace, reference["name"])
         if key not in outputs:
             raise ContractError("missing values or secret producer")
         producer = outputs[key]
         if producer is not None and producer != consumer and producer not in ancestors(consumer):
             raise ContractError("missing producer readiness dependency")
-        if key in generated and producer == consumer:
+        if key in generated and producer == consumer and consumer_kind == "HelmRelease":
             producer_release = generated[key][1]
             if release == producer_release:
                 raise ContractError("HelmRelease cannot consume its own generated output")
@@ -598,6 +679,74 @@ def check_secret_deliveries(
         raise ContractError("invalid effective delivery or Base store definition") from None
 
 
+def secret_template_keys(resource: dict, resources: list[dict]) -> set[str]:
+    """Prove final keys for inline data plus literal ConfigMap Data/Values sources only."""
+    spec = resource["spec"]
+    namespace = resource["metadata"].get("namespace", "")
+    template = spec.get("target", {}).get("template", {})
+    inline = template.get("data", {})
+    if not isinstance(inline, dict) or len(inline) > 100:
+        raise ContractError("target template data must be a bounded mapping")
+    keys: set[str] = set()
+    for key in inline:
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", key):
+            raise ContractError("target template keys are invalid")
+        keys.add(key)
+    sources = template.get("templateFrom", [])
+    if not isinstance(sources, list) or len(sources) > 100:
+        raise ContractError("target template sources must be bounded")
+    for source in sources:
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"target", "configMap"}
+            or source["target"] != "Data"
+        ):
+            raise ContractError("target template supports only ConfigMap Data/Values sources")
+        reference = source["configMap"]
+        if not isinstance(reference, dict) or set(reference) != {"name", "items"}:
+            raise ContractError("template ConfigMap must be namespace-local with explicit items")
+        matches = [
+            obj
+            for obj in resources
+            if obj.get("apiVersion") == "v1"
+            and obj.get("kind") == "ConfigMap"
+            and obj.get("metadata", {}).get("namespace", "") == namespace
+            and obj.get("metadata", {}).get("name") == reference["name"]
+        ]
+        if not matches or any(obj.get("data") != matches[0].get("data") for obj in matches):
+            raise ContractError("template ConfigMap is missing or has conflicting producers")
+        items = reference["items"]
+        if not isinstance(items, list) or not 1 <= len(items) <= 100:
+            raise ContractError("template ConfigMap items must be explicit and bounded")
+        data = matches[0].get("data", {})
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"key", "templateAs"}
+                or item["templateAs"] != "Values"
+            ):
+                raise ContractError("target template supports only literal Values items")
+            key = item["key"]
+            value = data.get(key)
+            if (
+                not isinstance(key, str)
+                or not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", key)
+                or key in keys
+            ):
+                raise ContractError("target template keys are invalid or collide")
+            if not isinstance(value, str) or len(value) > 16384 or "{{" in value or "}}" in value:
+                raise ContractError("template ConfigMap key is missing or is not a bounded literal")
+            keys.add(key)
+    if template:
+        if (
+            template.get("mergePolicy", "Replace") != "Replace"
+            or template.get("engineVersion", "v2") != "v2"
+        ):
+            raise ContractError("target template requires v2 Replace semantics")
+        return keys
+    return {entry["secretKey"] for entry in spec.get("data", [])}
+
+
 def _check_secret_deliveries(
     addon: Addon, objects: list[dict], base_resources: list[dict], client_resources: list[dict]
 ) -> None:
@@ -675,10 +824,23 @@ def _check_secret_deliveries(
             or store_ref.get("name") != delivery.secret_store
         ):
             raise ContractError("rendered delivery target or store differs from active definition")
-        if spec.get("dataFrom") or target.get("template", {}).get("templateFrom"):
-            raise ContractError(
-                "dataFrom and external target templates are unsupported for active field proof"
+        if spec.get("dataFrom"):
+            raise ContractError("dataFrom is unsupported for active field proof")
+        template_resources = list(objects)
+        for owner, resources in (("base", base_resources), ("client", client_resources)):
+            template_resources.extend(
+                obj
+                for obj in resources
+                if declared.get(
+                    (
+                        "ConfigMap",
+                        obj.get("metadata", {}).get("namespace", ""),
+                        obj.get("metadata", {}).get("name"),
+                    )
+                )
+                == owner
             )
+        final_keys = secret_template_keys(resource, template_resources)
         store = stores.get((delivery.namespace, delivery.secret_store))
         if store is None:
             raise ContractError("delivery requires an owned or declared Base/client SecretStore")
@@ -737,7 +899,7 @@ def _check_secret_deliveries(
             references.append((record.path, field, secret_key))
         if used_records != set(delivery.records):
             raise ContractError("rendered delivery omits an active declared record")
-        signature = tuple(sorted(references))
+        signature = (tuple(sorted(references)), tuple(sorted(final_keys)))
         if key in found and found[key] != signature:
             raise ContractError("delivery fields differ between install and upgrade")
         found[key] = signature
@@ -942,6 +1104,21 @@ def check_client(
             external_values[owner].update(
                 key[1:] for key in claims if key[0] == "" or key[1] == "SecretStore"
             )
+    if base is not None:
+        for key in base_output_claims(base, external["base"], base_source):
+            if key in claimed:
+                raise ContractError("Base generated outputs have overlapping ownership")
+            claimed.add(key)
+            external_values["base"].add(key[1:])
+    external_inputs = {
+        (row.kind, row.namespace, row.name): row for row in selection.external_inputs
+    }
+    for key in external_inputs:
+        identity_key = ("", *key)
+        if identity_key in claimed:
+            raise ContractError("operator external input collides with a resource producer")
+        claimed.add(identity_key)
+        external_values["client"].add(key)
     authentication_clients: set[str] = set()
     for root, addon in addons:
         entry = selected[addon.metadata.name]
@@ -960,6 +1137,16 @@ def check_client(
                 raise ContractError("selected addons have duplicate authentication client IDs")
             authentication_clients.add(client_id)
         for item in addon.spec.inputs:
+            external_input = external_inputs.get((item.kind, item.namespace, item.name))
+            if external_input is not None and (
+                item.owner != "client"
+                or item.secret_type != external_input.secret_type
+                or not item.keys
+                or not set(item.keys) <= set(external_input.keys)
+            ):
+                raise ContractError(
+                    "product external input requires exact client type and key approval"
+                )
             if (item.kind, item.namespace, item.name) not in external_values[item.owner]:
                 raise ContractError(
                     "required Base or client values are missing from their declared owner"

@@ -445,6 +445,8 @@ def test_base_source_refs_reject_revision_expressions(tmp_path, kind, suffix):
 def test_client_requires_dependency_and_single_owner(package, tmp_path):
     root, _, documents, _ = package
     addon = check(root)
+    (tmp_path / "release").mkdir()
+    (tmp_path / "release/manifest.yaml").write_text("spec:\n  version: 0.4.0\n")
     client = tmp_path / "client"
     (client / "config").mkdir(parents=True)
     save_selection(client)

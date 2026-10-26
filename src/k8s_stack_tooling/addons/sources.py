@@ -31,6 +31,7 @@ from .schema import (
 )
 from .validation import (
     CLIENT_SOURCE,
+    base_output_claims,
     base_revision,
     check,
     check_base,
@@ -400,6 +401,16 @@ def validate_selection_images(
                 if claim in claimed:
                     raise ContractError("Base and client resources have overlapping ownership")
                 claimed[claim] = (owner,)
+    external_claims = list(base_output_claims(base, base_resources, _key(selection.base.reference)))
+    external_claims.extend(
+        ("", item.kind, item.namespace, item.name) for item in selection.selection.external_inputs
+    )
+    for claim in external_claims:
+        if claim in claimed:
+            raise ContractError(
+                "external inputs or generated Base outputs have overlapping ownership"
+            )
+        claimed[claim] = ("external",)
     for item in selection.addons:
         addon = item.definition
         product = addon.metadata.name
