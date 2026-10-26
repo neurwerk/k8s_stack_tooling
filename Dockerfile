@@ -14,6 +14,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 # Copy the locked project definition and source.
 COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY.md /app/
 COPY src/ /app/src/
+COPY packages/gateway_catalog/ /app/packages/gateway_catalog/
 
 # Install exactly the locked runtime dependencies into the project environment.
 WORKDIR /app

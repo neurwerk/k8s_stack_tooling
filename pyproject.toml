@@ -12,6 +12,7 @@ license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY.md", "src/k8s_stack_tooling/maintenance/assets/OFL.txt"]
 requires-python = ">=3.12"
 dependencies = [
+    "k8s-stack-gateway-catalog==0.1.0",
     "requests>=2.31",
     "kubernetes>=36.0.2",
     "gunicorn>=26.2",
@@ -42,7 +43,10 @@ addon-check = "k8s_stack_tooling.addons:main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 stage-documentdb-provisioner = "k8s_stack_tooling.postgres.documentdb:main"
 provision-glitchtip = "k8s_stack_tooling.glitchtip.provision:main"
-dify-model-sync = "k8s_stack_tooling.dify_model_sync.main:main"
+gateway-model-metadata = "k8s_stack_tooling.gateway_model_metadata_cli:main"
+
+[tool.uv.sources]
+k8s-stack-gateway-catalog = { path = "packages/gateway_catalog" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]
@@ -63,7 +67,7 @@ quote-style = "double"
 [tool.ty]
 
 [tool.ty.src]
-include = ["src", "tests"]
+include = ["src", "tests", "packages/gateway_catalog/src"]
 # The standalone payload and native acceptance harness run with upstream Python/Django, not Tooling.
 exclude = ["src/k8s_stack_tooling/glitchtip/payload.py", "tests/glitchtip_native"]
 

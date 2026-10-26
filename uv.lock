@@ -520,6 +520,28 @@ wheels = [
 ]
 
 [[package]]
+name = "k8s-stack-gateway-catalog"
+version = "0.1.0"
+source = { directory = "packages/gateway_catalog" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.15.17" },
+    { name = "ty", specifier = ">=0.0.49" },
+]
+
+[[package]]
 name = "k8s-stack-tooling"
 version = "0.13.7"
 source = { editable = "." }
@@ -527,6 +549,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "defusedxml" },
     { name = "gunicorn" },
+    { name = "k8s-stack-gateway-catalog" },
     { name = "kubernetes" },
     { name = "ldap3" },
     { name = "pydantic-settings" },
@@ -547,6 +570,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=46" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "gunicorn", specifier = ">=26.2" },
+    { name = "k8s-stack-gateway-catalog", directory = "packages/gateway_catalog" },
     { name = "kubernetes", specifier = ">=36.0.2" },
     { name = "ldap3", specifier = ">=2.9,<3" },
     { name = "pydantic-settings", specifier = ">=2.10" },
