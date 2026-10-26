@@ -10,6 +10,9 @@ from .schema import (
     ContractError as ContractError,
 )
 from .schema import (
+    ExternalInput as ExternalInput,
+)
+from .schema import (
     Selection as Selection,
 )
 from .schema import (
@@ -74,4 +77,10 @@ from .validation import (
 )
 from .validation import (
     main as main,
+)
+from .validation import (
+    secret_template_keys as secret_template_keys,
+)
+from .validation import (
+    validate_external_input as validate_external_input,
 )

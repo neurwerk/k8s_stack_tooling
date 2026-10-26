@@ -102,6 +102,26 @@ class Input(Contract):
     namespace: Name
     name: Name
     owner: Literal["base", "client"]
+    secret_type: str | None = Field(default=None, alias="type", min_length=1, max_length=128)
+    keys: list[str] = Field(default_factory=list, max_length=100)
+
+
+class ExternalInput(Contract):
+    """An operator-provided prerequisite; never a generated resource or presence proof."""
+
+    kind: Literal["Secret"]
+    namespace: Name
+    name: Name
+    secret_type: str = Field(alias="type", min_length=1, max_length=128)
+    keys: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9._-]{1,253}$")]] = Field(
+        min_length=1, max_length=100
+    )
+
+    @model_validator(mode="after")
+    def unique_keys(self):
+        if len(set(self.keys)) != len(self.keys):
+            raise ValueError("external input keys must be unique")
+        return self
 
 
 class Authentication(Contract):
@@ -980,9 +1000,15 @@ class Selection(Contract):
     kind: Literal["AddonSelection"]
     base_source_ref: SourceRef = Field(alias="baseSourceRef")
     addons: list[AddonSelection] = Field(max_length=100)
+    external_inputs: list[ExternalInput] = Field(
+        default_factory=list, alias="externalInputs", max_length=100
+    )
 
     @model_validator(mode="after")
     def identities(self):
+        external = [(row.kind, row.namespace, row.name) for row in self.external_inputs]
+        if len(set(external)) != len(external):
+            raise ValueError("duplicate external input identity")
         refs = [(a.source_ref.kind, a.source_ref.namespace, a.source_ref.name) for a in self.addons]
         if len({a.id for a in self.addons}) != len(self.addons) or len(set(refs)) != len(refs):
             raise ValueError("duplicate selected identity")

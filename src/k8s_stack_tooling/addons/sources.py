@@ -26,11 +26,13 @@ from .schema import (
     SourceRef,
     expand_identities,
     expand_setup,
+    load,
     load_manifest,
     load_selection,
 )
 from .validation import (
     CLIENT_SOURCE,
+    base_output_claims,
     base_revision,
     check,
     check_base,
@@ -39,6 +41,7 @@ from .validation import (
     check_secret_deliveries,
     check_verifier_reader_separation,
     inside,
+    pod_containers,
     render,
     render_addon_packages,
     render_stage,
@@ -334,6 +337,178 @@ def _selected_base_resources(selection: VerifiedSelection, client: Path, base: P
     return [obj for stage in stages for obj in render_stage(stage, base)]
 
 
+def _database_provider_endpoints(
+    resources: list[dict],
+    *,
+    base_source: SourceRef,
+    sources: Mapping[tuple[str, str, str], Path],
+) -> dict[tuple[str, str], dict[str, int]]:
+    """Prove the reviewed Base endpoint contract without rendering provider credentials.
+
+    The operations chart fixes the Service name and named engine targets. Only its
+    Service/listener ports are configurable. Explicit inline pins must match the
+    selected defaults and take precedence over ordinary valuesFrom, including
+    Secrets. targetPath can defeat that precedence and is rejected. This narrow
+    endpoint proof is not a general way to ignore Secret-dependent Helm inputs.
+    """
+    from .helm_images import _chart
+
+    result = {}
+    for resource in resources:
+        if resource.get("kind") != "HelmRelease":
+            continue
+        spec = resource["spec"]
+        chart = spec.get("chart", {}).get("spec", {})
+        if chart.get("chart", "").removeprefix("./") != "charts/postgres/operations":
+            continue
+        reference = chart.get("sourceRef", {})
+        if (
+            reference.get("kind"),
+            reference.get("namespace", resource["metadata"]["namespace"]),
+            reference.get("name"),
+        ) != _key(base_source):
+            raise ContractError("database provider must come from the selected Base source")
+        path = _chart(resource, sources)
+        namespace = spec.get("targetNamespace", resource["metadata"]["namespace"])
+        if any(ref.get("targetPath") for ref in spec.get("valuesFrom", [])):
+            raise ContractError(
+                "database endpoint pins cannot be combined with valuesFrom targetPath"
+            )
+        try:
+            defaults = load(path / "values.yaml")["postgresOperations"]
+            pinned = spec["values"]["postgresOperations"]
+            for section, fields in (
+                ("service", ("postgresqlPort", "documentdbPort")),
+                ("containerPorts", ("postgresql", "documentdb")),
+            ):
+                expected = defaults[section]
+                for field in fields:
+                    value = pinned[section][field]
+                    if (
+                        type(value) is not int
+                        or not 1 <= value <= 65535
+                        or type(expected[field]) is not int
+                        or value != expected[field]
+                    ):
+                        raise ContractError(
+                            "database endpoint pins must match reviewed Base defaults"
+                        )
+                if expected[fields[0]] == expected[fields[1]]:
+                    raise ContractError("reviewed Base engine endpoints must be distinct")
+        except (KeyError, TypeError):
+            raise ContractError(
+                "database provider requires four explicit inline endpoint pins"
+            ) from None
+        key = (namespace, "postgres-operations")
+        if key in result:
+            raise ContractError("multiple Base providers claim the same database Service")
+        result[key] = {
+            "postgresql": pinned["service"]["postgresqlPort"],
+            "documentdb": pinned["service"]["documentdbPort"],
+        }
+    return result
+
+
+def _check_database_bindings(
+    selection: VerifiedSelection,
+    packages: Mapping[str, dict[str, list[dict]]],
+    results: Mapping[str, HelmImageResult],
+    providers: Mapping[tuple[str, str], Mapping[str, int]],
+) -> None:
+    """Bind claims to verified provisioners and the inline-pinned Base endpoint contract."""
+    try:
+        for item in selection.addons:
+            addon = item.definition
+            result = results[addon.metadata.name]
+            for claim in addon.spec.databases:
+                releases = []
+                for release in packages[addon.metadata.name][claim.package]:
+                    if release.get("kind") != "HelmRelease":
+                        continue
+                    chart = release["spec"].get("chart", {}).get("spec", {})
+                    if chart.get("chart", "").removeprefix("./") != claim.base_chart:
+                        continue
+                    reference = chart.get("sourceRef", {})
+                    if (
+                        reference.get("kind"),
+                        reference.get("namespace", release["metadata"]["namespace"]),
+                        reference.get("name"),
+                    ) != _key(selection.base.reference):
+                        raise ContractError(
+                            "database provisioning must use the selected Base source"
+                        )
+                    releases.append(release)
+                if len(releases) != 1:
+                    raise ContractError("database claim requires one verified provisioning release")
+                release = releases[0]
+                key = (claim.package, release["metadata"]["namespace"], release["metadata"]["name"])
+                settings = result.effective_values[key]["addon"]
+                sql = claim.engine == "postgresql"
+                if sql:
+                    declarations = settings["databases"]
+                    databases = [d for d in declarations if d["name"] == claim.database]
+                    if (
+                        settings["role"] != claim.role
+                        or len(databases) != 1
+                        or bool(databases[0].get("vector", False)) != ("vector" in claim.extensions)
+                    ):
+                        raise ContractError(
+                            "database claim differs from effective SQL provisioning"
+                        )
+                elif (
+                    settings.get("enabled") is not True
+                    or settings["user"] != claim.role
+                    or settings["database"] != claim.database
+                ):
+                    raise ContractError(
+                        "database claim differs from effective DocumentDB provisioning"
+                    )
+                service_key = (claim.service.namespace, claim.service.name)
+                if service_key not in providers:
+                    raise ContractError("database claim requires the selected pinned Base Service")
+                ports = providers[service_key]
+                host = settings["postgresHost" if sql else "host"]
+                if host not in {
+                    f"{claim.service.name}.{claim.service.namespace}.svc",
+                    f"{claim.service.name}.{claim.service.namespace}.svc.cluster.local",
+                }:
+                    raise ContractError(
+                        "database provisioning host differs from its claimed Service"
+                    )
+                required_ports = {"postgresql": settings["postgresPort"]}
+                if not sql:
+                    required_ports["documentdb"] = settings["documentdbPort"]
+                for name, port in required_ports.items():
+                    if type(port) is not int or ports[name] != port:
+                        raise ContractError(
+                            "database provisioning port differs from its engine endpoint"
+                        )
+                jobs = [obj for obj in result.rendered[key] if obj["kind"] == "Job"]
+                if not jobs:
+                    raise ContractError("database provisioning Job is absent")
+                for job in jobs:
+                    containers = [c for _, c in pod_containers(job) if c["name"] == "provision"]
+                    if len(containers) != 1:
+                        raise ContractError("database provisioning container is ambiguous")
+                    env = {e["name"]: e.get("value") for e in containers[0].get("env", [])}
+                    if env.get("PGHOST") != host or env.get("PGPORT") != str(
+                        settings["postgresPort"]
+                    ):
+                        raise ContractError(
+                            "rendered database connection differs from verified settings"
+                        )
+                    if not sql and (
+                        env.get("DOCUMENTDB_HOST") != host
+                        or env.get("DOCUMENTDB_PORT") != str(settings["documentdbPort"])
+                    ):
+                        raise ContractError(
+                            "rendered document endpoint differs from verified settings"
+                        )
+    except (KeyError, TypeError, AttributeError):
+        raise ContractError("incomplete verified database endpoint binding") from None
+    check_database_claims([item.definition for item in selection.addons])
+
+
 def validate_selection_images(
     selection: VerifiedSelection,
     *,
@@ -400,6 +575,16 @@ def validate_selection_images(
                 if claim in claimed:
                     raise ContractError("Base and client resources have overlapping ownership")
                 claimed[claim] = (owner,)
+    external_claims = list(base_output_claims(base, base_resources, _key(selection.base.reference)))
+    external_claims.extend(
+        ("", item.kind, item.namespace, item.name) for item in selection.selection.external_inputs
+    )
+    for claim in external_claims:
+        if claim in claimed:
+            raise ContractError(
+                "external inputs or generated Base outputs have overlapping ownership"
+            )
+        claimed[claim] = ("external",)
     for item in selection.addons:
         addon = item.definition
         product = addon.metadata.name
@@ -446,6 +631,13 @@ def validate_selection_images(
             client_resources=client_resources,
         )
         results[product] = result
+    if any(item.definition.spec.databases for item in selection.addons):
+        providers = _database_provider_endpoints(
+            base_resources,
+            base_source=selection.base.reference,
+            sources=sources,
+        )
+        _check_database_bindings(selection, packages, results, providers)
     return results
 
 
