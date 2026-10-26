@@ -15,7 +15,11 @@ dependencies = [
     "InquirerPy>=0.3.4",
     "PyYAML>=6.0",
     "requests>=2.31",
+    "k8s-stack-tooling>=0.13.7",
 ]
+
+[tool.uv.sources]
+k8s-stack-tooling = { path = "../.." }
 
 [project.scripts]
 openrouter-catalog-sync = "openrouter_catalog_sync.main:main"
