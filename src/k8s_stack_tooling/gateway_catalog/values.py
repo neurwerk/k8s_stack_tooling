@@ -12,6 +12,11 @@ import yaml
 from k8s_stack_tooling.gateway_catalog.metadata import MetadataError
 
 
+class _ValuesDumper(yaml.SafeDumper):
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 def merge_values(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     for key, value in incoming.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -36,7 +41,7 @@ def write_values(path: Path, additions: dict[str, Any]) -> None:
         raise MetadataError("output must not be a symlink")
     existing = read_values([path]) if path.exists() else {}
     merge_values(existing, additions)
-    content = yaml.safe_dump(existing, allow_unicode=True, sort_keys=False)
+    content = yaml.dump(existing, Dumper=_ValuesDumper, allow_unicode=True, sort_keys=False)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     descriptor, temporary = tempfile.mkstemp(prefix=".model-metadata-", dir=path.parent)
     try:
