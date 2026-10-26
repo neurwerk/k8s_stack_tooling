@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .display import display_message
+from .grouping import grouping_parts
 from .settings import Scope, Settings, destination, stamp
 
 
@@ -124,47 +125,26 @@ class State:
         """Commit all identities, immutable payloads and the window cursor together."""
         added = 0
         with self.db:
-            known: dict[str, str] = {}
-            candidates: dict[str, set[str]] = {}
-            prior_templates: dict[str, set[str]] = {}
             for record in records:
-                message_digest = self.digest("message", scope.id, record.message)
+                context = (scope.id, record.namespace, record.container, record.failure_type)
+                # Legacy identities lack source context and may already bridge different
+                # bodies. New occurrences use v2; existing outbox bytes/source IDs stay intact.
+                message_digest = self.digest("message-v2", *context, record.message)
                 row = self.db.execute(
                     "SELECT identity FROM messages WHERE scope=? AND digest=?",
                     (scope.id, message_digest),
                 ).fetchone()
-                template_digest = self.digest("template", scope.id, labels[record.message])
-                if template_digest not in candidates:
-                    candidates[template_digest] = {
-                        row[0]
-                        for row in self.db.execute(
-                            "SELECT identity FROM templates WHERE scope=? AND digest=?",
-                            (scope.id, template_digest),
-                        )
-                    }
-                    prior_templates[template_digest] = set(candidates[template_digest])
-                if row:
-                    known[message_digest] = row[0]
-                    candidates[template_digest].add(row[0])
-            for record in records:
-                message_digest = self.digest("message", scope.id, record.message)
-                template_digest = self.digest("template", scope.id, labels[record.message])
-                identity = known.get(message_digest)
-                if identity is None:
-                    prior = prior_templates[template_digest]
-                    # A novel generalization never inherits an old message's identity.
-                    # Ambiguous templates isolate new messages rather than bridging issues.
-                    if len(prior) == 1 and len(candidates[template_digest] | prior) == 1:
-                        identity = next(iter(prior))
-                    elif len(candidates[template_digest]) > 1:
-                        identity = self.digest("isolated", scope.id, message_digest)
-                    else:
-                        identity = self.digest("issue", scope.id, template_digest)
-                    known[message_digest] = identity
+                identity = (
+                    row[0]
+                    if row
+                    else self.digest("issue-v2", *context, *grouping_parts(record.message))
+                )
                 self.db.execute(
                     "INSERT OR IGNORE INTO messages VALUES (?, ?, ?)",
                     (scope.id, message_digest, identity),
                 )
+                # Retain Brain observations for comparison, not as merge authority.
+                template_digest = self.digest("template-v2", *context, labels[record.message])
                 self.db.execute(
                     "INSERT OR IGNORE INTO templates VALUES (?, ?, ?)",
                     (scope.id, template_digest, identity),
