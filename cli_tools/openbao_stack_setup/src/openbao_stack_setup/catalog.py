@@ -226,7 +226,7 @@ class AddonCatalog:
     namespace: str
     secret_store: SecretStoreTarget
     external_secrets: tuple[ExternalSecretTarget, ...]
-    database_release: HelmReleaseTarget
+    database_release: HelmReleaseTarget | None
     consumers: tuple[HelmReleaseTarget, ...]
     workloads: tuple[str, ...]
 

@@ -1054,7 +1054,8 @@ def _refresh_addon(context: str, client: str, addon_id: str) -> None:
     cluster.ensure_secret_store_ready(store.name, store.namespace)
     for target in catalog.external_secrets:
         cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
-    _force_helm_release(cluster, catalog.database_release)
+    if catalog.database_release is not None:
+        _force_helm_release(cluster, catalog.database_release)
     for target in catalog.consumers:
         _force_helm_release(cluster, target)
     try:
