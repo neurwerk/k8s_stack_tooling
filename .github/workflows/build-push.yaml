@@ -199,6 +199,73 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Build and verify shared Python distributions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          # uv 0.12.7 provides this standalone interpreter for pure-Python packaging.
+          uv python install 3.12.14
+          # Pin the isolated build backend and all its dependencies, not runtime dependencies.
+          cat > "$RUNNER_TEMP/build-constraints.txt" <<'EOF'
+          hatchling==1.27.0
+          packaging==26.3
+          pathspec==1.1.1
+          pluggy==1.7.0
+          trove-classifiers==2026.9.21.13
+          EOF
+          for output in python-dist python-dist-repeat; do
+            uv build --python 3.12.14 \
+              --build-constraint "$RUNNER_TEMP/build-constraints.txt" \
+              --out-dir "$RUNNER_TEMP/$output"
+          done
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import tarfile
+          import tomllib
+          import zipfile
+          from email.parser import BytesParser
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          if project["version"] != version or project["name"] != "k8s-stack-tooling":
+              raise SystemExit("Tagged source and Python package version disagree")
+          root = Path(os.environ["RUNNER_TEMP"])
+          dist, repeat = root / "python-dist", root / "python-dist-repeat"
+          wheel = f"k8s_stack_tooling-{version}-py3-none-any.whl"
+          sdist = f"k8s_stack_tooling-{version}.tar.gz"
+          with zipfile.ZipFile(dist / wheel) as archive:
+              metadata = archive.read(f"k8s_stack_tooling-{version}.dist-info/METADATA")
+          with tarfile.open(dist / sdist) as archive:
+              stream = archive.extractfile(f"k8s_stack_tooling-{version}/PKG-INFO")
+              if stream is None:
+                  raise SystemExit("Source distribution has no package metadata")
+              source_metadata = stream.read()
+          for payload in (metadata, source_metadata):
+              parsed = BytesParser().parsebytes(payload)
+              if (parsed["Name"], parsed["Version"], parsed["Requires-Python"]) != (
+                  project["name"], version, project["requires-python"]
+              ):
+                  raise SystemExit("Distribution metadata does not match tagged project")
+          checksums = []
+          for name in sorted((wheel, sdist)):
+              payload = (dist / name).read_bytes()
+              if payload != (repeat / name).read_bytes():
+                  raise SystemExit("Repeated Python distribution builds differ")
+              checksums.append(f"{hashlib.sha256(payload).hexdigest()}  {name}\n")
+          (dist / "SHA256SUMS").write_text("".join(checksums))
+          PY
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -209,6 +276,7 @@ jobs:
             printf '%s\n' "image publication did not return a valid digest" >&2
             exit 1
           fi
+
           version="${RELEASE_TAG#v}"
           image_tag="ghcr.io/neurwerk/k8s-stack-tooling:$version"
           image_digest_ref="ghcr.io/neurwerk/k8s-stack-tooling@$IMAGE_DIGEST"
@@ -250,3 +318,34 @@ jobs:
               --title "K8s Stack Tooling $RELEASE_TAG" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
+
+      # Separate from the notes step: its unchanged-notes early exit must not skip assets.
+      - name: Publish immutable Python release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          dist="$RUNNER_TEMP/python-dist"
+          existing="$(mktemp -d "$RUNNER_TEMP/python-release-existing.XXXXXX")"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets > "$existing/assets.json"
+          for name in "k8s_stack_tooling-$version-py3-none-any.whl" \
+                      "k8s_stack_tooling-$version.tar.gz" SHA256SUMS; do
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' \
+              "$existing/assets.json")"
+            if [[ "$count" == 1 ]]; then
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$name" --dir "$existing"
+              if ! cmp --silent "$dist/$name" "$existing/$name"; then
+                printf 'Existing release asset differs; refusing replacement: %s\n' "$name" >&2
+                exit 1
+              fi
+              printf 'Reusing identical release asset: %s\n' "$name"
+            elif [[ "$count" == 0 ]]; then
+              gh release upload "$RELEASE_TAG" "$dist/$name" --repo "$GITHUB_REPOSITORY"
+            else
+              printf 'Duplicate release asset name: %s\n' "$name" >&2
+              exit 1
+            fi
+          done

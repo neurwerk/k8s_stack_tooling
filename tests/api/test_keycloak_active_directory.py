@@ -55,6 +55,7 @@ def _config(**overrides: Any) -> ActiveDirectoryConfig:
         "bind_dn": "CN=Keycloak,OU=Service Accounts,DC=example,DC=com",
         "bind_credential": "do-not-log-this",
         "email_verified": True,
+        "addon_group_targets": ("/access/neurwerk-librechat-users",),
     }
     values.update(overrides)
     return ActiveDirectoryConfig(**values)
@@ -411,6 +412,33 @@ def test_access_group_verification_reads_existing_group_hierarchy() -> None:
         "briefRepresentation": "true",
         "max": "2",
     }
+
+
+def test_new_addon_mapping_requires_client_approval() -> None:
+    mapping = GroupMapping("CORP_SAMPLE", "/access/neurwerk-sample-users")
+    with pytest.raises(ValueError, match="explicit client approval"):
+        _config(group_names=(), group_mappings=(mapping,), addon_group_targets=())
+    config = _config(
+        group_names=(), group_mappings=(mapping,), addon_group_targets=(mapping.target_parent,)
+    )
+    assert config.group_mappings == (mapping,)
+
+
+def test_approved_addon_mapping_requires_existing_group_before_mutation() -> None:
+    mapping = GroupMapping("CORP_SAMPLE", "/access/neurwerk-sample-users")
+    config = _config(
+        group_names=(), group_mappings=(mapping,), addon_group_targets=(mapping.target_parent,)
+    )
+    session = MagicMock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse(200, {"id": "realm-id"}),
+        FakeResponse(200, []),
+        FakeResponse(200, [{"id": "access-id", "name": "access", "path": "/access"}]),
+        FakeResponse(200, []),
+    ]
+    with pytest.raises(ActiveDirectoryError, match="does not exist"):
+        reconcile_active_directory("https://keycloak.example.com", "platform", session, config)
+    assert all(item.args[0] == "GET" for item in session.request.call_args_list)
 
 
 def test_access_group_verification_never_creates_missing_groups() -> None:

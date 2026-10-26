@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
-from k8s_stack_tooling.dify_model_sync.main import read_values
-from k8s_stack_tooling.gateway_model_metadata import SourceModel
+from k8s_stack_tooling.gateway_catalog.metadata import SourceModel
+from k8s_stack_tooling.gateway_catalog.values import read_values
 from k8s_stack_tooling.model_metadata_refresh import openrouter_metadata
 
 from openrouter_catalog_sync.sync import CatalogSyncError, GeneratedFiles
@@ -37,7 +37,7 @@ def with_metadata(
     observed_at: str | None,
     valid_until: str | None,
 ) -> GeneratedFiles:
-    """Use exact selected binding IDs; no inferred provider aliases or Dify defaults."""
+    """Use exact selected binding IDs without inferred provider aliases or guessed limits."""
     if not observed_at or not valid_until:
         raise CatalogSyncError("metadata requires explicit snapshot and expiry timestamps")
     config = read_values(values)

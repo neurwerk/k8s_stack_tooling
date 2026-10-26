@@ -2,10 +2,10 @@
 #
 # k8s-stack-tooling - Kubernetes operational utilities and maintenance pages.
 #
-# Base image: python:3.12-slim
-FROM python:3.12-slim
+# Shared Python and uv inputs verified for the standalone tooling baseline.
+FROM python:3.12.15-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.7 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.7@sha256:95f2aa1fe59274951cfe9b0cbc7972e879ff1004bc8945d130a32eb0dbd85945 /uv /uvx /bin/
 
 LABEL org.opencontainers.image.source="https://github.com/neurwerk/k8s_stack_tooling"
 LABEL org.opencontainers.image.description="Kubernetes operational utilities and on-demand maintenance pages."

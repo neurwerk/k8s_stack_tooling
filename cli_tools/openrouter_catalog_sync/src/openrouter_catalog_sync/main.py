@@ -11,7 +11,7 @@ from typing import cast
 import yaml
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
-from k8s_stack_tooling.gateway_model_metadata import MetadataError
+from k8s_stack_tooling.gateway_catalog.metadata import MetadataError
 from pydantic import ValidationError
 
 from openrouter_catalog_sync.sync import (

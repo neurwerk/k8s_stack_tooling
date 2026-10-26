@@ -86,6 +86,26 @@ def reconcile() -> None:
         raise ValueError("Reserved OIDC role claim")
     callbacks = browser_urls("KC_REDIRECT_URIS", "KC_REDIRECT_URI")
     origins = browser_urls("KC_WEB_ORIGINS", "KC_WEB_ORIGIN", origin=True)
+    for requested, variable, origin in (
+        (callbacks, "KC_APPROVED_REDIRECT_URIS", False),
+        (origins, "KC_APPROVED_WEB_ORIGINS", True),
+    ):
+        if variable not in os.environ:
+            raise ValueError("Missing approved OIDC browser URLs")
+        approved = browser_urls(variable, variable, origin=origin)
+        if not set(requested) <= set(approved):
+            raise ValueError("Unapproved OIDC browser URL")
+    approved_gateway_roles = json.loads(os.environ["KC_APPROVED_GATEWAY_ROLE_SCOPE"])
+    if (
+        not isinstance(approved_gateway_roles, list)
+        or any(
+            not isinstance(name, str) or not re.fullmatch(r"[a-z][A-Za-z0-9:._/-]{0,255}", name)
+            for name in approved_gateway_roles
+        )
+        or len(set(approved_gateway_roles)) != len(approved_gateway_roles)
+        or not set(gateway_roles) <= set(approved_gateway_roles)
+    ):
+        raise ValueError("Invalid or unapproved OIDC gateway-role scope")
     logout_uris = origins
     if "KC_POST_LOGOUT_REDIRECT_URIS" in os.environ:
         if "KC_APPROVED_POST_LOGOUT_REDIRECT_URIS" not in os.environ:

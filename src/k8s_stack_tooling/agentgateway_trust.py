@@ -23,8 +23,10 @@ from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives.serialization import Encoding
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from k8s_stack_tooling.gateway_catalog.document import Digest, Document
 
 MAX_BYTES = 1024 * 1024
 MAX_VERSIONS = 64
@@ -35,16 +37,11 @@ FLOOR_ENV = "STUDIO_GATEWAY_TRUST_REQUIRED_VERSION"
 OWNER_LABEL = "app.kubernetes.io/managed-by"
 OWNER = "agentgateway-trust-publisher"
 REQUEST_TIMEOUT = (5, 15)
-Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Name = Annotated[str, Field(min_length=1, max_length=253, pattern=r"^[a-z0-9][a-z0-9.-]*$")]
 
 
 class PublicationError(ValueError):
     """An actionable failure whose message contains no input certificate or API body."""
-
-
-class Document(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class RootSource(Document):

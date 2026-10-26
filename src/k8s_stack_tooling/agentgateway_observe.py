@@ -23,15 +23,14 @@ from OpenSSL import SSL, crypto
 from pydantic import Field, model_validator
 
 from k8s_stack_tooling.agentgateway_trust import (
-    Digest,
-    Document,
     Name,
     Publication,
     decode_document,
     parse_root,
     validate_publication,
 )
-from k8s_stack_tooling.gateway_catalog import MAX_ENDPOINTS, GatewayCatalog
+from k8s_stack_tooling.gateway_catalog.catalog import MAX_ENDPOINTS, GatewayCatalog
+from k8s_stack_tooling.gateway_catalog.document import Digest, Document
 
 NAMESPACE = "infra-agentgateway"
 GATEWAY = "infra-agentgateway-gateway"

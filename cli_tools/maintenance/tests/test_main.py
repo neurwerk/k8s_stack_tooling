@@ -10,6 +10,7 @@ import pytest
 from maintenance import main as cli
 
 IMAGE = "ghcr.io/neurwerk/k8s-stack-tooling:0.6.2@sha256:" + "a" * 64
+SCOPES = ("global", "studio", "example-addon")
 
 
 def resource(kind, name, spec=None):
@@ -36,9 +37,9 @@ class Cluster:
             "Deployment", "maintenance", {"template": {"spec": {"containers": [{"image": IMAGE}]}}}
         )
         self.routes = {}
-        for scope in cli.SCOPES:
+        for scope in SCOPES:
             names = (
-                [f"{s}.example.com" for s in cli.SCOPES[1:]]
+                [f"{s}.example.com" for s in SCOPES[1:]]
                 if scope == "global"
                 else [f"{scope}.example.com"]
             )
@@ -165,6 +166,15 @@ def test_on_is_idempotent_and_always_locked(cluster):
     assert sum(obj["metadata"]["name"] == cli.LOCK for obj in creates) == 2
     assert sum(obj["kind"] == "Deployment" for obj in creates) == 1
     assert sum(obj["kind"] == "IngressRoute" for obj in creates) == 1
+    assert ("ConfigMap", cli.LOCK) not in cluster.objects
+
+
+def test_client_approved_scope_and_unapproved_scope(cluster):
+    assert invoke("on", "example-addon") == 0
+    assert ("IngressRoute", "maintenance-example-addon") in cluster.objects
+    assert invoke("off", "example-addon") == 0
+    assert invoke("on", "unselected") == 1
+    assert ("IngressRoute", "maintenance-unselected") not in cluster.objects
     assert ("ConfigMap", cli.LOCK) not in cluster.objects
 
 

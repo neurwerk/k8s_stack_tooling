@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
@@ -13,15 +14,33 @@ from package_checker.config import PackageConfig
 from package_checker.github import GitHubApiError
 from package_checker.models import ContainerMetadata, PackageMetadata, PackageVersion
 
+PACKAGES = (PackageConfig("k8s-stack-example", "neurwerk/k8s_stack_example"),)
+
+
+@pytest.fixture
+def inventory(tmp_path):
+    path = tmp_path / "packages.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "package_name": "k8s-stack-example",
+                    "repository": "neurwerk/k8s_stack_example",
+                }
+            ]
+        )
+    )
+    return str(path)
+
 
 def test_fetch_reports_keeps_package_data_when_workflow_check_fails() -> None:
     client = Mock()
     client.get_active_workflow_run.side_effect = GitHubApiError("Actions unavailable")
     client.list_package_versions.side_effect = package_versions
 
-    reports = main.fetch_reports(client)
+    reports = main.fetch_reports(client, PACKAGES)
 
-    assert len(reports) == len(main.PACKAGES)
+    assert len(reports) == len(PACKAGES)
     assert all(report.build_status == "unknown" for report in reports)
 
 
@@ -30,7 +49,7 @@ def test_fetch_reports_records_package_errors() -> None:
     client.get_active_workflow_run.return_value = None
     client.list_package_versions.side_effect = GitHubApiError("Packages unavailable")
 
-    reports = main.fetch_reports(client)
+    reports = main.fetch_reports(client, PACKAGES)
 
     assert all(report.error == "Packages unavailable" for report in reports)
 
@@ -42,14 +61,14 @@ def test_fetch_reports_retains_active_build_for_a_new_package() -> None:
     )
     client.list_package_versions.side_effect = GitHubApiError("Package not created yet")
 
-    reports = main.fetch_reports(client)
+    reports = main.fetch_reports(client, PACKAGES)
 
     assert all(report.build_status == "in_progress" for report in reports)
     assert all(report.build_url == "https://example.test/build" for report in reports)
 
 
 def test_main_outputs_json(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], inventory
 ) -> None:
     settings = Mock(github_pat=SecretStr("test-token"))
     client = Mock()
@@ -60,20 +79,22 @@ def test_main_outputs_json(
     monkeypatch.setattr(main, "Settings", Mock(return_value=settings))
     monkeypatch.setattr(main, "GitHubClient", Mock(return_value=client))
 
-    main.main(["--json"])
+    main.main(["--inventory", inventory, "--json"])
 
-    assert '"package": "k8s-stack-studio-api"' in capsys.readouterr().out
+    assert '"package": "k8s-stack-example"' in capsys.readouterr().out
+    client.list_package_versions.assert_called_once_with("k8s-stack-example")
+    client.get_active_workflow_run.assert_called_once_with("neurwerk/k8s_stack_example")
 
 
-def test_main_exits_for_invalid_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_exits_for_invalid_settings(monkeypatch: pytest.MonkeyPatch, inventory) -> None:
     monkeypatch.setattr(main, "Settings", Mock(side_effect=invalid_settings_error()))
 
     with pytest.raises(SystemExit, match="2"):
-        main.main([])
+        main.main(["--inventory", inventory])
 
 
 def test_main_reports_missing_plain_pii_version_and_exits_nonzero(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], inventory
 ) -> None:
     settings = Mock(github_pat=SecretStr("test-token"))
     client = Mock()
@@ -87,16 +108,18 @@ def test_main_reports_missing_plain_pii_version_and_exits_nonzero(
     monkeypatch.setattr(main, "GitHubClient", Mock(return_value=client))
     monkeypatch.setattr(
         main,
-        "PACKAGES",
-        (
-            PackageConfig(
-                "k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", stable_tags_only=True
-            ),
+        "load_inventory",
+        Mock(
+            return_value=(
+                PackageConfig(
+                    "k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", stable_tags_only=True
+                ),
+            )
         ),
     )
 
     with pytest.raises(SystemExit, match="1"):
-        main.main(["--json"])
+        main.main(["--inventory", inventory, "--json"])
 
     output = capsys.readouterr().out
     assert '"version": null' in output

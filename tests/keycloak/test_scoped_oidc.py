@@ -74,6 +74,11 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                 "KC_ROLE_CLAIM": "forgejo_roles",
                 "KC_REDIRECT_URI": "https://forgejo.example.com/user/oauth2/keycloak/callback",
                 "KC_WEB_ORIGIN": "https://forgejo.example.com",
+                "KC_APPROVED_REDIRECT_URIS": '["https://forgejo.example.com/user/oauth2/keycloak/callback"]',
+                "KC_APPROVED_WEB_ORIGINS": '["https://forgejo.example.com"]',
+                "KC_APPROVED_GATEWAY_ROLE_SCOPE": json.dumps(
+                    [role["name"] for role in self.gateway_roles]
+                ),
             },
         )
         env.start()
@@ -515,6 +520,23 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Audience mapper readback mismatch"):
                 self.reconcile()
 
+    def test_unapproved_browser_urls_and_permissions_never_contact_keycloak(self):
+        for change in (
+            {"KC_REDIRECT_URIS": '["https://other.example.com/callback"]'},
+            {"KC_WEB_ORIGINS": '["https://other.example.com"]'},
+            {"KC_APPROVED_REDIRECT_URIS": "[]"},
+            {"KC_APPROVED_WEB_ORIGINS": "[]"},
+            {
+                "KC_CLIENT_AUDIENCES": '["agentgateway"]',
+                "KC_GATEWAY_ROLE_SCOPE": '["model:unapproved:invoke"]',
+            },
+        ):
+            with self.subTest(change=change), patch.dict(os.environ, change):
+                with self.assertRaises(ValueError):
+                    self.reconcile()
+                self.helpers.get_admin_token.assert_not_called()
+                self.assertEqual(self.calls, [])
+
     def test_exact_browser_lists_accept_set_order_and_enable_only_after_readback(self):
         callbacks = ["https://app.example.com/callback", "https://second.example.com/callback"]
         origins = ["https://app.example.com", "https://second.example.com"]
@@ -527,6 +549,8 @@ class ForgejoOIDCRuntimeTests(unittest.TestCase):
                     {
                         "KC_REDIRECT_URIS": json.dumps(callbacks),
                         "KC_WEB_ORIGINS": json.dumps(origins),
+                        "KC_APPROVED_REDIRECT_URIS": json.dumps(callbacks),
+                        "KC_APPROVED_WEB_ORIGINS": json.dumps(origins),
                         "KC_REFRESH_TOKEN_ROTATION_ENABLED": "true",
                     },
                 ),

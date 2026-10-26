@@ -6,7 +6,7 @@ set -u
 
 usage() {
   cat <<'HELP'
-Usage: bash connection_test.sh [--no-color] [--wan-only]
+Usage: bash connection_test.sh [--no-color] [--wan-only] [--https-targets FILE]
 
 Run on the target server to test its network path.
 HTTPS tests use HEAD, verify TLS, bypass proxies, and follow redirects.
@@ -23,9 +23,12 @@ Environment overrides:
 
 Site-specific targets are optional and have no defaults. Host lists are
 space-separated. Authoritative DNS checks need both a domain and nameservers.
+Optional product HTTPS checks come only from --https-targets FILE: one hostname
+and optional /path per line. Blank lines and # comments are accepted; no shell
+code is evaluated. The file is limited to 64 KiB and 1000 targets.
 
 Example:
-  NTP_SERVER=dc.example.org AD_SERVER=dc.example.org bash connection_test.sh
+  bash connection_test.sh --https-targets /path/to/client/config/https-targets.txt
 
 Tools: curl; dig for DNS; nc for TCP; python3 for optional NTP.
 Exit codes: 0 = no connection failures; 1 = failures; 2 = invocation/tool error.
@@ -37,22 +40,62 @@ HELP
 parse_arguments() {
   COLOR=auto
   WAN_ONLY=0
+  HTTPS_TARGET_FILE=''
 
-  local argument
-  for argument in "$@"; do
-    case "$argument" in
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
       --no-color) COLOR=no ;;
       --wan-only) WAN_ONLY=1 ;;
+      --https-targets)
+        if [[ "$#" -lt 2 || -z "$2" ]]; then
+          printf '%s\n' '--https-targets requires a file.' >&2
+          exit 2
+        fi
+        HTTPS_TARGET_FILE=$2
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
         ;;
       *)
-        printf 'Unknown argument: %s\n' "$argument" >&2
+        printf 'Unknown argument: %s\n' "$1" >&2
         usage
         exit 2
         ;;
     esac
+    shift
+  done
+}
+
+load_https_targets() {
+  HTTPS_HOSTS=()
+  HTTPS_PATHS=()
+  [[ -n "$HTTPS_TARGET_FILE" ]] || return 0
+  if [[ ! -f "$HTTPS_TARGET_FILE" || ! -r "$HTTPS_TARGET_FILE" ]] ||
+      [[ $(wc -c < "$HTTPS_TARGET_FILE") -gt 65536 ]]; then
+    printf 'HTTPS target file must be readable and at most 64 KiB.\n' >&2
+    exit 2
+  fi
+  local host path extra
+  while read -r host path extra || [[ -n "$host" ]]; do
+    [[ -z "$host" || "$host" == \#* ]] && continue
+    path=${path:-/}
+    if [[ ! "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ||
+          "$path" != /* || -n "$extra" || ${#HTTPS_HOSTS[@]} -ge 1000 ]]; then
+      printf 'Invalid HTTPS target; expected hostname and optional /path.\n' >&2
+      exit 2
+    fi
+    HTTPS_HOSTS+=("$host")
+    HTTPS_PATHS+=("$path")
+  done < "$HTTPS_TARGET_FILE"
+}
+
+check_selected_https() {
+  section 'Client-selected application HTTPS targets'
+  local index
+  for ((index=0; index<${#HTTPS_HOSTS[@]}; index++)); do
+    check_https "${HTTPS_HOSTS[index]}" "${HTTPS_PATHS[index]}"
   done
 }
 
@@ -368,16 +411,7 @@ check_public_services() {
   check_https acme-staging-v02.api.letsencrypt.org /directory
   check_https route53.amazonaws.com
 
-  section 'Application APIs — exact hostnames'
-  check_https openrouter.ai /api/v1/models
-  check_https api.search.brave.com
-  check_https mcp.context7.com /mcp
-
-  section 'Optional Dify / Python package services'
-  check_https marketplace.dify.ai
-  check_https updates.dify.ai
-  check_https pypi.org /simple/
-  check_https files.pythonhosted.org
+  check_selected_https
 
   section 'SMTP — implicit TLS, no login or email sent'
   check_smtp
@@ -453,6 +487,7 @@ print_summary() {
 
 main() {
   parse_arguments "$@"
+  load_https_targets
   configure
   initialize_output
 
@@ -471,4 +506,6 @@ main() {
   [[ "$FAIL_COUNT" == 0 ]]
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

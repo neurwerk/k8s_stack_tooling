@@ -14,6 +14,7 @@ from k8s_stack_tooling.addons import (
     base_revision,
     check,
     check_client,
+    load_manifest,
 )
 
 
@@ -22,7 +23,7 @@ def package(tmp_path: Path):
     root = tmp_path / "addon"
     (root / "release").mkdir(parents=True)
     manifest = {
-        "apiVersion": "addons.neurwerk.com/v1alpha1",
+        "apiVersion": "addons.neurwerk.com/v1alpha2",
         "kind": "AddonRelease",
         "metadata": {"name": "example"},
         "spec": {
@@ -31,9 +32,9 @@ def package(tmp_path: Path):
             "sourceName": "example",
             "configurationKey": "example",
             "prerequisites": {
-                "base": "0.3.26",
-                "tooling": "0.9.0",
-                "stackSetup": "0.3.0",
+                "base": "0.4.0",
+                "tooling": "0.14.0",
+                "stackSetup": "0.7.0",
                 "baseCharts": ["charts/postgres/addon"],
             },
             "packages": [
@@ -66,8 +67,49 @@ def package(tmp_path: Path):
         (root / "release/manifest.yaml").write_text(yaml.safe_dump(manifest))
 
     save()
-    with patch("k8s_stack_tooling.addons.render", side_effect=lambda path: documents[path.name]):
+    with patch(
+        "k8s_stack_tooling.addons.validation.render",
+        side_effect=lambda path, **kw: documents[path.name],
+    ):
         yield root, manifest, documents, save
+
+
+def save_selection(client):
+    (client / "config/addons.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "addons.neurwerk.com/v1alpha2",
+                "kind": "AddonSelection",
+                "baseSourceRef": {
+                    "kind": "GitRepository",
+                    "namespace": "flux-system",
+                    "name": "k8s-stack",
+                },
+                "addons": [
+                    {
+                        "id": "example",
+                        "sourceRef": {
+                            "kind": "GitRepository",
+                            "namespace": "flux-system",
+                            "name": "example",
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+
+def typed_resources(resources):
+    for resource in resources:
+        resource.setdefault(
+            "apiVersion",
+            {
+                "GitRepository": "source.toolkit.fluxcd.io/v1",
+                "Kustomization": "kustomize.toolkit.fluxcd.io/v1",
+            }.get(resource["kind"], "v1"),
+        )
+    return resources
 
 
 def test_valid_package_and_staged_release_gate(package):
@@ -78,6 +120,36 @@ def test_valid_package_and_staged_release_gate(package):
     check(root)
     with pytest.raises(ContractError, match="staged"):
         check(root, installable=True)
+
+
+@pytest.mark.parametrize(
+    "field,old", [("base", "0.3.29"), ("tooling", "0.13.8"), ("stackSetup", "0.6.6")]
+)
+def test_old_baseline_is_rejected_at_validation_before_rendering(package, field, old):
+    root, manifest, _, save = package
+    manifest["spec"]["prerequisites"][field] = old
+    save()
+    load_manifest(root / "release/manifest.yaml")  # Parsing retains generic version syntax.
+    with patch(
+        "k8s_stack_tooling.addons.validation.render",
+        side_effect=AssertionError("must reject before rendering"),
+    ):
+        with pytest.raises(ContractError, match="supported standalone baseline"):
+            check(root)
+
+
+def test_installable_requires_exact_installed_sdk_not_a_future_promise(package):
+    root, manifest, _, save = package
+    with patch("k8s_stack_tooling.addons.validation.distribution_version", return_value="0.14.0"):
+        check(root, installable=True)
+        manifest["spec"]["prerequisites"]["tooling"] = "99.0.0"
+        save()
+        with patch(
+            "k8s_stack_tooling.addons.validation.render",
+            side_effect=AssertionError("must reject before rendering"),
+        ):
+            with pytest.raises(ContractError, match="installed SDK version"):
+                check(root, installable=True)
 
 
 @pytest.mark.parametrize("path", ["../outside", "/outside"])
@@ -102,7 +174,7 @@ def test_unknown_contract_field(package):
     root, manifest, _, save = package
     manifest["spec"]["unexpected"] = True
     save()
-    with pytest.raises(ContractError, match="invalid addon release contract"):
+    with pytest.raises(ContractError, match="invalid add-on definition"):
         check(root)
 
 
@@ -257,7 +329,7 @@ def test_invalid_base_chart_version_prerequisites(package, versions):
     root, manifest, _, save = package
     manifest["spec"]["prerequisites"]["baseChartVersions"] = versions
     save()
-    with pytest.raises(ContractError, match="invalid addon release contract"):
+    with pytest.raises(ContractError, match="invalid add-on definition"):
         check(root)
 
 
@@ -269,7 +341,7 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
     chart_path = "charts/postgres/addon"
     base = tmp_path / "base"
     (base / "release").mkdir(parents=True)
-    (base / "release/manifest.yaml").write_text("spec: {version: 0.3.26}\n")
+    (base / "release/manifest.yaml").write_text("spec: {version: 0.4.0}\n")
     chart = base / chart_path / "Chart.yaml"
     chart.parent.mkdir(parents=True)
     chart.write_text("version: 0.1.3\n")
@@ -297,8 +369,8 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
 
     git(base, "init", "-b", "reviewed")
     commit(base)
-    git(base, "tag", "v0.3.26")
-    check(root, base=base)  # Legacy prerequisites still accept an unversioned chart.
+    git(base, "tag", "v0.4.0")
+    check(root, base=base)
     manifest["spec"]["prerequisites"]["baseChartVersions"] = {chart_path: "0.1.4"}
     save()
     with pytest.raises(ContractError, match="Base chart version"):
@@ -311,22 +383,26 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
 
     client = tmp_path / "client"
     (client / "config").mkdir(parents=True)
-    (client / "config/client.yaml").write_text("example: {enabled: true, hostname: example.test}\n")
+    save_selection(client)
     ref = {
-        "tag": {"tag": "v0.3.26"},
+        "tag": {"tag": "v0.4.0"},
         "commit": {"commit": reviewed},
         "branch": {"branch": "reviewed"},
         "unresolved": {"commit": "a" * 40},
         "missing-base": {"commit": reviewed},
     }[selection]
     resources: list[dict] = [
-        {"kind": "GitRepository", "metadata": {"name": name}, "spec": {"ref": source_ref}}
+        {
+            "kind": "GitRepository",
+            "metadata": {"name": name, "namespace": "flux-system"},
+            "spec": {"ref": source_ref},
+        }
         for name, source_ref in (("example", {"commit": addon_revision}), ("k8s-stack", ref))
     ]
     resources += [
         {
             "kind": "Kustomization",
-            "metadata": {"name": package["name"]},
+            "metadata": {"name": package["name"], "namespace": "flux-system"},
             "spec": {
                 "path": package["path"],
                 "sourceRef": {"name": "example"},
@@ -337,8 +413,10 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
         for package in manifest["spec"]["packages"]
     ]
     with patch(
-        "k8s_stack_tooling.addons.render",
-        side_effect=lambda path: resources if path.name == "prod-eu-1" else documents[path.name],
+        "k8s_stack_tooling.addons.validation.render",
+        side_effect=lambda path, **kw: (
+            typed_resources(resources) if path.name == "prod-eu-1" else documents[path.name]
+        ),
     ):
         if selection in ("commit", "branch"):
             check_client([(root, addon)], client, base=base, installable=True)
@@ -369,17 +447,17 @@ def test_client_requires_dependency_and_single_owner(package, tmp_path):
     addon = check(root)
     client = tmp_path / "client"
     (client / "config").mkdir(parents=True)
-    (client / "config/client.yaml").write_text("example: {enabled: true, hostname: example.test}\n")
+    save_selection(client)
     source = {
         "kind": "GitRepository",
-        "metadata": {"name": "example"},
+        "metadata": {"name": "example", "namespace": "flux-system"},
         "spec": {"ref": {"commit": "a" * 40}},
     }
 
     def stage(name, dependency):
         return {
             "kind": "Kustomization",
-            "metadata": {"name": name},
+            "metadata": {"name": name, "namespace": "flux-system"},
             "spec": {
                 "path": f"./releases/{name}",
                 "sourceRef": {"name": "example"},
@@ -390,34 +468,38 @@ def test_client_requires_dependency_and_single_owner(package, tmp_path):
 
     resources: list[dict] = [source, stage("secrets", []), stage("app", ["secrets"])]
 
-    def rendered(path):
+    def rendered(path, **kwargs):
         if path.name == "prod-eu-1":
-            return resources
+            return typed_resources(resources)
         if path.parent == root / "releases":
             return documents[path.name]
         return []
 
-    with patch("k8s_stack_tooling.addons.render", side_effect=rendered):
-        check_client([(root, addon)], client)
+    with (
+        patch("k8s_stack_tooling.addons.validation.render", side_effect=rendered),
+        patch("k8s_stack_tooling.addons.validation.check_base"),
+        patch("k8s_stack_tooling.addons.validation.base_revision", return_value="a" * 40),
+    ):
+        check_client([(root, addon)], client, base=tmp_path)
         authenticated = addon.model_copy(deep=True)
         authenticated.spec.authentication = Authentication.model_validate(authentication())
-        with pytest.raises(ContractError, match="duplicate authentication client IDs"):
-            check_client([(root, authenticated), (root, authenticated)], client)
+        with pytest.raises(ContractError, match="complete selection"):
+            check_client([(root, authenticated), (root, authenticated)], client, base=tmp_path)
         resources[-1]["spec"]["dependsOn"] = []
         with pytest.raises(ContractError, match="readiness dependency"):
-            check_client([(root, addon)], client)
+            check_client([(root, addon)], client, base=tmp_path)
         resources[-1]["spec"]["dependsOn"] = [{"name": "secrets"}]
-        with pytest.raises(ContractError, match="overlapping ownership"):
-            check_client([(root, addon), (root, addon)], client)
+        with pytest.raises(ContractError, match="complete selection"):
+            check_client([(root, addon), (root, addon)], client, base=tmp_path)
         resources.append(
             {
                 "kind": "GitRepository",
-                "metadata": {"name": "k8s-stack"},
+                "metadata": {"name": "k8s-stack", "namespace": "flux-system"},
                 "spec": {"ref": {"tag": "v0.1.0"}},
             }
         )
         with pytest.raises(ContractError, match="client Base release"):
-            check_client([(root, addon)], client)
+            check_client([(root, addon)], client, base=tmp_path)
 
 
 def authentication():
@@ -448,7 +530,7 @@ def test_reserved_authentication_client(package, client_id):
     root, manifest, _, save = package
     manifest["spec"]["authentication"] = authentication() | {"clientId": client_id}
     save()
-    with pytest.raises(ContractError, match="invalid addon release contract"):
+    with pytest.raises(ContractError, match="invalid add-on definition"):
         check(root)
 
 
@@ -488,7 +570,7 @@ def test_invalid_authentication_declaration(package, change):
     root, manifest, _, save = package
     manifest["spec"]["authentication"] = authentication() | change
     save()
-    with pytest.raises(ContractError, match="invalid addon release contract"):
+    with pytest.raises(ContractError, match="invalid add-on definition"):
         check(root)
 
 

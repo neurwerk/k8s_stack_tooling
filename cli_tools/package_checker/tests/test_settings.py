@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from package_checker.config import PACKAGES, PackageConfig, Settings
+from package_checker.config import PackageConfig, Settings, load_inventory
 
 
 def test_settings_loads_token_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,25 +23,10 @@ def test_settings_rejects_placeholder_token(monkeypatch: pytest.MonkeyPatch) -> 
         Settings(_env_file=None)
 
 
-def test_available_packages_are_registered() -> None:
-    assert [(package.package_name, package.repository) for package in PACKAGES] == [
-        ("k8s-stack-studio-api", "neurwerk/k8s_stack_studio"),
-        ("k8s-stack-studio-web", "neurwerk/k8s_stack_studio"),
-        ("k8s-stack-agentgateway-extproc", "neurwerk/k8s_stack_agentgateway_extproc"),
-        ("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine"),
-        (
-            "k8s-stack-keycloak-api-key-bridge",
-            "neurwerk/k8s_stack_keycloak_api_key_bridge",
-        ),
-        ("k8s-stack-keycloak-theme", "neurwerk/k8s_stack_keycloak_theme"),
-        (
-            "k8s-stack-opensearch-reporting-cli",
-            "neurwerk/k8s_stack_opensearch_reporting_cli",
-        ),
-        ("k8s-stack-addon-dify-api", "neurwerk/k8s_stack_addon_dify"),
-        ("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
-        ("k8s-stack-addon-dify-web", "neurwerk/k8s_stack_addon_dify"),
-    ]
+def test_empty_inventory_selects_no_packages(tmp_path) -> None:
+    path = tmp_path / "packages.json"
+    path.write_text("[]")
+    assert load_inventory(path) == ()
 
 
 @pytest.mark.parametrize(

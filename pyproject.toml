@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.13.8"
+version = "0.14.0"
 description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
@@ -13,9 +13,10 @@ license-files = ["LICENSE", "THIRD_PARTY.md", "src/k8s_stack_tooling/maintenance
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31",
-    "kubernetes>=36.0.2",
+    "kubernetes>=36.0.3,<37",
     "gunicorn>=26.2",
     "pydantic-settings>=2.10",
+    "pydantic>=2.10,<3",
     "defusedxml>=0.7.1",
     "ldap3>=2.9,<3",
     "cryptography>=46",
@@ -39,10 +40,12 @@ opensearch-glitchtip-adapter = "k8s_stack_tooling.opensearch_glitchtip.main:main
 ldap-directory-worker = "k8s_stack_tooling.ldap_directory:main"
 agentgateway-trust-publish = "k8s_stack_tooling.agentgateway_trust:main"
 addon-check = "k8s_stack_tooling.addons:main"
+addon-acquire = "k8s_stack_tooling.addons.acquisition:main"
+addon-project = "k8s_stack_tooling.addons.sources:projection_main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 stage-documentdb-provisioner = "k8s_stack_tooling.postgres.documentdb:main"
 provision-glitchtip = "k8s_stack_tooling.glitchtip.provision:main"
-dify-model-sync = "k8s_stack_tooling.dify_model_sync.main:main"
+gateway-model-metadata = "k8s_stack_tooling.gateway_model_metadata_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]

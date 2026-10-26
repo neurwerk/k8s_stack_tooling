@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from keycloak_users import main
+from keycloak_users.policy import OnboardingPolicy, load_policy
 from keycloak_users.profile import SafeError
 
 
@@ -14,7 +15,7 @@ def answers(monkeypatch, values):
 
 @pytest.fixture
 def normal_groups(realm):
-    for index, path in enumerate(main.NORMAL_USER_GROUPS):
+    for index, path in enumerate(("/access/example-users",)):
         group_id = f"normal-{index}"
         realm.groups[group_id] = {"id": group_id, "name": path.split("/")[-1], "path": path}
         realm.children["root"].append(group_id)
@@ -222,27 +223,39 @@ def test_create_without_email_retains_required_actions(monkeypatch, realm, norma
     assert realm.users[0]["requiredActions"] == ["UPDATE_PASSWORD"]
 
 
-def test_normal_preset_selects_exact_groups_and_disables_dify(monkeypatch, realm, normal_groups):
+def test_client_preset_selects_groups_without_product_restrictions(
+    monkeypatch, realm, normal_groups, tmp_path
+):
+    path = tmp_path / "onboarding.json"
+    path.write_text('{"default_groups":["/access/example-users"],"disabled_groups":[]}')
+    policy = load_policy(path)
+
     def checkbox(label, choices):
         assert label == "User groups:"
         checked = [choice for choice in choices if choice.checked]
-        assert {choice.value for choice in checked} == {f"normal-{i}" for i in range(4)}
+        assert {choice.value for choice in checked} == {"normal-0"}
         assert all(": /access/" in choice.title for choice in choices)
-        assert next(choice for choice in choices if choice.value == "dify").disabled
-        return Mock(unsafe_ask=lambda: [choice.value for choice in checked])
+        assert not next(choice for choice in choices if choice.value == "dify").disabled
+        return Mock(unsafe_ask=lambda: ["normal-0", "dify"])
 
     monkeypatch.setattr(main.questionary, "checkbox", checkbox)
-    assert len(main.select_groups(realm.accounts.catalog(), normal_user=True)) == 4
+    assert main.select_groups(realm.accounts.catalog(), normal_user=True, policy=policy) == [
+        "normal-0",
+        "dify",
+    ]
     assert not realm.writes
 
 
 def test_missing_normal_group_fails_without_creating_user(monkeypatch, realm):
     identity = Mock()
     monkeypatch.setattr(main, "identity", identity)
-    with pytest.raises(
-        SafeError, match=r"Required default group missing.*neurwerk-librechat-users"
-    ):
-        main.workflow(realm.accounts, "create", realm.accounts.catalog())
+    with pytest.raises(SafeError, match=r"Required default group missing.*example-users"):
+        main.workflow(
+            realm.accounts,
+            "create",
+            realm.accounts.catalog(),
+            OnboardingPolicy(default_groups=("/access/example-users",)),
+        )
     identity.assert_not_called()
     assert not realm.writes
 
@@ -313,7 +326,11 @@ def test_resume_has_no_group_defaults_and_rejects_disabled_selection(
 
     monkeypatch.setattr(main.questionary, "checkbox", checkbox)
     with pytest.raises(SafeError, match="disabled group"):
-        main.select_groups(realm.accounts.catalog(), normal_user=False)
+        main.select_groups(
+            realm.accounts.catalog(),
+            normal_user=False,
+            policy=OnboardingPolicy(disabled_groups=("/access/neurwerk-dify-users",)),
+        )
     assert not realm.writes
 
 
