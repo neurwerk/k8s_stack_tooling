@@ -12,10 +12,9 @@ from urllib.parse import urlsplit
 import requests
 from pydantic import Field, model_validator
 
-from k8s_stack_tooling.agentgateway_trust import Document
-from k8s_stack_tooling.dify_model_sync.projection import select_models
-from k8s_stack_tooling.gateway_catalog import GatewayCatalog
-from k8s_stack_tooling.gateway_model_metadata import (
+from k8s_stack_tooling.gateway_catalog.catalog import GatewayCatalog
+from k8s_stack_tooling.gateway_catalog.document import Document
+from k8s_stack_tooling.gateway_catalog.metadata import (
     MAX_TOKEN_LIMIT,
     BindingID,
     Capabilities,
@@ -270,8 +269,27 @@ def exact_upstreams(values: dict[str, Any]) -> dict[tuple[str, str], str]:
     return result
 
 
-def eligible_pairs(catalog: GatewayCatalog) -> set[tuple[str, str]]:
-    return {(model["binding_id"], model["public_id"]) for model in select_models(catalog)["models"]}
+def source_pairs(catalog: GatewayCatalog, sources: RefreshSources) -> set[tuple[str, str]]:
+    """Refresh explicit source bindings, independent of consumer profiles or billing modes."""
+    requested = set(sources.bindings) | {model.binding_id for model in sources.reviewed_models}
+    entries = [
+        entry
+        for group in catalog.groups()
+        for entry in group
+        if any(route.entry_mode == "api" for route in entry.routes)
+    ]
+    if not requested <= {entry.id for entry in entries}:
+        raise MetadataError("metadata source references an unknown API binding")
+    return {
+        (entry.id, dest.id)
+        for entry in entries
+        if entry.id in requested
+        for dest in entry.destinations
+        if dest.kind == "model"
+        and any(
+            route.entry_mode == "api" and route.id in dest.endpoint_ids for route in entry.routes
+        )
+    }
 
 
 def refresh(
@@ -285,7 +303,7 @@ def refresh(
     now = now or datetime.now(UTC)
     if not 1 <= valid_hours <= 720:
         raise MetadataError("freshness must be between 1 and 720 hours")
-    pairs = eligible_pairs(catalog)
+    pairs = source_pairs(catalog, sources)
     mappings = exact_upstreams(values)
     reviewed = {(m.binding_id, m.public_id): m for m in sources.reviewed_models}
     if not set(reviewed) <= pairs:
@@ -417,7 +435,7 @@ def refresh(
             counts["skipped_" + reason] += 1
             continue
         if model.limits.context_tokens is None or model.limits.max_output_tokens is None:
-            # Preserve truthful unknowns centrally; Dify must skip this model, not guess defaults.
+            # Keep unknowns explicit; consumers decide readiness without guessed limits.
             output.append(model.model_dump())
             counts["refreshed"] += 1
             counts["skipped_missing_limits"] += 1

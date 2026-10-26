@@ -3,6 +3,7 @@
 import argparse
 import re
 import sys
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -10,6 +11,7 @@ import questionary
 
 from keycloak_users.auth import BrowserSession, Json
 from keycloak_users.client import Accounts, Catalog, Progress
+from keycloak_users.policy import OnboardingPolicy, load_policy
 from keycloak_users.profile import Profile, SafeError, load_profiles, save_profile, text
 
 ACTION_LABELS = {
@@ -17,12 +19,7 @@ ACTION_LABELS = {
     "UPDATE_PASSWORD": "Set password",
     "CONFIGURE_TOTP": "Configure authenticator (TOTP)",
 }
-NORMAL_USER_GROUPS = {
-    "/access/neurwerk-librechat-users": "LibreChat",
-    "/access/neurwerk-mcp-all-users": "MCP",
-    "/access/neurwerk-llm-all-users": "LLM",
-    "/access/neurwerk-studio-users": "Studio",
-}
+EMPTY_POLICY = OnboardingPolicy()
 
 
 def say(message: str) -> None:
@@ -60,10 +57,10 @@ def checklist(label: str, values: dict[str, str], defaults: tuple[str, ...] = ()
     return cast(list[str], answer(questionary.checkbox(f"{label.rstrip(': ')}:", choices=choices)))
 
 
-def normal_group_ids(catalog: Catalog) -> list[str]:
+def normal_group_ids(catalog: Catalog, policy: OnboardingPolicy) -> list[str]:
     """Resolve the exact preset before collecting account details or making writes."""
     groups: list[str] = []
-    for path in NORMAL_USER_GROUPS:
+    for path in policy.default_groups:
         matches = [group_id for group_id, candidate in catalog.groups.items() if candidate == path]
         if len(matches) != 1:
             raise SafeError(f"Required default group missing or ambiguous: {path}")
@@ -71,27 +68,27 @@ def normal_group_ids(catalog: Catalog) -> list[str]:
     return groups
 
 
-def select_groups(catalog: Catalog, *, normal_user: bool) -> list[str]:
-    """Resolve the exact normal-user preset; disable Dify without changing existing grants."""
-    defaults = normal_group_ids(catalog) if normal_user else []
+def select_groups(
+    catalog: Catalog, *, normal_user: bool, policy: OnboardingPolicy = EMPTY_POLICY
+) -> list[str]:
+    """Apply client selector preferences to server-visible groups, never permissions."""
+    defaults = normal_group_ids(catalog, policy) if normal_user else []
     if normal_user:
         say("User type: Normal user")
     choices = []
     selectable: set[str] = set()
     for group_id, path in catalog.groups.items():
-        dify = any(part.startswith(("dify-", "neurwerk-dify-")) for part in path.split("/"))
-        label = "Dify" if dify else NORMAL_USER_GROUPS.get(path, "Group")
+        disabled = path in policy.disabled_groups
         choices.append(
             questionary.Choice(
-                f"{label}: {path}",
+                f"Group: {path}",
                 value=group_id,
                 checked=group_id in defaults,
-                disabled="Disabled for now" if dify else None,
+                disabled="Disabled by client policy" if disabled else None,
             )
         )
-        if not dify:
+        if not disabled:
             selectable.add(group_id)
-    say("Dify: Disabled in this selector; existing memberships are unchanged.")
     selected = cast(list[str], answer(questionary.checkbox("User groups:", choices=choices)))
     if not set(selected) <= selectable:
         raise SafeError("Group selection includes an unavailable or disabled group.")
@@ -173,7 +170,7 @@ def doctor(accounts: Accounts) -> Catalog:
     return catalog
 
 
-def creation_preflight(catalog: Catalog) -> None:
+def creation_preflight(catalog: Catalog, policy: OnboardingPolicy = EMPTY_POLICY) -> None:
     """Stop before identity prompts if the selected realm cannot support local onboarding."""
     blockers = []
     if catalog.federation:
@@ -185,7 +182,7 @@ def creation_preflight(catalog: Catalog) -> None:
     if not {"VERIFY_EMAIL", "UPDATE_PASSWORD"} <= set(catalog.actions):
         blockers.append("Required actions: Enable VERIFY_EMAIL and UPDATE_PASSWORD in the realm.")
     try:
-        normal_group_ids(catalog)
+        normal_group_ids(catalog, policy)
     except SafeError as exc:
         blockers.append(str(exc))
     if blockers:
@@ -196,7 +193,7 @@ def creation_preflight(catalog: Catalog) -> None:
         )
     say(
         "Creation preflight: Passed "
-        "(local accounts, unique emails, required actions, four preset groups)"
+        "(local accounts, unique emails, required actions, client default groups)"
     )
 
 
@@ -223,11 +220,16 @@ def identity(accounts: Accounts, operation: str) -> Json:
     return user
 
 
-def workflow(accounts: Accounts, operation: str, catalog: Catalog) -> None:
+def workflow(
+    accounts: Accounts,
+    operation: str,
+    catalog: Catalog,
+    policy: OnboardingPolicy = EMPTY_POLICY,
+) -> None:
     """Show complete intended stages before any mutation, then expose partial progress."""
     accounts.connection.session.require_management()
     if operation == "create":
-        creation_preflight(catalog)
+        creation_preflight(catalog, policy)
     elif operation == "send-actions-email":
         accounts.require_email(catalog)
     user = identity(accounts, operation)
@@ -260,7 +262,7 @@ def workflow(accounts: Accounts, operation: str, catalog: Catalog) -> None:
     groups = (
         []
         if operation == "send-actions-email"
-        else select_groups(catalog, normal_user=operation == "create")
+        else select_groups(catalog, normal_user=operation == "create", policy=policy)
     )
     send_email = bool(actions) and (
         operation == "send-actions-email"
@@ -336,7 +338,11 @@ def select_target(
     return command, profiles[text(selected)]
 
 
-def run(command: str | None, profile_name: str | None) -> None:
+def run(
+    command: str | None,
+    profile_name: str | None,
+    policy: OnboardingPolicy = EMPTY_POLICY,
+) -> None:
     """Authenticate anew for one explicitly selected realm and discard the session afterward."""
     command, profile = select_target(command, profile_name)
     if profile is None:
@@ -350,7 +356,7 @@ def run(command: str | None, profile_name: str | None) -> None:
         accounts = Accounts(session)
         catalog = doctor(accounts)
         if command in ("setup", "doctor"):
-            creation_preflight(catalog)
+            creation_preflight(catalog, policy)
         if command == "setup":
             if confirm(f"Save non-secret profile {profile.name} (replace it if it exists)?"):
                 save_profile(profile)
@@ -375,7 +381,7 @@ def run(command: str | None, profile_name: str | None) -> None:
             ),
         )
         if operation != "cancel":
-            workflow(accounts, operation, catalog)
+            workflow(accounts, operation, catalog, policy)
     finally:
         session.close()
 
@@ -387,9 +393,11 @@ def main() -> int:
         "command", nargs="?", choices=["setup", "doctor", "create", "resume", "send-actions-email"]
     )
     parser.add_argument("--profile", help="Explicit local non-secret profile name")
+    parser.add_argument("--policy", type=Path, help="Client onboarding selector policy JSON")
     args = parser.parse_args()
     try:
-        run(args.command, args.profile)
+        policy = load_policy(args.policy) if args.policy else OnboardingPolicy()
+        run(args.command, args.profile, policy)
     except KeyboardInterrupt:
         say(
             "Cancelled. Inspect any reported partial progress "

@@ -18,7 +18,7 @@ type Object = dict[str, Any]
 NAMESPACE = "maintenance"
 LOCK = "maintenance-operation-lock"
 ROUTES = "ingressroutes.traefik.io"
-SCOPES = ("global", "studio", "dify", "librechat", "langfuse")
+SCOPE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,49}[a-z0-9])?")
 LABELS = {
     "app.kubernetes.io/name": "maintenance",
     "app.kubernetes.io/instance": "maintenance",
@@ -160,7 +160,7 @@ class Maintenance:
         data = json.loads(self.get("configmap", "maintenance-runtime")["data"]["contract.json"])
         require(data["version"] == 1 and data["namespace"] == NAMESPACE, "Unsupported contract")
         require(
-            "global" in data["routes"] and set(data["routes"]) <= set(SCOPES),
+            "global" in data["routes"] and all(SCOPE.fullmatch(scope) for scope in data["routes"]),
             "Unsupported maintenance scopes",
         )
         owned(data["deployment"], "Deployment", "maintenance")
@@ -289,7 +289,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     """Expose the kubectl plugin and alias without implicit context or automatic recovery."""
     parser = argparse.ArgumentParser(prog="kubectl maintenance")
     parser.add_argument("command", choices=("on", "off", "status"))
-    parser.add_argument("scope", nargs="?", default="global", choices=SCOPES)
+    parser.add_argument("scope", nargs="?", default="global")
     parser.add_argument("--context", required=True)
     args = parser.parse_args(arguments)
     try:

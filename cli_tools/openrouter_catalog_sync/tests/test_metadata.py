@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from k8s_stack_tooling.gateway_model_metadata import MetadataError
+from k8s_stack_tooling.gateway_catalog.metadata import MetadataError
 
 from openrouter_catalog_sync.metadata import retain_metadata, with_metadata
 from openrouter_catalog_sync.sync import CatalogSyncError, GeneratedFiles

@@ -6,10 +6,11 @@ import argparse
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import ValidationError
 
-from package_checker.config import PACKAGES, Settings
+from package_checker.config import PackageConfig, Settings, load_inventory
 from package_checker.github import GitHubApiError, GitHubClient, unique_repositories
 from package_checker.models import WorkflowRun
 from package_checker.report import (
@@ -49,20 +50,26 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--json", action="store_true", help="Print JSON instead of an aligned table."
     )
+    parser.add_argument(
+        "--inventory", type=Path, required=True, help="Client package inventory JSON."
+    )
     return parser.parse_args(arguments)
 
 
-def fetch_active_workflows(client: GitHubClient) -> dict[str, WorkflowCheck]:
+def fetch_active_workflows(
+    client: GitHubClient, packages: Sequence[PackageConfig]
+) -> dict[str, WorkflowCheck]:
     """Fetch active workflow runs once per repository.
 
     Args:
         client: Authenticated GitHub API client.
+        packages: Explicit client-selected package inventory.
 
     Returns:
         Active run keyed by repository; missing entries indicate a lookup failure.
     """
     workflows: dict[str, WorkflowCheck] = {}
-    for repository in unique_repositories(PACKAGES):
+    for repository in unique_repositories(tuple(packages)):
         try:
             workflows[repository] = WorkflowCheck(
                 workflow_run=client.get_active_workflow_run(repository), failed=False
@@ -73,18 +80,19 @@ def fetch_active_workflows(client: GitHubClient) -> dict[str, WorkflowCheck]:
     return workflows
 
 
-def fetch_reports(client: GitHubClient) -> list[PackageReport]:
+def fetch_reports(client: GitHubClient, packages: Sequence[PackageConfig]) -> list[PackageReport]:
     """Fetch every configured package and build its status report.
 
     Args:
         client: Authenticated GitHub API client.
+        packages: Explicit client-selected package inventory.
 
     Returns:
         One report record for every configured package.
     """
-    workflows = fetch_active_workflows(client)
+    workflows = fetch_active_workflows(client, packages)
     reports: list[PackageReport] = []
-    for package in PACKAGES:
+    for package in packages:
         workflow = workflows[package.repository]
         try:
             versions = client.list_package_versions(package.package_name)
@@ -115,6 +123,11 @@ def main(arguments: Sequence[str] | None = None) -> None:
     logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s %(message)s", level=logging.INFO)
     args = parse_arguments(arguments)
     try:
+        packages = load_inventory(args.inventory)
+    except (OSError, ValueError) as error:
+        _logger.error("Invalid package inventory")  # noqa: TRY400 -- Do not log file contents.
+        raise SystemExit(2) from error
+    try:
         settings = Settings()
     except ValidationError as error:
         _logger.error(  # noqa: TRY400 -- Invalid local configuration is an expected CLI error.
@@ -122,7 +135,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
         )
         raise SystemExit(2) from error
     with GitHubClient(settings.github_pat.get_secret_value()) as client:
-        reports = fetch_reports(client)
+        reports = fetch_reports(client, packages)
     output = render_json(reports) if args.json else f"{render_table(reports)}\n"
     print(output, end="")  # noqa: T201 -- CLI output is the command's explicit result.
     if any(report.error is not None for report in reports):

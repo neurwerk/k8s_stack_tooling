@@ -111,12 +111,22 @@ def config_from_environment(
         _die(f"{ENV_PREFIX}GROUP_MAPPINGS must be a JSON array of sourceName/targetParent objects")
 
     try:
+        addon_group_targets = json.loads(_required(environment, f"{ENV_PREFIX}ADDON_GROUP_TARGETS"))
+    except json.JSONDecodeError:
+        _die(f"{ENV_PREFIX}ADDON_GROUP_TARGETS must be a JSON array of strings")
+    if not isinstance(addon_group_targets, list) or not all(
+        isinstance(target, str) for target in addon_group_targets
+    ):
+        _die(f"{ENV_PREFIX}ADDON_GROUP_TARGETS must be a JSON array of strings")
+
+    try:
         return ActiveDirectoryConfig(
             connection_url=environment.get(f"{ENV_PREFIX}CONNECTION_URL", ""),
             users_dn=_required(environment, f"{ENV_PREFIX}USERS_DN"),
             groups_dn=_required(environment, f"{ENV_PREFIX}GROUPS_DN"),
             username_attribute=_required(environment, f"{ENV_PREFIX}USERNAME_ATTRIBUTE"),
             group_names=tuple(parsed_groups),
+            addon_group_targets=tuple(addon_group_targets),
             group_mappings=tuple(
                 GroupMapping(mapping["sourceName"], mapping["targetParent"])
                 for mapping in parsed_mappings

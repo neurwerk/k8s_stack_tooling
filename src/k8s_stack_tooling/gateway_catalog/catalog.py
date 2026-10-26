@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
-from k8s_stack_tooling.agentgateway_trust import Document
+from k8s_stack_tooling.gateway_catalog.document import Document
 
 Identifier = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[^\x00-\x1f\x7f]+$")]
 Description = Annotated[str, Field(max_length=2000)]

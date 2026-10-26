@@ -82,6 +82,26 @@ jobs:
       - name: Verify lockfile
         run: uv lock --check
 
+      - name: Install pinned add-on render toolchain
+        if: matrix.project == '.'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/addon-tools"
+          mkdir -p "$tools/bin"
+          curl --fail --location --silent --show-error \
+            https://get.helm.sh/helm-v4.2.4-linux-amd64.tar.gz \
+            --output "$tools/helm.tar.gz"
+          printf '%s  %s\n' c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3 "$tools/helm.tar.gz" | sha256sum --check
+          tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
+          install -m 0755 "$tools/linux-amd64/helm" "$tools/bin/helm"
+          curl --fail --location --silent --show-error \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz \
+            --output "$tools/kustomize.tar.gz"
+          printf '%s  %s\n' 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d "$tools/kustomize.tar.gz" | sha256sum --check
+          tar -xzf "$tools/kustomize.tar.gz" -C "$tools/bin" kustomize
+          echo "$tools/bin" >> "$GITHUB_PATH"
+
       - name: Install dependencies
         run: uv sync --frozen --dev
 

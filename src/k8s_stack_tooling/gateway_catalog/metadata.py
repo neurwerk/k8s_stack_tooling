@@ -10,8 +10,8 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import AfterValidator, Field, field_validator, model_validator
 
-from k8s_stack_tooling.agentgateway_trust import Digest, Document
-from k8s_stack_tooling.gateway_catalog import GatewayCatalog
+from k8s_stack_tooling.gateway_catalog.catalog import GatewayCatalog
+from k8s_stack_tooling.gateway_catalog.document import Digest, Document
 
 Capability = Literal[
     "streaming",

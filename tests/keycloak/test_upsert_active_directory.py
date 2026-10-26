@@ -21,6 +21,7 @@ def _enabled_environment() -> dict[str, str]:
         "KC_ACTIVE_DIRECTORY_BIND_DN": ("CN=Keycloak,OU=Service Accounts,DC=example,DC=com"),
         "KC_ACTIVE_DIRECTORY_BIND_CREDENTIAL": "do-not-log-this",
         "KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED": "true",
+        "KC_ACTIVE_DIRECTORY_ADDON_GROUP_TARGETS": "[]",
     }
 
 
@@ -73,6 +74,74 @@ def test_enabled_environment_accepts_upn_bind_principal() -> None:
 
     assert config is not None
     assert config.bind_dn == "keycloak-bind@example.com"
+
+
+@pytest.mark.parametrize(
+    "approval",
+    [
+        None,
+        "[]",
+        "invalid",
+        "null",
+        "[1]",
+        '["/access/custom"]',
+        '["/access/neurwerk-sample-users", "/access/neurwerk-sample-users"]',
+    ],
+)
+def test_unapproved_addon_inventory_fails_before_authentication(approval: str | None) -> None:
+    environment = {
+        **_enabled_environment(),
+        "KC_INTERNAL_URL": "https://keycloak.example.com",
+        "KC_REALM": "platform",
+        "KC_ACTIVE_DIRECTORY_GROUP_NAMES": "[]",
+        "KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS": (
+            '[{"sourceName":"CORP_SAMPLE","targetParent":"/access/neurwerk-sample-users"}]'
+        ),
+    }
+    if approval is None:
+        del environment["KC_ACTIVE_DIRECTORY_ADDON_GROUP_TARGETS"]
+    else:
+        environment["KC_ACTIVE_DIRECTORY_ADDON_GROUP_TARGETS"] = approval
+    with (
+        patch.dict("os.environ", environment, clear=True),
+        patch("k8s_stack_tooling.keycloak.upsert_active_directory.wait_for_service") as wait,
+        patch("k8s_stack_tooling.keycloak.upsert_active_directory.get_admin_token") as token,
+        patch("k8s_stack_tooling.keycloak.upsert_active_directory.requests.Session") as session,
+    ):
+        with pytest.raises(SystemExit):
+            main()
+        wait.assert_not_called()
+        token.assert_not_called()
+        session.assert_not_called()
+
+
+def test_approved_addon_inventory_reaches_reconciliation() -> None:
+    environment = {
+        **_enabled_environment(),
+        "KC_INTERNAL_URL": "https://keycloak.example.com",
+        "KC_REALM": "platform",
+        "KC_ADMIN_USER": "admin",
+        "KC_ADMIN_PASSWORD": "fixture-password",
+        "KC_ACTIVE_DIRECTORY_GROUP_NAMES": "[]",
+        "KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS": (
+            '[{"sourceName":"CORP_SAMPLE","targetParent":"/access/neurwerk-sample-users"}]'
+        ),
+        "KC_ACTIVE_DIRECTORY_ADDON_GROUP_TARGETS": '["/access/neurwerk-sample-users"]',
+    }
+    with (
+        patch.dict("os.environ", environment, clear=True),
+        patch("k8s_stack_tooling.keycloak.upsert_active_directory.wait_for_service"),
+        patch("k8s_stack_tooling.keycloak.upsert_active_directory.get_admin_token"),
+        patch("k8s_stack_tooling.keycloak.upsert_active_directory.requests.Session"),
+        patch(
+            "k8s_stack_tooling.keycloak.upsert_active_directory.reconcile_active_directory"
+        ) as reconcile,
+    ):
+        main()
+        reconcile.assert_called_once()
+        config = reconcile.call_args.args[3]
+        assert config.addon_group_targets == ("/access/neurwerk-sample-users",)
+        assert config.group_mappings[0].target_parent == config.addon_group_targets[0]
 
 
 @pytest.mark.parametrize(

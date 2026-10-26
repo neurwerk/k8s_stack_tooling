@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr, field_validator
@@ -92,19 +94,31 @@ class Settings(BaseSettings):
 _PACKAGE_NAME = re.compile(r"^k8s-stack-[a-z0-9]+(?:-[a-z0-9]+)*$")
 _REPOSITORY = re.compile(r"^neurwerk/k8s_stack_[a-z0-9_]+$")
 
-PACKAGES: tuple[PackageConfig, ...] = (
-    PackageConfig("k8s-stack-studio-api", "neurwerk/k8s_stack_studio"),
-    PackageConfig("k8s-stack-studio-web", "neurwerk/k8s_stack_studio"),
-    PackageConfig("k8s-stack-agentgateway-extproc", "neurwerk/k8s_stack_agentgateway_extproc"),
-    PackageConfig("k8s-stack-pii-engine", "neurwerk/k8s_stack_pii_engine", stable_tags_only=True),
-    PackageConfig(
-        "k8s-stack-keycloak-api-key-bridge", "neurwerk/k8s_stack_keycloak_api_key_bridge"
-    ),
-    PackageConfig("k8s-stack-keycloak-theme", "neurwerk/k8s_stack_keycloak_theme"),
-    PackageConfig(
-        "k8s-stack-opensearch-reporting-cli", "neurwerk/k8s_stack_opensearch_reporting_cli"
-    ),
-    PackageConfig("k8s-stack-addon-dify-api", "neurwerk/k8s_stack_addon_dify"),
-    PackageConfig("k8s-stack-tooling", "neurwerk/k8s_stack_tooling"),
-    PackageConfig("k8s-stack-addon-dify-web", "neurwerk/k8s_stack_addon_dify"),
-)
+
+def load_inventory(path: Path) -> tuple[PackageConfig, ...]:
+    """Load a bounded client-owned JSON list, without a compiled package selection."""
+    with path.open("rb") as source:
+        raw = source.read(1_048_577)
+    if len(raw) > 1_048_576:
+        raise ValueError("Package inventory exceeds 1 MiB")
+    entries = json.loads(raw)
+    if not isinstance(entries, list) or len(entries) > 1000:
+        raise ValueError("Package inventory must be a list of at most 1000 packages")
+    packages = []
+    names: set[str] = set()
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not {"package_name", "repository"} <= entry.keys()
+            or entry.keys() - {"package_name", "repository", "stable_tags_only"}
+            or not isinstance(entry["package_name"], str)
+            or not isinstance(entry["repository"], str)
+            or not isinstance(entry.get("stable_tags_only", False), bool)
+        ):
+            raise ValueError("Invalid package inventory entry")
+        package = PackageConfig(**entry)
+        if package.package_name in names:
+            raise ValueError("Duplicate package in inventory")
+        names.add(package.package_name)
+        packages.append(package)
+    return tuple(packages)

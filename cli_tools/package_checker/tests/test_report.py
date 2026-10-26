@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from package_checker.config import PACKAGES, PackageConfig
+from package_checker.config import PackageConfig
 from package_checker.github import GitHubApiError
 from package_checker.models import ContainerMetadata, PackageMetadata, PackageVersion, WorkflowRun
 from package_checker.report import (
@@ -70,8 +70,8 @@ def test_newest_version_retains_latest_then_untagged_fallback() -> None:
 
 
 def test_pii_report_ignores_later_suffixed_publications() -> None:
-    package = next(
-        package for package in PACKAGES if package.package_name == "k8s-stack-pii-engine"
+    package = PackageConfig(
+        "k8s-stack-example", "neurwerk/k8s_stack_example", stable_tags_only=True
     )
     older = make_version(["0.1.0"], datetime(2026, 8, 1, tzinfo=UTC))
     release = make_version(["0.2.0", "latest", "9.9.9-custom"], datetime(2026, 8, 2, tzinfo=UTC))
@@ -94,8 +94,8 @@ def test_pii_report_ignores_later_suffixed_publications() -> None:
     ],
 )
 def test_pii_report_rejects_versions_without_plain_stable_tags(tags: list[str]) -> None:
-    package = next(
-        package for package in PACKAGES if package.package_name == "k8s-stack-pii-engine"
+    package = PackageConfig(
+        "k8s-stack-example", "neurwerk/k8s_stack_example", stable_tags_only=True
     )
     version = make_version(tags, datetime(2026, 8, 1, tzinfo=UTC))
 
@@ -104,9 +104,7 @@ def test_pii_report_rejects_versions_without_plain_stable_tags(tags: list[str]) 
 
 
 def test_dify_report_retains_suffixed_release_tag() -> None:
-    package = next(
-        package for package in PACKAGES if package.package_name == "k8s-stack-addon-dify-api"
-    )
+    package = PackageConfig("k8s-stack-example", "neurwerk/k8s_stack_example")
     release = make_version(["1.17.1-kc-v1"], datetime(2026, 8, 1, tzinfo=UTC))
     moving = make_version(["latest"], datetime(2026, 8, 2, tzinfo=UTC))
 

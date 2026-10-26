@@ -25,26 +25,19 @@ MAPPING_OWNER_SUBTYPE = "k8s-stack-tooling.group-mapping.v1"
 MAPPING_TRANSITION_SUBTYPE = "k8s-stack-tooling.group-reconciliation-pending.v1"
 MANAGED_PROVIDER_SUBTYPE = "k8s-stack-tooling.active-directory.v1"
 MAPPING_NAME_PREFIX = "approved group: "
+GROUP_TARGET_PATTERN = re.compile(r"^/access/neurwerk-[a-z][a-z0-9-]{0,40}$")
 CANONICAL_GROUP_PATHS = frozenset(
     f"/access/neurwerk-{name}"
     for name in (
         "api-key-admins",
-        "dify-admins",
-        "dify-users",
         "keycloak-admins",
         "langfuse-admins",
-        "librechat-admins",
-        "librechat-users",
-        "openwebui-admins",
-        "openwebui-users",
         "opensearch-admins",
         "pii-admins",
         "platform-admins",
         "studio-users",
         "llm-all-users",
         "mcp-all-users",
-        "forgejo-users",
-        "forgejo-admins",
     )
 )
 
@@ -69,7 +62,9 @@ class GroupMapping:
             or ">" in name
         ):
             raise ValueError("mapping sourceName must be a real AD CN of 1-64 characters")
-        if self.target_parent not in CANONICAL_GROUP_PATHS:
+        if not isinstance(self.target_parent, str) or not GROUP_TARGET_PATTERN.fullmatch(
+            self.target_parent
+        ):
             raise ValueError("mapping targetParent must be an exact canonical /access group path")
 
 
@@ -91,6 +86,7 @@ class ActiveDirectoryConfig:
     allow_insecure_ldap: bool = False
     connection_timeout_ms: int = 5000
     read_timeout_ms: int = 10000
+    addon_group_targets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_config(self)
@@ -173,6 +169,18 @@ def _validate_config(config: ActiveDirectoryConfig) -> None:
         config.group_mappings
     ):
         raise ValueError("mapping sources (case-insensitive) and targets must be unique")
+    if (
+        not isinstance(config.addon_group_targets, tuple)
+        or any(
+            not isinstance(target, str) or not GROUP_TARGET_PATTERN.fullmatch(target)
+            for target in config.addon_group_targets
+        )
+        or len(set(config.addon_group_targets)) != len(config.addon_group_targets)
+    ):
+        raise ValueError("addonGroupTargets must contain unique exact access group paths")
+    approved_targets = CANONICAL_GROUP_PATHS | set(config.addon_group_targets)
+    if any(mapping.target_parent not in approved_targets for mapping in config.group_mappings):
+        raise ValueError("mapping targetParent requires explicit client approval")
     if len(set(config.group_names)) != len(config.group_names):
         raise ValueError("Active Directory group names must be unique")
     if any(
@@ -913,8 +921,9 @@ def _owned_group_mappers(
                     is_mapping
                     and (
                         component.get("subType") != MAPPING_OWNER_SUBTYPE
-                        or "/access/" + name.removeprefix(MAPPING_NAME_PREFIX)
-                        not in CANONICAL_GROUP_PATHS
+                        or not GROUP_TARGET_PATTERN.fullmatch(
+                            "/access/" + name.removeprefix(MAPPING_NAME_PREFIX)
+                        )
                     )
                 )
                 or (
