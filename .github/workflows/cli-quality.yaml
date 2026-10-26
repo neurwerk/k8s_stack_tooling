@@ -121,18 +121,35 @@ jobs:
       - name: Build
         run: uv build
 
+  kokoro_adapter:
+    name: Kokoro adapter (Python 3.11, offline)
+    runs-on: ubuntu-latest
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/kokoro-adapter-venv
+    defaults:
+      run:
+        working-directory: cli_tools/inference_runtime_manager/src/inference_runtime_manager/resources/kokoro_onnx
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - run: uv python install 3.11
+      - run: uv lock --check
+      - run: uv sync --frozen
+      - run: uv run --frozen python -m unittest discover -s tests
+
   required_ci:
     name: Required CI
-    needs: quality
+    needs: [quality, kokoro_adapter]
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     steps:
       - name: Report required CI result
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
+          KOKORO_RESULT: ${{ needs.kokoro_adapter.result }}
         run: |
-          if [[ "$QUALITY_RESULT" != "success" ]]; then
-            printf 'CLI quality matrix result was %s, expected success.\n' \
-              "$QUALITY_RESULT" >&2
+          if [[ "$QUALITY_RESULT" != "success" || "$KOKORO_RESULT" != "success" ]]; then
+            printf 'CLI quality result: %s; Kokoro adapter result: %s; expected success.\n' \
+              "$QUALITY_RESULT" "$KOKORO_RESULT" >&2
             exit 1
           fi
