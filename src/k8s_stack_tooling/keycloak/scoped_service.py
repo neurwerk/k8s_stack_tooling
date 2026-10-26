@@ -32,12 +32,9 @@ def names(value: object) -> list[str]:
 
 def reconcile() -> None:
     client_id = os.environ["KC_CLIENT_ID"]
-    suffix = client_id.removeprefix("pipecat-bot-")
     if (
-        not client_id.startswith("pipecat-bot-")
-        or not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?", suffix)
-        or suffix.endswith("-")
-        or suffix in RESERVED_CLIENT_IDS | {"pipecat", "shared", "turn", "oidc"}
+        not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,126}[a-z0-9])?", client_id)
+        or client_id in RESERVED_CLIENT_IDS
     ):
         raise ValueError("Invalid or reserved machine client ID")
     realm_names = names(json.loads(os.environ.get("KC_REALM_ROLE_SCOPE", "[]")))
@@ -95,6 +92,12 @@ def reconcile() -> None:
             raise ValueError("Existing machine client is not owned by this helper")
         if get_client_secret(base, token, realm, uuid) != secret:
             raise ValueError("Machine secret mismatch; rotation is a separate operation")
+
+    def disable():
+        api(path, "PUT", {"enabled": False})
+        if api(path).get("enabled") is not False:
+            raise RuntimeError("Machine disable readback failed")
+
     gateway = lookup("agentgateway")
     if not gateway:
         raise RuntimeError("Missing gateway client")
@@ -112,9 +115,16 @@ def reconcile() -> None:
                 or role.get("name") != name
                 or role.get("clientRole") is not client_role
                 or (client_role and role.get("containerId") != gateway)
-                or role.get("composite") is not False
             ):
+                raise RuntimeError("Machine permission lookup mismatch")
+            if role.get("composite") is True:
+                # A successful identity-checked read proves unsafe scope drift.
+                # Do not leave an owned identity issuing tokens while rejecting it.
+                if uuid:
+                    disable()
                 raise ValueError("Machine permission must be an exact non-composite role")
+            if role.get("composite") is not False:
+                raise RuntimeError("Machine permission lookup incomplete")
             target.append(role)
 
     attributes = {
@@ -193,7 +203,11 @@ def reconcile() -> None:
         if not user.get("id") or user.get("username") != "service-account-" + client_id:
             raise RuntimeError("Machine service account lookup mismatch")
         user_path = "/users/" + quote(user["id"], safe="")
-        if api(user_path + "/groups"):
+        groups = api(user_path + "/groups")
+        if not isinstance(groups, list):
+            raise RuntimeError("Machine service account group lookup incomplete")
+        if groups:
+            disable()
             raise ValueError("Machine service account must not inherit group permissions")
         return user_path
 
@@ -245,9 +259,7 @@ def reconcile() -> None:
             pass
         else:
             return
-        api(path, "PUT", {"enabled": False})
-        if api(path).get("enabled") is not False:
-            raise RuntimeError("Machine disable readback failed")
+        disable()
     else:
         api(
             "/clients",

@@ -11,6 +11,7 @@ from k8s_stack_tooling.keycloak import scoped_service as service
 
 class Keycloak:
     def __init__(self):
+        self.client_id = "service-example"
         self.client = None
         self.secret = "fixture-secret-do-not-print"
         self.calls = []
@@ -31,6 +32,7 @@ class Keycloak:
             for name in ("llm:invoke", "model:example:invoke", "provider:example:company-use")
         }
         self.fault = None
+        self.groups = []
 
     def request(self, url, method="GET", body=None, headers=None):
         path = unquote(url.split("/admin/realms/test")[1])
@@ -40,8 +42,8 @@ class Keycloak:
     def dispatch(self, path, method, body):
         if path == "/clients?clientId=agentgateway":
             return [{"id": "gateway", "clientId": "agentgateway"}]
-        if path == "/clients?clientId=pipecat-bot-example":
-            return [{"id": "machine", "clientId": "pipecat-bot-example"}] if self.client else []
+        if path == "/clients?clientId=" + self.client_id:
+            return [{"id": "machine", "clientId": self.client_id}] if self.client else []
         if path.startswith("/clients/gateway/roles/"):
             if self.fault == "prerequisite":
                 raise RuntimeError(self.secret)
@@ -59,9 +61,13 @@ class Keycloak:
                     self.client["fullScopeAllowed"] = True
             return self.client
         if path == "/clients/machine/service-account-user":
-            return {"id": "service-user", "username": "service-account-pipecat-bot-example"}
+            if self.fault == "account-mismatch":
+                return {"id": "other-user", "username": "ordinary-user"}
+            return {"id": "service-user", "username": "service-account-" + self.client_id}
         if path == "/users/service-user/groups":
-            return []
+            if self.fault == "groups":
+                raise RuntimeError(self.secret)
+            return self.groups
         for kind, attached in self.scopes.items():
             prefix = "/clients/machine/" + kind
             if path == prefix:
@@ -118,14 +124,14 @@ def kc(monkeypatch):
         "KC_REALM": "test",
         "KC_ADMIN_USER": "admin",
         "KC_ADMIN_PASSWORD": fake.secret,
-        "KC_CLIENT_ID": "pipecat-bot-example",
+        "KC_CLIENT_ID": fake.client_id,
         "KC_CLIENT_SECRET": fake.secret,
         "KC_REALM_ROLE_SCOPE": "[]",
         "KC_GATEWAY_ROLE_SCOPE": json.dumps(list(fake.roles)),
         "KC_CLIENT_AUDIENCES": '["agentgateway"]',
         "KC_CLIENT_APPROVAL": json.dumps(
             {
-                "clientId": "pipecat-bot-example",
+                "clientId": fake.client_id,
                 "realmRoles": [],
                 "gatewayPermissions": list(fake.roles),
                 "audiences": ["agentgateway"],
@@ -143,10 +149,10 @@ def kc(monkeypatch):
     "key,value",
     [
         ("KC_CLIENT_ID", "studio"),
-        ("KC_CLIENT_ID", "pipecat-bot-account"),
-        ("KC_CLIENT_ID", "pipecat-bot-bad/identity"),
-        ("KC_CLIENT_ID", "pipecat-bot-" + "x" * 41),
-        ("KC_CLIENT_ID", "pipecat-bot-other"),
+        ("KC_CLIENT_ID", "account"),
+        ("KC_CLIENT_ID", "bad/identity"),
+        ("KC_CLIENT_ID", "x" * 129),
+        ("KC_CLIENT_ID", "service-other"),
         ("KC_GATEWAY_ROLE_SCOPE", '["realm-admin"]'),
         ("KC_REALM_ROLE_SCOPE", '["llm:invoke"]'),
         ("KC_CLIENT_AUDIENCES", '["account"]'),
@@ -160,8 +166,42 @@ def test_reject_unapproved_before_api(kc, monkeypatch, key, value):
     assert not kc.calls
 
 
-def test_service_only_noop_and_secret_preserved(kc):
+@pytest.mark.parametrize("client_id", sorted(service.RESERVED_CLIENT_IDS))
+def test_platform_client_cannot_be_approved_for_takeover(kc, monkeypatch, client_id):
+    monkeypatch.setenv("KC_CLIENT_ID", client_id)
+    monkeypatch.setenv(
+        "KC_CLIENT_APPROVAL",
+        json.dumps(
+            {
+                "clientId": client_id,
+                "realmRoles": [],
+                "gatewayPermissions": list(kc.roles),
+                "audiences": ["agentgateway"],
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        service.reconcile()
+    assert not kc.calls
+
+
+@pytest.mark.parametrize("client_id", ["service-example", "worker-jobs"])
+def test_service_only_noop_and_secret_preserved(kc, monkeypatch, client_id):
+    kc.client_id = client_id
+    monkeypatch.setenv("KC_CLIENT_ID", client_id)
+    monkeypatch.setenv(
+        "KC_CLIENT_APPROVAL",
+        json.dumps(
+            {
+                "clientId": client_id,
+                "realmRoles": [],
+                "gatewayPermissions": list(kc.roles),
+                "audiences": ["agentgateway"],
+            }
+        ),
+    )
     service.reconcile()
+    assert kc.client["clientId"] == client_id
     assert kc.client["enabled"] is True
     assert kc.client["serviceAccountsEnabled"] is True
     for key in (
@@ -204,7 +244,7 @@ def test_shrink_revokes_scope_and_assignment_only_on_owned_identity(kc, monkeypa
         "KC_CLIENT_APPROVAL",
         json.dumps(
             {
-                "clientId": "pipecat-bot-example",
+                "clientId": kc.client_id,
                 "realmRoles": [],
                 "gatewayPermissions": reduced,
                 "audiences": ["agentgateway"],
@@ -232,6 +272,56 @@ def test_composite_roles_cannot_escalate(kc):
     kc.roles["llm:invoke"]["composite"] = True
     with pytest.raises(ValueError, match="non-composite"):
         service.reconcile()
+    assert not kc.writes()
+
+
+@pytest.mark.parametrize("unsafe", ["composite", "group"])
+def test_confirmed_unsafe_owned_identity_disables_issuance(kc, unsafe, capsys):
+    service.reconcile()
+    assert kc.client["enabled"] is True
+    if unsafe == "composite":
+        kc.roles["llm:invoke"]["composite"] = True
+    else:
+        kc.groups = [{"id": "administrators"}]
+    unchanged = copy.deepcopy((kc.mapping, kc.roles, kc.groups))
+    kc.calls.clear()
+    with pytest.raises(SystemExit):
+        service.main()
+    output = capsys.readouterr()
+    assert kc.client["enabled"] is False
+    assert kc.writes() == [("PUT", "/clients/machine", {"enabled": False})]
+    assert (kc.mapping, kc.roles, kc.groups) == unchanged
+    assert not output.out
+    assert "failed" in output.err
+    assert kc.secret not in output.err
+
+
+@pytest.mark.parametrize("fault", ["prerequisite", "groups", "account-mismatch", "role-mismatch"])
+def test_read_failure_or_lookup_mismatch_preserves_existing_identity(kc, fault):
+    service.reconcile()
+    kc.calls.clear()
+    kc.fault = fault
+    if fault == "role-mismatch":
+        # An identity mismatch is not proof that the expected role became composite.
+        kc.roles["llm:invoke"].update({"name": "other", "composite": True})
+    with pytest.raises(RuntimeError):
+        service.reconcile()
+    assert kc.client["enabled"] is True
+    assert not kc.writes()
+
+
+@pytest.mark.parametrize("mismatch", ["ownership", "secret"])
+def test_composite_drift_cannot_mutate_unverified_identity(kc, monkeypatch, mismatch):
+    service.reconcile()
+    kc.calls.clear()
+    kc.roles["llm:invoke"]["composite"] = True
+    if mismatch == "ownership":
+        kc.client["attributes"].clear()
+    else:
+        monkeypatch.setenv("KC_CLIENT_SECRET", "different-secret")
+    with pytest.raises(ValueError):
+        service.reconcile()
+    assert kc.client["enabled"] is True
     assert not kc.writes()
 
 
