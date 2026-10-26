@@ -521,7 +521,7 @@ wheels = [
 
 [[package]]
 name = "k8s-stack-tooling"
-version = "0.13.7"
+version = "0.13.8"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
