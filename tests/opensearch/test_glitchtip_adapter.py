@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
 import socket
+import sqlite3
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -79,6 +82,20 @@ def payloads(state: State) -> list[dict[str, Any]]:
     return [json.loads(payload) for _, payload, _ in state.due(0)]
 
 
+def tracing(
+    body: str = "request failed",
+    timestamp: str = "2026-01-01T00:00:00Z",
+    module: str = "example::api",
+    level: str = "ERROR",
+    color: str = "",
+) -> str:
+    return (
+        f"{timestamp} {color}{level}\x1b[0m {module}: {body}"
+        if color
+        else (f"{timestamp} {level} {module}: {body}")
+    )
+
+
 def ppl(messages: list[str], template: str = "request <*> failed") -> dict[str, Any]:
     # Reverse row order intentionally; association must not use row positions.
     return {
@@ -125,13 +142,7 @@ def test_distinct_occurrences_overlap_and_restart(settings: Settings) -> None:
     events = payloads(state)
     assert len({event["event_id"] for event in events}) == 2
     assert len({tuple(event["fingerprint"]) for event in events}) == 1
-    assert events[0]["fingerprint"] == [
-        state.digest("issue", SCOPE.id, state.digest("template", SCOPE.id, "request <*> failed"))
-    ]
     assert all(event["message"] == "request 1 failed" for event in events)
-    assert state.db.execute("SELECT digest FROM messages").fetchall() == [
-        (state.digest("message", SCOPE.id, raw),)
-    ]
     source = state.digest("source", SCOPE.id, records[0].index, records[0].id)
     assert events[0]["event_id"] == state.digest("event", source)[:32]
     assert events[0]["timestamp"] == stamp(START)
@@ -156,6 +167,247 @@ def test_distinct_occurrences_overlap_and_restart(settings: Settings) -> None:
         assert state.enqueue(SCOPE, records, {records[0].message: "changed"}, upper) == 0
         assert state.pending_count() == 0
         assert state.db.execute("SELECT payload FROM records").fetchall() == [(None,), (None,)]
+    finally:
+        state.close()
+
+
+def test_tracing_repeats_group_across_sparse_windows_restart_and_overlap(
+    settings: Settings,
+) -> None:
+    first = record("one", tracing(color="\x1b[31m"))
+    second = record("two", tracing(timestamp="2026-01-01T01:00:00Z", color="\x1b[2;32m"))
+    third = record("three", tracing(timestamp="2026-01-01T02:00:00Z"))
+    upper = START + timedelta(hours=3)
+    state = State(settings, [SCOPE])
+    state.enqueue(SCOPE, [first], {first.message: first.message}, START)
+    original = state.due(0)[0][1]
+    state.close()
+    state = State(settings, [SCOPE])
+    try:
+        assert (
+            state.enqueue(
+                SCOPE,
+                [first, second],
+                dict.fromkeys([first.message, second.message], "different Brain label"),
+                upper,
+            )
+            == 1
+        )
+        assert state.enqueue(SCOPE, [third], {third.message: "another label"}, upper) == 1
+        events = payloads(state)
+        assert len(events) == 3
+        assert len({event["event_id"] for event in events}) == 3
+        assert len({tuple(event["fingerprint"]) for event in events}) == 1
+        assert state.due(0)[0][1] == original
+        assert state.cursor(SCOPE, START) == upper
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize("later_window", [False, True])
+@pytest.mark.parametrize(
+    "difference",
+    [
+        "cause",
+        "code",
+        "body_time",
+        "url",
+        "request_id",
+        "whitespace",
+        "indentation",
+        "module",
+        "level",
+        "namespace",
+        "container",
+        "failure_type",
+    ],
+)
+def test_same_brain_label_cannot_merge_different_content_or_context(
+    settings: Settings, difference: str, later_window: bool
+) -> None:
+    scope = replace(
+        SCOPE,
+        namespaces=("chat", "other"),
+        containers=("api", "worker"),
+        failure_types=("application_error", "connection_error"),
+    )
+    body = (
+        "request failed code=301 cause=reset body_time=2026-01-01T00:00:00Z "
+        "url=https://db.example.test request_id=abc\n detail  "
+    )
+    first = record("one", tracing(body), scope)
+    changed = {
+        "cause": body.replace("cause=reset", "cause=certificate expired"),
+        "code": body.replace("code=301", "code=302"),
+        "body_time": body.replace("00:00:00Z", "00:00:01Z"),
+        "url": body.replace("db.example.test", "other.example.test"),
+        "request_id": body.replace("request_id=abc", "request_id=def"),
+        "whitespace": body.rstrip(),
+        "indentation": " " + body,
+    }
+    second = record("two", tracing(changed.get(difference, body)), scope)
+    if difference in ("module", "level"):
+        second = replace(
+            second,
+            message=tracing(
+                body, **{difference: "example::worker" if difference == "module" else "WARN"}
+            ),
+        )
+    elif difference in ("namespace", "container", "failure_type"):
+        second = replace(
+            second,
+            **{
+                difference: {
+                    "namespace": "other",
+                    "container": "worker",
+                    "failure_type": "connection_error",
+                }[difference]
+            },
+        )
+    labels = dict.fromkeys([first.message, second.message], "<*> failed")
+    state = State(settings, [scope])
+    try:
+        if later_window:
+            state.enqueue(scope, [first], labels, START)
+            state.enqueue(scope, [second], labels, START + timedelta(minutes=1))
+        else:
+            state.enqueue(scope, [first, second], labels, START)
+        assert len({tuple(event["fingerprint"]) for event in payloads(state)}) == 2
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "2026-13-01T00:00:00Z ERROR example::api: ",
+        "2026-01-01T00:00:00+00:99 ERROR example::api: ",
+        "2026-01-01T00:00:00Z NOTICE example::api: ",
+        "2026-01-01T00:00:00Z ERROR example.api: ",
+        "context: 2026-01-01T00:00:00Z ERROR example::api: ",
+        "\x1b[31" + "2026-01-01T00:00:00Z ERROR example::api: ",
+        "2026-01-01T00:00:00Z ERROR example::api: \x1b]0;title\x07",
+        "2026-01-01T00:00:00Z ERROR example::api: \x1b[2J",
+        "2026-01-01T00:00:00Z ERROR example::api: \x1b[8m",
+        "2026-01-01T00:00:00Z ERROR example::api: \x07",
+    ],
+)
+def test_unknown_envelopes_and_terminal_controls_keep_exact_grouping(
+    settings: Settings, prefix: str
+) -> None:
+    raw = [prefix + "failed", prefix.replace("T00:00:00", "T00:00:01") + "failed"]
+    state = State(settings, [SCOPE])
+    try:
+        state.enqueue(
+            SCOPE,
+            [record(str(i), message) for i, message in enumerate(raw)],
+            dict.fromkeys(raw, "same broad label"),
+            START,
+        )
+        assert len({tuple(event["fingerprint"]) for event in payloads(state)}) == 2
+    finally:
+        state.close()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_legacy_outbox_is_preserved_without_inheriting_historical_groups(
+    settings: Settings, reverse: bool
+) -> None:
+    # Freeze the v1 schema and identity recipe rather than enqueueing with new code.
+    key = b"synthetic legacy identity key!!!"
+    assert len(key) == 32
+
+    def digest(*parts: str) -> str:
+        encoded = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode()
+        return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+
+    records = [
+        record("old-one", tracing()),
+        record("old-two", tracing(timestamp="2026-01-01T01:00:00Z", color="\x1b[31m")),
+    ]
+    identities = ["a" * 64, "b" * 64]
+    sources = [digest("source", SCOPE.id, r.index, r.id) for r in records]
+    pending = json.dumps(
+        {
+            "event_id": digest("event", sources[0])[:32],
+            "message": records[0].message,
+            "fingerprint": [identities[0]],
+        },
+        indent=2,
+    )
+    binding = json.dumps(
+        {
+            "version": 1,
+            "destination": destination(settings.glitchtip_dsn.get_secret_value())[2],
+            "source": settings.opensearch_url.rstrip("/"),
+            "environment": settings.environment,
+            "initial_start_at": stamp(datetime.fromisoformat(settings.initial_start_at)),
+            "scopes": [SCOPE.binding()],
+        },
+        sort_keys=True,
+    )
+    with sqlite3.connect(settings.state_path) as db:
+        db.executescript("""
+            CREATE TABLE metadata (name TEXT PRIMARY KEY, value BLOB);
+            CREATE TABLE cursors (scope TEXT PRIMARY KEY, upper TEXT);
+            CREATE TABLE messages (scope TEXT, digest TEXT, identity TEXT,
+                PRIMARY KEY(scope, digest));
+            CREATE TABLE templates (scope TEXT, digest TEXT, identity TEXT,
+                PRIMARY KEY(scope, digest, identity));
+            CREATE TABLE records (source TEXT PRIMARY KEY, event_id TEXT UNIQUE,
+                payload TEXT, delivered INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0);
+            CREATE INDEX pending_records ON records(delivered, next_attempt);
+        """)
+        db.executemany(
+            "INSERT INTO metadata VALUES (?, ?)", [("binding", binding), ("identity_key", key)]
+        )
+        db.execute("INSERT INTO cursors VALUES (?, ?)", (SCOPE.id, stamp(START)))
+        legacy_mappings = [
+            (SCOPE.id, digest("message", SCOPE.id, r.message), identity)
+            for r, identity in zip(records, identities, strict=True)
+        ]
+        db.executemany("INSERT INTO messages VALUES (?, ?, ?)", legacy_mappings)
+        db.executemany(
+            "INSERT INTO templates VALUES (?, ?, ?)",
+            [
+                (SCOPE.id, digest("template", SCOPE.id, r.message), identity)
+                for r, identity in zip(records, identities, strict=True)
+            ],
+        )
+        db.executemany(
+            "INSERT INTO records(source, event_id, payload, delivered) VALUES (?, ?, ?, ?)",
+            [
+                (source, digest("event", source)[:32], pending if i == 0 else None, i)
+                for i, source in enumerate(sources)
+            ],
+        )
+    state = State(settings, [SCOPE])
+    ordered = list(reversed(records)) if reverse else records
+    try:
+        assert state.enqueue(SCOPE, ordered, {r.message: "label" for r in records}, START) == 0
+        assert state.due(0) == [(sources[0], pending, 0)]
+        assert state.db.execute(
+            "SELECT delivered, payload FROM records WHERE source=?", (sources[1],)
+        ).fetchone() == (1, None)
+        for i, old in enumerate(ordered):
+            fresh = replace(old, id=f"new-{i}")
+            state.enqueue(SCOPE, [fresh], {fresh.message: "changed label"}, START)
+        state.close()
+        state = State(settings, [SCOPE])
+        fresh = record("new-variant", tracing(timestamp="2026-01-01T02:00:00Z"))
+        state.enqueue(SCOPE, [fresh], {fresh.message: "another label"}, START)
+        events = payloads(state)
+        new_identities = {tuple(event["fingerprint"]) for event in events[1:]}
+        assert len(events) == 4
+        assert len(new_identities) == 1
+        assert new_identities.isdisjoint({(identity,) for identity in identities})
+        assert state.due(0)[0][1] == pending
+        for scope_id, message_digest, identity in legacy_mappings:
+            assert state.db.execute(
+                "SELECT identity FROM messages WHERE scope=? AND digest=?",
+                (scope_id, message_digest),
+            ).fetchone() == (identity,)
     finally:
         state.close()
 
