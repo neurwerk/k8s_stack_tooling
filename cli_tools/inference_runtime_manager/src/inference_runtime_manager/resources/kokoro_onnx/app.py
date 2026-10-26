@@ -11,18 +11,20 @@ import sys
 import threading
 import time
 import wave
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+import anyio
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from kokoro_onnx import Kokoro
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.types import Receive, Scope, Send
 
 SAMPLE_RATE = 24_000
 MODEL_ROOT = Path(os.environ.get("KOKORO_MODEL_ROOT", "/models/active/tts-german"))
@@ -32,6 +34,9 @@ NORMALIZER_PATH = MODEL_ROOT / "onnx-docker" / "tts_normalizer.py"
 _tts: Kokoro | None = None
 _normalize: Callable[[str], str] | None = None
 _lock = threading.Lock()
+# StreamingResponse may finalize its iterator from a different ASGI task.
+# A semaphore allows that task to release the request slot safely.
+_request_lock = anyio.Semaphore(1)
 
 
 class SpeechRequest(BaseModel):
@@ -39,7 +44,7 @@ class SpeechRequest(BaseModel):
     model: Literal["tts-german"]
     input: str = Field(min_length=1, max_length=10_000)
     voice: Literal["default"] = "default"
-    response_format: Literal["wav"] = "wav"
+    response_format: Literal["wav", "pcm"] = "wav"
     language: Literal["de"] = "de"
     speed: float = Field(default=1.125, ge=0.5, le=2.0)
 
@@ -68,18 +73,25 @@ def load_tts() -> Kokoro:
     return Kokoro.from_session(session, str(VOICES_PATH))
 
 
+def pcm_bytes(samples: np.ndarray) -> bytes:
+    """OpenAI raw PCM: signed 16-bit little endian, mono, 24 kHz."""
+    samples = np.asarray(samples, dtype=np.float32)
+    if samples.ndim != 1:
+        raise ValueError("Expected mono audio")
+    return (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
 def wav_bytes(samples: np.ndarray) -> bytes:
-    pcm = (np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0) * 32767).astype(np.int16)
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(SAMPLE_RATE)
-        wav.writeframes(pcm.tobytes())
+        wav.writeframes(pcm_bytes(samples))
     return output.getvalue()
 
 
-def synthesize(text: str, speed: float) -> bytes:
+def split_sentences(text: str) -> list[str]:
     if _tts is None or _normalize is None:
         raise RuntimeError("Kokoro is not ready")
     normalized = _normalize(text).strip()
@@ -88,18 +100,57 @@ def synthesize(text: str, speed: float) -> bytes:
     ]
     if not sentences:
         raise ValueError("Input contains no speakable text")
-    audio: list[np.ndarray] = []
+    return sentences
+
+
+def sentence_audio(sentence: str, speed: float) -> np.ndarray:
+    if _tts is None:
+        raise RuntimeError("Kokoro is not ready")
+    # The worker owns this lock: cancelling its caller cannot stop ONNX or
+    # release exclusivity while create() is still running.
     with _lock:
-        for index, sentence in enumerate(sentences):
-            samples, sample_rate = _tts.create(
-                text=sentence, voice="martin", speed=speed, lang="de"
-            )
-            if sample_rate != SAMPLE_RATE:
-                raise RuntimeError(f"Unexpected sample rate: {sample_rate}")
-            audio.append(np.asarray(samples, dtype=np.float32))
-            if index < len(sentences) - 1:
-                audio.append(np.zeros(SAMPLE_RATE // 4, dtype=np.float32))
+        samples, sample_rate = _tts.create(text=sentence, voice="martin", speed=speed, lang="de")
+    if sample_rate != SAMPLE_RATE:
+        raise RuntimeError(f"Unexpected sample rate: {sample_rate}")
+    return np.asarray(samples, dtype=np.float32)
+
+
+def synthesize(text: str, speed: float) -> bytes:
+    sentences = split_sentences(text)
+    audio: list[np.ndarray] = []
+    for index, sentence in enumerate(sentences):
+        audio.append(sentence_audio(sentence, speed))
+        if index < len(sentences) - 1:
+            audio.append(np.zeros(SAMPLE_RATE // 4, dtype=np.float32))
     return wav_bytes(np.concatenate(audio))
+
+
+async def stream_pcm(sentences: list[str], speed: float) -> AsyncGenerator[bytes, None]:
+    async with _request_lock:
+        for index, sentence in enumerate(sentences):
+            await anyio.lowlevel.checkpoint()
+            # Do not abandon a running native call on disconnect. The request
+            # lock stays held until it finishes, then cancellation discards it.
+            samples = await anyio.to_thread.run_sync(sentence_audio, sentence, speed)
+            await anyio.lowlevel.checkpoint()
+            yield pcm_bytes(samples)
+            if index < len(sentences) - 1:
+                yield b"\0" * (SAMPLE_RATE // 4 * 2)
+
+
+class PCMResponse(StreamingResponse):
+    def __init__(self, sentences: list[str], speed: float) -> None:
+        self.stream = stream_pcm(sentences, speed)
+        super().__init__(self.stream, media_type="audio/pcm")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # A disconnect during send() leaves the generator suspended at a
+            # yield. Close it explicitly rather than waiting for GC to unlock.
+            with anyio.CancelScope(shield=True):
+                await self.stream.aclose()
 
 
 @asynccontextmanager
@@ -146,7 +197,11 @@ def voices() -> dict[str, list[str]]:
 async def speech(request: SpeechRequest) -> Response:
     started = time.monotonic()
     try:
-        audio = await run_in_threadpool(synthesize, request.input, request.speed)
+        if request.response_format == "pcm":
+            sentences = split_sentences(request.input)
+            return PCMResponse(sentences, request.speed)
+        async with _request_lock:
+            audio = await run_in_threadpool(synthesize, request.input, request.speed)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(
