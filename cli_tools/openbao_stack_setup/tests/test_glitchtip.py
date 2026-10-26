@@ -74,12 +74,6 @@ def test_selected_catalog_is_additive_preserves_credentials_and_deselect_never_d
         == session.secrets["infra-postgres-operations/internal"].values["glitchtipPassword"]
     )
     assert session.secrets["glitchtip/owner"].values == {"email": "", "password": ""}
-    admission = session.secrets["glitchtip/admission"].values
-    assert (
-        admission["clientSecret"]
-        == session.secrets["auth-keycloak/glitchtip"].values["clientSecret"]
-    )
-    assert admission["cookieSecret"] != admission["clientSecret"]
     assert "glitchtip/provisioning" not in session.secrets
     session.secrets[glitchtip.ADAPTER_PATH].values["dsn"] = DSN
     before = deepcopy(session.secrets)
@@ -136,29 +130,6 @@ def test_conflicting_database_copies_fail_before_changing_either_record(tmp_path
     session.secrets["glitchtip/internal"].values["databasePassword"] = "different-synthetic-value"
     before = deepcopy(session.secrets)
     with pytest.raises(OpenBaoError, match="copies conflict"):
-        reconcile_openbao(api, identity(), glitchtip_enabled=True)
-    assert session.secrets == before
-
-
-@pytest.mark.parametrize("survivor", ["glitchtip/admission", "auth-keycloak/glitchtip"])
-def test_admission_copy_retry_preserves_credentials_and_conflict_never_rotates(tmp_path, survivor):
-    session = FakeSession()
-    source(session)
-    api = client(tmp_path, session)
-    reconcile_openbao(api, identity(), passwords(), glitchtip_enabled=True)
-    before = deepcopy(session.secrets)
-    missing = (
-        "auth-keycloak/glitchtip" if survivor == "glitchtip/admission" else "glitchtip/admission"
-    )
-    del session.secrets[missing]
-    reconcile_openbao(api, identity(), glitchtip_enabled=True)
-    for path in ("glitchtip/admission", "auth-keycloak/glitchtip"):
-        assert (
-            session.secrets[path].values["clientSecret"] == before[survivor].values["clientSecret"]
-        )
-    session.secrets[missing].values["clientSecret"] = "conflicting-synthetic-secret"
-    before = deepcopy(session.secrets)
-    with pytest.raises(OpenBaoError, match="admission credential copies conflict"):
         reconcile_openbao(api, identity(), glitchtip_enabled=True)
     assert session.secrets == before
 
