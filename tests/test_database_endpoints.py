@@ -1,6 +1,5 @@
 """Verified database provisioners must reach the declared engine, not another port."""
 
-import copy
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,7 +12,7 @@ from k8s_stack_tooling.addons.schema import SourceRef
 from k8s_stack_tooling.addons.sources import (
     VerifiedSelection,
     _check_database_bindings,
-    _database_provider_resources,
+    _database_provider_endpoints,
     validate_selection_images,
 )
 
@@ -107,47 +106,16 @@ def bindings():
             {},
             {key: {"addon": settings}},
         )
-    providers = [
-        {
-            "kind": "Service",
-            "metadata": {"namespace": "infra-postgres-operations", "name": "postgres-operations"},
-            "spec": {
-                "selector": {"app": "database"},
-                "ports": [
-                    {"name": "postgresql", "port": 5432, "targetPort": "postgresql"},
-                    {"name": "documentdb", "port": 10260, "targetPort": "documentdb"},
-                ],
-            },
+    providers = {
+        ("infra-postgres-operations", "postgres-operations"): {
+            "postgresql": 5432,
+            "documentdb": 10260,
         },
-        {
-            "kind": "StatefulSet",
-            "metadata": {"namespace": "infra-postgres-operations"},
-            "spec": {
-                "template": {
-                    "metadata": {"labels": {"app": "database"}},
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "database",
-                                "ports": [
-                                    {"name": "postgresql", "containerPort": 9712},
-                                    {"name": "documentdb", "containerPort": 10260},
-                                ],
-                                "env": [
-                                    {"name": "POSTGRESQL_PORT", "value": "9712"},
-                                    {"name": "DOCUMENTDB_PORT", "value": "10260"},
-                                ],
-                            }
-                        ],
-                    },
-                }
-            },
-        },
-    ]
+    }
     return selection, packages, results, providers
 
 
-def test_shared_service_binds_both_actual_engine_listeners(bindings):
+def test_shared_service_binds_both_verified_engine_endpoints(bindings):
     _check_database_bindings(*bindings)
 
 
@@ -157,10 +125,6 @@ def test_shared_service_binds_both_actual_engine_listeners(bindings):
         "source",
         "host",
         "port",
-        "service-port",
-        "target",
-        "selector",
-        "listener",
         "job",
         "missing-provider",
         "missing-job",
@@ -168,37 +132,35 @@ def test_shared_service_binds_both_actual_engine_listeners(bindings):
         "role",
     ],
 )
-def test_effective_binding_overrides_cannot_bypass_claims(bindings, change):
+@pytest.mark.parametrize("engine", ["sql", "documents"])
+def test_effective_binding_overrides_cannot_bypass_claims(bindings, change, engine):
     selection, packages, results, providers = bindings
-    result = results["documents"]
+    result = results[engine]
     key = next(iter(result.effective_values))
     settings = result.effective_values[key]["addon"]
     if change == "source":
-        packages["documents"]["app"][0]["spec"]["chart"]["spec"]["sourceRef"]["name"] = "unverified"
+        packages[engine]["app"][0]["spec"]["chart"]["spec"]["sourceRef"]["name"] = "unverified"
     elif change == "host":
-        settings["host"] = "other.infra-postgres-operations.svc.cluster.local"
+        settings["postgresHost" if engine == "sql" else "host"] = (
+            "other.infra-postgres-operations.svc.cluster.local"
+        )
     elif change == "port":
-        settings["documentdbPort"] = 5432
-    elif change == "service-port":
-        providers[0]["spec"]["ports"][1]["port"] = 5433
-    elif change == "target":
-        providers[0]["spec"]["ports"][1]["targetPort"] = "postgresql"
-    elif change == "selector":
-        providers[0]["spec"]["selector"] = {"app": "other"}
-    elif change == "listener":
-        providers[1]["spec"]["template"]["spec"]["containers"][0]["env"][1]["value"] = "9712"
+        settings["postgresPort" if engine == "sql" else "documentdbPort"] = 15432
     elif change == "job":
         result.rendered[key][0]["spec"]["template"]["spec"]["containers"][0]["env"][-1]["value"] = (
-            "5432"
+            "15432"
         )
     elif change == "missing-provider":
         providers.clear()
     elif change == "missing-job":
         result.rendered[key].clear()
     elif change == "database":
-        settings["database"] = "undeclared"
+        if engine == "sql":
+            settings["databases"][0]["name"] = "undeclared"
+        else:
+            settings["database"] = "undeclared"
     else:
-        settings["user"] = "undeclared"
+        settings["role" if engine == "sql" else "user"] = "undeclared"
     with pytest.raises(ContractError):
         _check_database_bindings(selection, packages, results, providers)
 
@@ -209,21 +171,12 @@ def provider_chart(tmp_path):
     chart = root / "charts/postgres/operations"
     (chart / "templates").mkdir(parents=True)
     (chart / "Chart.yaml").write_text("apiVersion: v2\nname: database\nversion: 1.0.0\n")
-    (chart / "values.yaml").write_text("postgresOperations:\n  port: 5432\n")
-    (chart / "templates/_helpers.tpl").write_text("")
-    (chart / "templates/config-map.yaml").write_text("")
-    (chart / "templates/stateful-set.yaml").write_text("")
-    (chart / "templates/service.yaml").write_text("""apiVersion: v1
-kind: Service
-metadata:
-  name: postgres-operations
-spec:
-  ports:
-    - name: postgresql
-      port: {{ .Values.postgresOperations.port }}
-      targetPort: postgresql
-""")
-    # Evaluating this unrelated template would require private input. It must not run.
+    defaults = {
+        "service": {"postgresqlPort": 5432, "documentdbPort": 10260},
+        "containerPorts": {"postgresql": 9712, "documentdb": 10260},
+    }
+    (chart / "values.yaml").write_text(yaml.safe_dump({"postgresOperations": defaults}))
+    # Provider templates are trusted Base implementation details, not re-rendered here.
     (chart / "templates/secret.yaml").write_text(
         '{{ fail "unrelated credential template evaluated" }}'
     )
@@ -237,45 +190,98 @@ spec:
                     "sourceRef": BASE.model_dump(by_alias=True),
                 }
             },
-            "valuesFrom": [{"kind": "ConfigMap", "name": "settings"}],
+            "values": {"postgresOperations": defaults},
+            "valuesFrom": [
+                {"kind": "Secret", "name": "postgres-operations-values"},
+                {"kind": "ConfigMap", "name": "settings"},
+                {"kind": "Secret", "name": "addon-postgres-values", "optional": True},
+            ],
         },
     }
-    maps = {
-        ("database", "settings"): {
-            "kind": "ConfigMap",
-            "metadata": {"namespace": "database", "name": "settings"},
-            "data": {"values.yaml": "postgresOperations:\n  port: 15432\n"},
-        }
-    }
-    return root, release, maps
+    return root, release
 
 
-def test_provider_render_uses_real_nonsecret_overrides_not_unrelated_credentials(provider_chart):
-    root, release, maps = provider_chart
-    result = _database_provider_resources(
+def test_provider_inline_pins_dominate_ordinary_secret_values_without_rendering(
+    provider_chart, monkeypatch
+):
+    root, release = provider_chart
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("provider proof must not invoke a renderer")
+
+    monkeypatch.setattr("k8s_stack_tooling.addons.sources.subprocess.run", forbidden)
+    release["spec"]["targetNamespace"] = "selected-database"
+    release["spec"]["releaseName"] = "other-release-name"
+    result = _database_provider_endpoints(
         [release],
         base_source=BASE,
         sources={("GitRepository", "flux-system", "base"): root},
-        configmaps=maps,
-        kube_version="1.35.0",
-        api_versions=(),
     )
-    assert result[0]["spec"]["ports"][0]["port"] == 15432
-    assert result[0]["metadata"]["namespace"] == "database"
+    assert result == {
+        ("selected-database", "postgres-operations"): {"postgresql": 5432, "documentdb": 10260}
+    }
 
 
-def test_provider_secret_values_are_not_silently_ignored(provider_chart):
-    root, release, maps = provider_chart
-    release = copy.deepcopy(release)
-    release["spec"]["valuesFrom"].append({"kind": "Secret", "name": "unknown", "optional": True})
-    with pytest.raises(ContractError, match="Secret-dependent"):
-        _database_provider_resources(
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("service", "postgresqlPort"),
+        ("service", "documentdbPort"),
+        ("containerPorts", "postgresql"),
+        ("containerPorts", "documentdb"),
+    ],
+)
+def test_each_endpoint_pin_is_required(provider_chart, section, field):
+    root, release = provider_chart
+    del release["spec"]["values"]["postgresOperations"][section][field]
+    with pytest.raises(ContractError, match="four explicit inline"):
+        _database_provider_endpoints(
             [release],
             base_source=BASE,
             sources={("GitRepository", "flux-system", "base"): root},
-            configmaps=maps,
-            kube_version="1.35.0",
-            api_versions=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "targetPath",
+        "pin",
+        "listener-pin",
+        "boolean",
+        "valuesFiles",
+        "postRenderers",
+        "source",
+        "defaults",
+    ],
+)
+def test_provider_pins_cannot_be_defeated_by_overrides(provider_chart, change):
+    root, release = provider_chart
+    spec = release["spec"]
+    pinned = spec["values"]["postgresOperations"]
+    if change == "targetPath":
+        spec["valuesFrom"][0]["targetPath"] = "postgresOperations.service.postgresqlPort"
+    elif change == "pin":
+        pinned["service"]["postgresqlPort"] = 10260
+    elif change == "listener-pin":
+        pinned["containerPorts"]["postgresql"] = 10260
+    elif change == "boolean":
+        pinned["service"]["postgresqlPort"] = True
+    elif change == "valuesFiles":
+        spec["chart"]["spec"]["valuesFiles"] = ["different.yaml"]
+    elif change == "postRenderers":
+        spec["postRenderers"] = [{"kustomize": {"patches": []}}]
+    elif change == "source":
+        spec["chart"]["spec"]["sourceRef"]["name"] = "other"
+    else:
+        (root / "charts/postgres/operations/values.yaml").write_text(
+            yaml.safe_dump({"postgresOperations": {"service": {"postgresqlPort": 15432}}})
+        )
+    with pytest.raises(ContractError):
+        _database_provider_endpoints(
+            [release],
+            base_source=BASE,
+            sources={("GitRepository", "flux-system", "base"): root},
         )
 
 
@@ -311,7 +317,7 @@ def test_source_verified_composition_requires_actual_database_provider(
         "k8s_stack_tooling.addons.helm_images.validate_helm_images",
         lambda *args, **kwargs: results["sql"],
     )
-    with pytest.raises(ContractError, match="actual selected Base Service"):
+    with pytest.raises(ContractError, match="selected pinned Base Service"):
         validate_selection_images(
             snapshot,
             client=client,
