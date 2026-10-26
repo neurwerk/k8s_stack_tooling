@@ -16,9 +16,11 @@ from k8s_stack_tooling.agentgateway_trust import Document
 from k8s_stack_tooling.dify_model_sync.projection import select_models
 from k8s_stack_tooling.gateway_catalog import GatewayCatalog
 from k8s_stack_tooling.gateway_model_metadata import (
+    MAX_TOKEN_LIMIT,
     BindingID,
     Capabilities,
     MetadataError,
+    MetadataSource,
     SourceModel,
     load_json,
     utc_time,
@@ -27,7 +29,7 @@ from k8s_stack_tooling.gateway_model_metadata import (
 
 class ProviderSource(Document):
     kind: Literal["openrouter", "deepseek", "llamacpp", "ollama"]
-    source: str = Field(min_length=1, max_length=2048)
+    source: MetadataSource
     credential_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]*$")
     credential_file: str | None = Field(default=None, min_length=1, max_length=4096)
 
@@ -82,7 +84,7 @@ def unknown_capabilities() -> dict[str, str]:
 def positive(value: Any) -> int | None:
     if value is None:
         return None
-    if type(value) is not int or not 0 < value <= 2_147_483_647:
+    if type(value) is not int or not 0 < value <= MAX_TOKEN_LIMIT:
         raise MetadataError("provider token limit is not a positive integer")
     return value
 
@@ -150,15 +152,11 @@ def runtime_metadata(
     if type(vision) is bool:
         caps["image_input"] = "supported" if vision else "unsupported"
     settings = props.get("default_generation_settings", {})
-    params = settings.get("params", {})
-    # -1 means unbounded/default, not an output ceiling; leave it unknown for review.
-    output = params.get("n_predict", params.get("max_tokens"))
-    if type(output) is int and output in {-1, -2, 0}:
-        output = None
+    # Generation defaults (including positive n_predict/max_tokens) are not request ceilings.
     return {
         "context_tokens": positive(settings.get("n_ctx")),
         "max_input_tokens": None,
-        "max_output_tokens": positive(output),
+        "max_output_tokens": None,
     }, caps
 
 

@@ -24,7 +24,7 @@ def retain_metadata(generated: GeneratedFiles, path: Path) -> GeneratedFiles:
     models = existing["gatewayModelMetadata"]["models"]
     validated = [SourceModel.model_validate(row).model_dump() for row in models]
     catalog = yaml.safe_load(generated.catalog)
-    catalog["gatewayModelMetadata"] = {"models": validated}
+    catalog["gatewayModelMetadata"] = {**existing["gatewayModelMetadata"], "models": validated}
     return replace(
         generated, catalog=yaml.safe_dump(catalog, allow_unicode=True, sort_keys=False).encode()
     )
@@ -78,9 +78,11 @@ def with_metadata(
             model.provenance.require_fresh(datetime.now(UTC))
             metadata.append(model.model_dump())
     # Preserve independently refreshed direct/local records in this shared central output.
-    previous = catalog.get("gatewayModelMetadata", config.get("gatewayModelMetadata", {})).get(
-        "models", []
-    )
+    previous_metadata = {
+        **config.get("gatewayModelMetadata", {}),
+        **catalog.get("gatewayModelMetadata", {}),
+    }
+    previous = previous_metadata.get("models", [])
     replaced_bindings = {
         binding["id"]
         for binding in config.get("external-api-providers", [])
@@ -92,7 +94,10 @@ def with_metadata(
         if row.get("binding_id") not in replaced_bindings
     ]
     catalog["gatewayModelMetadata"] = {
-        "models": sorted(retained + metadata, key=lambda row: (row["binding_id"], row["public_id"]))
+        **previous_metadata,
+        "models": sorted(
+            retained + metadata, key=lambda row: (row["binding_id"], row["public_id"])
+        ),
     }
     content = yaml.safe_dump(catalog, allow_unicode=True, sort_keys=False).encode()
     if len(content) > 900_000:

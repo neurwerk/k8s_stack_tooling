@@ -116,3 +116,27 @@ def test_missing_limits_and_expired_source_do_not_guess(tmp_path: Path) -> None:
     data[0]["top_provider"] = {}
     with pytest.raises(CatalogSyncError, match="limits"):
         with_metadata(generated(), data, [path], *snapshot())
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+def test_metadata_refresh_and_retention_preserve_explicit_enablement(
+    tmp_path: Path, enabled: bool | None
+) -> None:
+    path = values(tmp_path)
+    config = yaml.safe_load(path.read_text())
+    config["gatewayModelMetadata"] = {"models": []}
+    if enabled is not None:
+        config["gatewayModelMetadata"]["enabled"] = enabled
+    path.write_text(yaml.safe_dump(config))
+    refreshed = with_metadata(generated(), inventory(), [path], *snapshot())
+    output = tmp_path / "catalog.yaml"
+    output.write_bytes(refreshed.catalog)
+    retained = retain_metadata(generated(), output)
+    refreshed_again = with_metadata(retained, inventory(), [path], *snapshot())
+    for result in (refreshed, retained, refreshed_again):
+        metadata = yaml.safe_load(result.catalog)["gatewayModelMetadata"]
+        assert len(metadata["models"]) == 1
+        if enabled is None:
+            assert "enabled" not in metadata
+        else:
+            assert metadata["enabled"] is enabled

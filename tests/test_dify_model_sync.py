@@ -4,6 +4,7 @@ import copy
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -392,7 +393,8 @@ def test_wait_does_not_report_partial_errors_as_success():
     }
 
 
-def test_native_metadata_exact_identity_runtime_context_and_unbounded_output():
+@pytest.mark.parametrize("params", [{"n_predict": -1}, {"n_predict": 512}, {"max_tokens": 512}])
+def test_native_metadata_exact_identity_runtime_context_and_unbounded_output(params):
     limits, caps = refresh.deepseek_metadata(
         {
             "id": "native-chat",
@@ -405,7 +407,7 @@ def test_native_metadata_exact_identity_runtime_context_and_unbounded_output():
     limits, caps = refresh.runtime_metadata(
         {"meta": {"n_ctx_train": 128000}},
         {
-            "default_generation_settings": {"n_ctx": 4096, "params": {"n_predict": -1}},
+            "default_generation_settings": {"n_ctx": 4096, "params": params},
             "chat_template_caps": {"supports_tool_calls": False},
         },
     )
@@ -533,6 +535,67 @@ def test_explicit_context_required_without_api_calls(monkeypatch):
 def test_source_model_rejects_gateway_manufactured_restrictions():
     with pytest.raises(ValidationError):
         SourceModel.model_validate(record())
+
+
+@pytest.mark.parametrize("limit", [2_147_483_648, 9_007_199_254_740_991])
+def test_source_limits_keep_base_safe_integer_range(limit):
+    source = record()
+    source.pop("gateway_restrictions")
+    source["limits"] = dict.fromkeys(source["limits"], limit)
+    assert SourceModel.model_validate(source).limits.context_tokens == limit
+    assert refresh.positive(limit) == limit
+
+
+def test_source_limits_reject_values_above_base_safe_integer_range():
+    source = record()
+    source.pop("gateway_restrictions")
+    source["limits"]["context_tokens"] = 9_007_199_254_740_992
+    with pytest.raises(ValidationError):
+        SourceModel.model_validate(source)
+    with pytest.raises(MetadataError):
+        refresh.positive(9_007_199_254_740_992)
+
+
+def test_source_binding_provenance_and_timestamp_boundaries_match_base():
+    source = record()
+    source.pop("gateway_restrictions")
+    source["binding_id"] = "a" + "-" * 30 + "b"
+    source["provenance"].update(
+        source="s" * 512,
+        observed_at="2025-01-01T00:00:00.123456789Z",
+        valid_until="2026-01-01T00:00:00.123456789Z",
+    )
+    SourceModel.model_validate(source)
+    for field, invalid in (
+        ("binding_id", "a" * 33),
+        ("binding_id", "a-"),
+        ("source", "s" * 513),
+        ("observed_at", "2025-01-01T00:00:00.1234567890Z"),
+        ("observed_at", "2025-01-01T00:00:00+00:00"),
+    ):
+        malformed = copy.deepcopy(source)
+        if field == "binding_id":
+            malformed[field] = invalid
+        else:
+            malformed["provenance"][field] = invalid
+        with pytest.raises(ValidationError):
+            SourceModel.model_validate(malformed)
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+def test_generic_metadata_write_preserves_enablement_and_unrelated_fields(tmp_path, enabled):
+    path = tmp_path / "values.yaml"
+    before: dict[str, Any] = {
+        "gatewayModelMetadata": {"models": ["old"]},
+        "unrelated": {"keep": True},
+    }
+    if enabled is not None:
+        before["gatewayModelMetadata"]["enabled"] = enabled
+    path.write_text(yaml.safe_dump(before))
+    main.write_values(path, {"gatewayModelMetadata": {"models": []}})
+    expected = copy.deepcopy(before)
+    expected["gatewayModelMetadata"]["models"] = []
+    assert yaml.safe_load(path.read_text()) == expected
 
 
 def test_ollama_unloaded_training_context_is_not_an_effective_limit():

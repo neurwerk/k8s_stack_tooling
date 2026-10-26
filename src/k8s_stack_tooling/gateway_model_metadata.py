@@ -39,11 +39,21 @@ Bounded = Annotated[
     Field(min_length=1, max_length=2048, pattern=r"^[^\x00-\x1f\x7f]+$"),
     AfterValidator(valid_unicode),
 ]
-BindingID = Annotated[str, Field(min_length=1, max_length=63, pattern=r"^[a-z0-9][a-z0-9-]*$")]
-PublicID = Annotated[
-    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+MetadataSource = Annotated[
+    str,
+    Field(min_length=1, max_length=512, pattern=r"^[^\x00-\x1f\x7f]+$"),
+    AfterValidator(valid_unicode),
 ]
-TokenLimit = Annotated[int, Field(strict=True, gt=0, le=2_147_483_647)]
+BindingID = Annotated[
+    str, Field(min_length=1, max_length=32, pattern=r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
+]
+PublicID = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+]
+MAX_TOKEN_LIMIT = 9_007_199_254_740_991
+TokenLimit = Annotated[int, Field(strict=True, gt=0, le=MAX_TOKEN_LIMIT)]
+TIMESTAMP_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$"
+Timestamp = Annotated[str, Field(max_length=40, pattern=TIMESTAMP_PATTERN)]
 MAX_BYTES = 1_048_576
 
 
@@ -112,7 +122,7 @@ def load_json(text: str, *, max_bytes: int = MAX_BYTES) -> dict[str, Any]:
 
 
 def utc_time(value: str) -> datetime:
-    if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z", value):
+    if len(value) > 40 or not re.fullmatch(TIMESTAMP_PATTERN, value):
         raise MetadataError("timestamps must be UTC RFC3339")
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -145,9 +155,9 @@ class Capabilities(Document):
 
 class Provenance(Document):
     kind: Literal["provider_api", "runtime", "reviewed_config"]
-    source: Bounded
-    observed_at: str
-    valid_until: str
+    source: MetadataSource
+    observed_at: Timestamp
+    valid_until: Timestamp
 
     @model_validator(mode="after")
     def ordered_times(self) -> Self:
