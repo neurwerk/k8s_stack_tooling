@@ -6,8 +6,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,7 @@ from .schema import (
     expand_setup,
     load_manifest,
     load_selection,
+    parse_yaml,
 )
 from .validation import (
     CLIENT_SOURCE,
@@ -39,6 +42,7 @@ from .validation import (
     check_secret_deliveries,
     check_verifier_reader_separation,
     inside,
+    pod_containers,
     render,
     render_addon_packages,
     render_stage,
@@ -334,6 +338,267 @@ def _selected_base_resources(selection: VerifiedSelection, client: Path, base: P
     return [obj for stage in stages for obj in render_stage(stage, base)]
 
 
+def _database_provider_resources(
+    resources: list[dict],
+    *,
+    base_source: SourceRef,
+    sources: Mapping[tuple[str, str, str], Path],
+    configmaps: Mapping[tuple[str, str], dict],
+    kube_version: str,
+    api_versions: tuple[str, ...],
+) -> list[dict]:
+    """Render only the supported Base provider's nonsecret endpoint topology with Helm.
+
+    Use the existing chart confinement and nonsecret values loader. In particular,
+    Secret-backed provider values cannot be dropped: they could override any port.
+    Do not evaluate unrelated provider Secret/provisioning templates or invent input.
+    """
+    from .helm_images import _chart, _values
+
+    result = []
+    for resource in resources:
+        if resource.get("kind") != "HelmRelease":
+            continue
+        spec = resource["spec"]
+        chart = spec.get("chart", {}).get("spec", {})
+        if chart.get("chart", "").removeprefix("./") != "charts/postgres/operations":
+            continue
+        reference = chart.get("sourceRef", {})
+        if (
+            reference.get("kind"),
+            reference.get("namespace", resource["metadata"]["namespace"]),
+            reference.get("name"),
+        ) != _key(base_source):
+            raise ContractError("database provider must come from the selected Base source")
+        path = _chart(resource, sources)
+        values = _values(resource, configmaps)
+        namespace = spec.get("targetNamespace", resource["metadata"]["namespace"])
+        name = spec.get("releaseName") or (
+            f"{namespace}-{resource['metadata']['name']}"
+            if spec.get("targetNamespace")
+            else resource["metadata"]["name"]
+        )
+        # A confined chart slice uses Helm itself, not a second template engine.
+        # StatefulSet checksum references config-map.yaml; none of these files
+        # materialize provider credentials. Missing/changed interfaces fail closed.
+        with tempfile.TemporaryDirectory(prefix="database-endpoints-") as temporary:
+            root = Path(temporary)
+            for file in (
+                "Chart.yaml",
+                "values.yaml",
+                "templates/_helpers.tpl",
+                "templates/service.yaml",
+                "templates/stateful-set.yaml",
+                "templates/config-map.yaml",
+            ):
+                destination = root / file
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copyfile(path / file, destination)
+                except OSError:
+                    raise ContractError(
+                        "selected Base lacks the database topology interface"
+                    ) from None
+            command = [
+                "helm",
+                "template",
+                name,
+                str(root),
+                "--namespace",
+                namespace,
+                "--kube-version",
+                kube_version,
+                "--values",
+                "-",
+            ]
+            for version in api_versions:
+                command.extend(["--api-versions", version])
+            phases = []
+            for phase in ([], ["--is-upgrade"]):
+                try:
+                    process = subprocess.run(
+                        command + phase,
+                        input=yaml.safe_dump(values),
+                        text=True,
+                        capture_output=True,
+                        timeout=60,
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    raise ContractError("could not render database provider topology") from None
+                if process.returncode:
+                    raise ContractError(
+                        "database provider endpoint rendering failed; output suppressed"
+                    )
+                objects = [obj for obj in parse_yaml(process.stdout.encode(), multiple=True) if obj]
+                if any(
+                    not isinstance(obj, dict)
+                    or obj.get("kind") not in {"Service", "StatefulSet", "ConfigMap"}
+                    for obj in objects
+                ):
+                    raise ContractError("unexpected resource in database provider topology")
+                for obj in objects:
+                    obj.setdefault("metadata", {}).setdefault("namespace", namespace)
+                phases.append(objects)
+            if phases[0] != phases[1]:
+                raise ContractError(
+                    "database provider topology differs between install and upgrade"
+                )
+            result.extend(phases[0])
+    return result
+
+
+def _check_database_bindings(
+    selection: VerifiedSelection,
+    packages: Mapping[str, dict[str, list[dict]]],
+    results: Mapping[str, HelmImageResult],
+    providers: list[dict],
+) -> None:
+    """Bind every claim to one verified Base provisioner and the actual engine port."""
+    try:
+        for item in selection.addons:
+            addon = item.definition
+            result = results[addon.metadata.name]
+            for claim in addon.spec.databases:
+                releases = []
+                for release in packages[addon.metadata.name][claim.package]:
+                    if release.get("kind") != "HelmRelease":
+                        continue
+                    chart = release["spec"].get("chart", {}).get("spec", {})
+                    if chart.get("chart", "").removeprefix("./") != claim.base_chart:
+                        continue
+                    reference = chart.get("sourceRef", {})
+                    if (
+                        reference.get("kind"),
+                        reference.get("namespace", release["metadata"]["namespace"]),
+                        reference.get("name"),
+                    ) != _key(selection.base.reference):
+                        raise ContractError(
+                            "database provisioning must use the selected Base source"
+                        )
+                    releases.append(release)
+                if len(releases) != 1:
+                    raise ContractError("database claim requires one verified provisioning release")
+                release = releases[0]
+                key = (claim.package, release["metadata"]["namespace"], release["metadata"]["name"])
+                settings = result.effective_values[key]["addon"]
+                sql = claim.engine == "postgresql"
+                if sql:
+                    declarations = settings["databases"]
+                    databases = [d for d in declarations if d["name"] == claim.database]
+                    if (
+                        settings["role"] != claim.role
+                        or len(databases) != 1
+                        or bool(databases[0].get("vector", False)) != ("vector" in claim.extensions)
+                    ):
+                        raise ContractError(
+                            "database claim differs from effective SQL provisioning"
+                        )
+                elif (
+                    settings.get("enabled") is not True
+                    or settings["user"] != claim.role
+                    or settings["database"] != claim.database
+                ):
+                    raise ContractError(
+                        "database claim differs from effective DocumentDB provisioning"
+                    )
+                service_key = (claim.service.namespace, claim.service.name)
+                services = [
+                    obj
+                    for obj in providers
+                    if obj["kind"] == "Service"
+                    and (obj["metadata"]["namespace"], obj["metadata"]["name"]) == service_key
+                ]
+                if len(services) != 1:
+                    raise ContractError("database claim requires one actual selected Base Service")
+                service = services[0]
+                ports = {p["name"]: p for p in service["spec"]["ports"]}
+                if len(ports) != len(service["spec"]["ports"]):
+                    raise ContractError("ambiguous database provider port names")
+                if any(
+                    type(p["port"]) is not int or not 1 <= p["port"] <= 65535
+                    for p in ports.values()
+                ) or len({p["port"] for p in ports.values()}) != len(ports):
+                    raise ContractError("database provider has invalid or overlapping engine ports")
+                engine_port = "postgresql" if sql else "documentdb"
+                host = settings["postgresHost" if sql else "host"]
+                if host not in {
+                    f"{claim.service.name}.{claim.service.namespace}.svc",
+                    f"{claim.service.name}.{claim.service.namespace}.svc.cluster.local",
+                }:
+                    raise ContractError(
+                        "database provisioning host differs from its claimed Service"
+                    )
+                required_ports = {"postgresql": settings["postgresPort"]}
+                if not sql:
+                    required_ports["documentdb"] = settings["documentdbPort"]
+                for name, port in required_ports.items():
+                    entry = ports[name]
+                    if (
+                        type(port) is not int
+                        or entry["port"] != port
+                        or entry.get("protocol", "TCP") != "TCP"
+                        or entry["targetPort"] != name
+                    ):
+                        raise ContractError(
+                            "database provisioning port differs from its engine endpoint"
+                        )
+                selector = service["spec"]["selector"]
+                pods = [
+                    obj["spec"]["template"]
+                    for obj in providers
+                    if obj["kind"] == "StatefulSet"
+                    and obj["metadata"]["namespace"] == claim.service.namespace
+                    and selector
+                    and selector.items()
+                    <= obj["spec"]["template"]["metadata"].get("labels", {}).items()
+                ]
+                if len(pods) != 1:
+                    raise ContractError("database Service requires one selected provider workload")
+                target = ports[engine_port]["targetPort"]
+                targets = [
+                    (container, port)
+                    for container in pods[0]["spec"]["containers"]
+                    for port in container.get("ports", [])
+                    if port.get("name") == target
+                ]
+                if len(targets) != 1:
+                    raise ContractError(
+                        "database Service target does not identify its engine listener"
+                    )
+                container, port = targets[0]
+                environment = {e["name"]: e.get("value") for e in container.get("env", [])}
+                variable = "POSTGRESQL_PORT" if sql else "DOCUMENTDB_PORT"
+                if environment.get(variable) != str(port["containerPort"]):
+                    raise ContractError(
+                        "database Service target differs from the native engine listener"
+                    )
+                jobs = [obj for obj in result.rendered[key] if obj["kind"] == "Job"]
+                if not jobs:
+                    raise ContractError("database provisioning Job is absent")
+                for job in jobs:
+                    containers = [c for _, c in pod_containers(job) if c["name"] == "provision"]
+                    if len(containers) != 1:
+                        raise ContractError("database provisioning container is ambiguous")
+                    env = {e["name"]: e.get("value") for e in containers[0].get("env", [])}
+                    if env.get("PGHOST") != host or env.get("PGPORT") != str(
+                        settings["postgresPort"]
+                    ):
+                        raise ContractError(
+                            "rendered database connection differs from verified settings"
+                        )
+                    if not sql and (
+                        env.get("DOCUMENTDB_HOST") != host
+                        or env.get("DOCUMENTDB_PORT") != str(settings["documentdbPort"])
+                    ):
+                        raise ContractError(
+                            "rendered document endpoint differs from verified settings"
+                        )
+    except (KeyError, TypeError, AttributeError):
+        raise ContractError("incomplete verified database endpoint binding") from None
+    check_database_claims([item.definition for item in selection.addons])
+
+
 def validate_selection_images(
     selection: VerifiedSelection,
     *,
@@ -446,6 +711,16 @@ def validate_selection_images(
             client_resources=client_resources,
         )
         results[product] = result
+    if any(item.definition.spec.databases for item in selection.addons):
+        providers = _database_provider_resources(
+            base_resources,
+            base_source=selection.base.reference,
+            sources=sources,
+            configmaps=configmaps,
+            kube_version=kube_version,
+            api_versions=api_versions,
+        )
+        _check_database_bindings(selection, packages, results, providers)
     return results
 
 
