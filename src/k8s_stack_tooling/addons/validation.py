@@ -561,20 +561,21 @@ def check_browser_bindings(addon: Addon, packages: dict[str, list[dict]]) -> Non
 
 
 def check_database_claims(addons: list[Addon]) -> None:
-    """Check selected logical ownership, SQL role isolation, and exclusive services."""
+    """Check engine endpoints, shared SQL role ownership, and DocumentDB exclusivity."""
     databases = set()
     roles = {}
-    services = {}
+    endpoints = {}
     for addon in addons:
         for claim in addon.spec.databases:
             service = (claim.service.namespace, claim.service.name)
-            previous = services.get(service)
-            if previous and (
-                previous.engine != claim.engine or previous.exclusive or claim.exclusive
-            ):
-                raise ContractError("database service has incompatible or exclusive consumers")
-            services[service] = claim
-            key = (*service, claim.database)
+            # Base exposes PostgreSQL and DocumentDB on distinct ports of one Service.
+            endpoint = (*service, claim.engine)
+            previous = endpoints.get(endpoint)
+            if previous and (previous.exclusive or claim.exclusive):
+                raise ContractError("database endpoint has exclusive consumers")
+            endpoints[endpoint] = claim
+            key = (*endpoint, claim.database)
+            # DocumentDB provisioning also owns a PostgreSQL role on this Service.
             role = (*service, claim.role)
             owner = (addon.metadata.name, claim.owner)
             if key in databases or (role in roles and roles[role] != owner):
