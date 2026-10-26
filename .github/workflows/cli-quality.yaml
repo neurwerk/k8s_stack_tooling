@@ -124,14 +124,14 @@ jobs:
   kokoro_adapter:
     name: Kokoro adapter (Python 3.11, offline)
     runs-on: ubuntu-latest
-    env:
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/kokoro-adapter-venv
     defaults:
       run:
         working-directory: cli_tools/inference_runtime_manager/src/inference_runtime_manager/resources/kokoro_onnx
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Isolate adapter dependencies
+        run: echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/kokoro-adapter-venv" >> "$GITHUB_ENV"
       - run: uv python install 3.11
       - run: uv lock --check
       - run: uv sync --frozen
