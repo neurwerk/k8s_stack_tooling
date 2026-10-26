@@ -41,6 +41,7 @@ addon-check = "k8s_stack_tooling.addons:main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 stage-documentdb-provisioner = "k8s_stack_tooling.postgres.documentdb:main"
 provision-glitchtip = "k8s_stack_tooling.glitchtip.provision:main"
+dify-model-sync = "k8s_stack_tooling.dify_model_sync.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/k8s_stack_tooling"]
