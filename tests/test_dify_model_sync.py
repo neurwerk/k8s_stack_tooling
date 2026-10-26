@@ -3,14 +3,18 @@
 import copy
 import json
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 import yaml
+from kubernetes.client import ApiClient, CoreV1Api
 from kubernetes.client.rest import ApiException
 from pydantic import ValidationError
+from urllib3.exceptions import HTTPError
+from urllib3.response import HTTPResponse
 
 from k8s_stack_tooling import model_metadata_refresh as refresh
 from k8s_stack_tooling.dify_model_sync import launcher, main
@@ -444,11 +448,106 @@ def test_wait_reports_helper_plans_separately_on_preview_apply_and_partial_failu
     summary = helper_summary(mode)
     if mode == "apply" and condition == "Complete":
         summary["counts"] = copy.deepcopy(summary["planned_counts"])
-    core.read_namespaced_pod_log.return_value = json.dumps({**summary, "private_error": "omitted"})
+    response = Mock()
+    response.read.return_value = json.dumps({**summary, "private_error": "omitted"}).encode()
+    core.read_namespaced_pod_log.return_value = response
     assert launcher.wait_result(core, batch, "run", "dify", 1, mode=mode) == {
         "status": expected_status,
         **summary,
     }
+    core.read_namespaced_pod_log.assert_called_once_with(
+        "run-pod",
+        "dify",
+        tail_lines=1,
+        limit_bytes=16384,
+        _preload_content=False,
+        _request_timeout=launcher.TIMEOUT,
+    )
+    response.read.assert_called_once_with(16385)
+    response.close.assert_called_once_with()
+    response.release_conn.assert_called_once_with()
+
+
+def test_sdk_json_log_deserialization_changes_json_but_raw_response_preserves_it(monkeypatch):
+    summary = helper_summary("preview")
+    encoded = json.dumps(summary).encode("utf-8")
+    deserialized_response = HTTPResponse(body=BytesIO(encoded), status=200, preload_content=False)
+    raw_response = HTTPResponse(body=BytesIO(encoded), status=200, preload_content=False)
+    with ApiClient() as api:
+        get = Mock(side_effect=[deserialized_response, raw_response])
+        monkeypatch.setattr(api.rest_client, "GET", get)
+        core = CoreV1Api(api)
+        try:
+            coerced = core.read_namespaced_pod_log("run-pod", "dify")
+            assert coerced == str(summary)
+            assert launcher.safe_summary(coerced, mode="preview") == {}
+            raw = core.read_namespaced_pod_log("run-pod", "dify", _preload_content=False)
+            assert raw is raw_response
+            assert launcher.safe_summary(raw.read(16385).decode("utf-8"), mode="preview") == summary
+        finally:
+            for response in (deserialized_response, raw_response):
+                response.close()
+                response.release_conn()
+        assert get.call_args.kwargs["_preload_content"] is False
+
+
+@pytest.mark.parametrize("case", ["malformed", "missing", "utf8", "oversize", "mode", "counts"])
+def test_wait_raw_log_errors_are_bounded_released_and_uncertain(case, capsys):
+    summary = helper_summary("preview")
+    if case == "mode":
+        summary["mode"] = "apply"
+    if case == "counts":
+        summary["counts"]["created"] = True
+    payload = {
+        "malformed": b"not JSON",
+        "missing": b"",
+        "utf8": b"\xff",
+        "oversize": b" " * 20000,
+    }.get(case, json.dumps(summary).encode())
+    stream = BytesIO(payload)
+    raw = HTTPResponse(body=stream, status=200, preload_content=False)
+    response = Mock(wraps=raw)
+    core, batch = Mock(), Mock()
+    batch.read_namespaced_job_status.return_value = NS(
+        status=NS(conditions=[NS(type="Complete", status="True")])
+    )
+    core.list_namespaced_pod.return_value = NS(items=[NS(metadata=NS(name="run-pod"))])
+    core.read_namespaced_pod_log.return_value = response
+    assert launcher.wait_result(core, batch, "run", "dify", 1, mode="preview") == {
+        "status": "uncertain",
+        "counts": {},
+        "planned_counts": {},
+    }
+    response.read.assert_called_once_with(16385)
+    assert raw.tell() <= 16385
+    assert stream.closed
+    response.release_conn.assert_called_once_with()
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("stage", ["request", "read"])
+def test_wait_raw_log_transport_errors_are_sanitized_and_not_retried(stage, capsys):
+    core, batch = Mock(), Mock()
+    batch.read_namespaced_job_status.return_value = NS(
+        status=NS(conditions=[NS(type="Complete", status="True")])
+    )
+    core.list_namespaced_pod.return_value = NS(items=[NS(metadata=NS(name="run-pod"))])
+    response = Mock()
+    if stage == "request":
+        core.read_namespaced_pod_log.side_effect = ApiException(status=503, reason="private detail")
+    else:
+        core.read_namespaced_pod_log.return_value = response
+        response.read.side_effect = HTTPError("private detail")
+    assert launcher.wait_result(core, batch, "run", "dify", 1, mode="preview") == {
+        "status": "uncertain",
+        "counts": {},
+        "planned_counts": {},
+    }
+    core.read_namespaced_pod_log.assert_called_once()
+    if stage == "read":
+        response.close.assert_called_once_with()
+        response.release_conn.assert_called_once_with()
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.parametrize("params", [{"n_predict": -1}, {"n_predict": 512}, {"max_tokens": 512}])

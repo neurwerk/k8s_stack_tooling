@@ -9,6 +9,7 @@ from typing import Any
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+from urllib3.exceptions import HTTPError
 
 from k8s_stack_tooling.dify_model_sync.projection import (
     build_projection,
@@ -208,10 +209,27 @@ def wait_result(
             ).items
             summary: dict[str, Any] = {}
             if len(pods) == 1:
-                logs = core.read_namespaced_pod_log(
-                    pods[0].metadata.name, namespace, limit_bytes=16384, _request_timeout=TIMEOUT
-                )
-                summary = safe_summary(logs, mode=mode)
+                try:
+                    response = core.read_namespaced_pod_log(
+                        pods[0].metadata.name,
+                        namespace,
+                        tail_lines=1,
+                        limit_bytes=16384,
+                        _preload_content=False,
+                        _request_timeout=TIMEOUT,
+                    )
+                    try:
+                        # Enforce the budget locally too; the API limit is approximate.
+                        raw = response.read(16385)
+                        if isinstance(raw, bytes) and len(raw) <= 16384:
+                            summary = safe_summary(raw.decode("utf-8"), mode=mode)
+                    finally:
+                        try:
+                            response.close()
+                        finally:
+                            response.release_conn()
+                except (ApiException, HTTPError, OSError, ValueError):
+                    return {"status": "uncertain", "counts": {}, "planned_counts": {}}
             return {
                 "status": "failed" if failed else ("complete" if summary else "uncertain"),
                 **(summary or {"counts": {}, "planned_counts": {}}),
