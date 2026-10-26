@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from kubernetes.client.exceptions import ApiException
 
+from openbao_stack_setup.catalog import ADDONS
 from openbao_stack_setup.client import OpenBaoError
 from openbao_stack_setup.cluster import Cluster, ClusterError, KubernetesApiEndpoint, StackIdentity
 from openbao_stack_setup.custody import CustodianKey, CustodyPaths
@@ -180,6 +181,40 @@ def test_addon_refresh_orders_secrets_database_and_consumers(addon_id: str, data
         _refresh_addon("context", "client", addon_id)
     cluster.force_reconcile.assert_not_called()
     rollout.assert_not_called()
+
+
+def test_addon_refresh_without_database_orders_secrets_and_consumers() -> None:
+    catalog = replace(ADDONS["dify"], database_release=None)
+    cluster = MagicMock()
+    cluster.selected_addons.return_value = ("dify",)
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
+        patch("openbao_stack_setup.main.addon_catalogs", return_value=(catalog,)),
+        patch("openbao_stack_setup.main._confirm"),
+        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
+        patch("openbao_stack_setup.main.subprocess.run") as rollout,
+    ):
+        _refresh_addon("context", "client", "dify")
+    calls = cluster.mock_calls
+    secret_indexes = [
+        i for i, item in enumerate(calls) if item[0] == "force_external_secret_refresh"
+    ]
+    consumer_indexes = [i for i, item in enumerate(calls) if item[0] == "force_reconcile"]
+    assert secret_indexes and consumer_indexes
+    assert max(secret_indexes) < min(consumer_indexes)
+    assert cluster.force_reconcile.call_args_list == [
+        call(target.name, target.namespace) for target in catalog.consumers
+    ]
+    assert cluster.wait_helm_release.call_args_list == [
+        call(
+            target.name,
+            target.namespace,
+            timeout_seconds=target.timeout_seconds,
+            force_token=cluster.force_reconcile.return_value,
+        )
+        for target in catalog.consumers
+    ]
+    assert rollout.call_count == 2 * len(catalog.workloads)
 
 
 class ControllingTerminal:
