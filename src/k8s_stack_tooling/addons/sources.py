@@ -382,7 +382,7 @@ def validate_selection_images(
             raise ContractError("approved nonsecret ConfigMap identity is invalid")
     base_resources = _selected_base_resources(selection, client, base)
     client_root = client.resolve()
-    client_resources = render(inside(client_root, selection.cluster_dir), root=client_root)
+    client_resources = list(render(inside(client_root, selection.cluster_dir), root=client_root))
     client_stages = [
         obj
         for obj in client_resources
@@ -394,6 +394,12 @@ def validate_selection_images(
     check_verifier_reader_separation([item.definition for item in selection.addons])
     results = {}
     claimed = {}
+    for owner, objects in (("base", base_resources), ("client", client_resources)):
+        for obj in objects:
+            for claim in resource_claims(obj):
+                if claim in claimed:
+                    raise ContractError("Base and client resources have overlapping ownership")
+                claimed[claim] = (owner,)
     for item in selection.addons:
         addon = item.definition
         product = addon.metadata.name
@@ -417,13 +423,6 @@ def validate_selection_images(
         )
         if result is None:
             raise ContractError("effective rendering did not return validated outputs")
-        check_secret_deliveries(
-            addon,
-            [obj for objects in packages[product].values() for obj in objects]
-            + [obj for objects in result.rendered.values() for obj in objects],
-            base_resources,
-            client_resources=client_resources,
-        )
         for name, objects in packages[product].items():
             for obj in objects:
                 for claim in resource_claims(obj):
@@ -439,6 +438,13 @@ def validate_selection_images(
                 if claim in claimed and claimed[claim] != owner:
                     raise ContractError("effective selected resources have overlapping ownership")
                 claimed[claim] = owner
+        check_secret_deliveries(
+            addon,
+            [obj for objects in packages[product].values() for obj in objects]
+            + [obj for objects in result.rendered.values() for obj in objects],
+            base_resources,
+            client_resources=client_resources,
+        )
         results[product] = result
     return results
 
