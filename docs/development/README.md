@@ -1,5 +1,7 @@
 # Development
 
+- [Add-on helpers](addon-helpers.md): public Job and payload-staging helpers for thin product commands.
+
 ## Local environment
 
 Python projects require Python 3.12 or newer and use `uv`. Run commands from the project being changed: the repository root for the image package, or `cli_tools/<project>/` for a workstation CLI. Use the versions in the applicable `.tool-versions` through `mise exec -- <command>` when using mise. The root Node.js tool is needed by DocumentDB provisioning tests.

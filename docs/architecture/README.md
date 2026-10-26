@@ -18,7 +18,7 @@ Each Python project under [cli_tools/](../../cli_tools/) has its own entry point
 | [agentgateway_observe.py](../../src/k8s_stack_tooling/agentgateway_observe.py) | Inspect gateway runtime state and publish observations using in-cluster access. |
 | [ldap_directory.py](../../src/k8s_stack_tooling/ldap_directory.py) | Read directory names in a temporary worker using mounted credentials and LDAPS trust. |
 | [postgres/](../../src/k8s_stack_tooling/postgres/) | Stage DocumentDB provisioning scripts into `/runtime`; the separately pinned DocumentDB client image executes them. |
-| [addons.py](../../src/k8s_stack_tooling/addons.py) | Validate local add-on release inputs and optional Base/client compatibility through `addon-check`. |
+| [addons/](../../src/k8s_stack_tooling/addons/) | Parse manifests and client selection with one shared model; verify selected sources, compatibility, ownership, and image consumers. Acquisition is separate from offline validation. |
 
 ## Execution flows
 
@@ -29,3 +29,5 @@ Each Python project under [cli_tools/](../../cli_tools/) has its own entry point
 **Directory inspection:** the workstation `ldap-directory` CLI creates a temporary Pod and NetworkPolicy, runs `ldap-directory-worker`, displays directory names, then cleans up those temporary resources. The worker reads the mounted bind credential; the workstation does not retrieve its value. Read-only directory inspection still creates Kubernetes resources.
 
 **Release inspection:** `package-checker` reads GitHub package and workflow state. `platform-release` wraps Base's release scripts and uses the explicitly selected Base checkout. Neither publication information nor a successful setup command establishes application readiness.
+
+Add-ons own native payloads and thin product wrappers; [public helpers](../development/addon-helpers.md) own reusable Job handling and staging. Privileged setup remains separate from product code. SDK helpers do not supply OpenBao root authority or establish availability of a newer standalone setup CLI.
