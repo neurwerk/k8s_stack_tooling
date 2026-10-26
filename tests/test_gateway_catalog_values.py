@@ -5,6 +5,7 @@ import stat
 import pytest
 import yaml
 
+from k8s_stack_tooling.addons.schema import parse_yaml
 from k8s_stack_tooling.gateway_catalog import values
 from k8s_stack_tooling.gateway_catalog.metadata import MetadataError
 
@@ -61,3 +62,58 @@ def test_only_safe_yaml_objects_are_accepted(tmp_path, text):
     path.write_text(text)
     with pytest.raises((MetadataError, yaml.YAMLError)):
         values.read_values([path])
+
+
+def test_shared_references_round_trip_through_strict_parser_without_mutating_inputs(tmp_path):
+    path = tmp_path / "values.yaml"
+    path.write_text("kept: &kept\n  enabled: true\ncopy: *kept\n")
+    roles = ["llm:invoke", "model:sample:invoke"]
+    shared = {"roles": roles, "label": "référence"}
+    additions = {"service": shared, "approval": shared, "roles": roles}
+
+    values.write_values(path, additions)
+
+    expected = {
+        "kept": {"enabled": True},
+        "copy": {"enabled": True},
+        "service": {"roles": ["llm:invoke", "model:sample:invoke"], "label": "référence"},
+        "approval": {"roles": ["llm:invoke", "model:sample:invoke"], "label": "référence"},
+        "roles": ["llm:invoke", "model:sample:invoke"],
+    }
+    assert parse_yaml(path.read_bytes()) == expected
+    assert additions == {key: expected[key] for key in ("service", "approval", "roles")}
+    assert additions["service"] is additions["approval"] is shared
+    assert shared["roles"] is additions["roles"] is roles
+    assert not any(
+        isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken))
+        for token in yaml.scan(path.read_text())
+    )
+    # Repeated writes preserve the same materialized content, not new anchors.
+    first = path.read_bytes()
+    values.write_values(path, additions)
+    assert path.read_bytes() == first
+
+
+def test_distinct_nested_values_keep_types_and_existing_siblings(tmp_path):
+    path = tmp_path / "values.yaml"
+    path.write_text("gateway:\n  keep: untouched\nother: [false, null, 7]\n")
+    additions = {
+        "gateway": {"first": {"enabled": True}, "second": {"enabled": False}},
+        "models": [{"id": "sample", "cost": 0.5}],
+    }
+
+    values.write_values(path, additions)
+
+    assert parse_yaml(path.read_bytes()) == {
+        "gateway": {
+            "keep": "untouched",
+            "first": {"enabled": True},
+            "second": {"enabled": False},
+        },
+        "other": [False, None, 7],
+        "models": [{"id": "sample", "cost": 0.5}],
+    }
+    assert additions == {
+        "gateway": {"first": {"enabled": True}, "second": {"enabled": False}},
+        "models": [{"id": "sample", "cost": 0.5}],
+    }
