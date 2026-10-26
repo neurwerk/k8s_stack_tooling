@@ -526,10 +526,19 @@ def test_wait_raw_log_errors_are_bounded_released_and_uncertain(case, capsys):
 
 
 @pytest.mark.parametrize("stage", ["request", "read"])
-def test_wait_raw_log_transport_errors_are_sanitized_and_not_retried(stage, capsys):
+@pytest.mark.parametrize(
+    ("condition", "expected_status"),
+    [
+        ("Complete", "uncertain"),
+        ("Failed", "failed"),
+    ],
+)
+def test_wait_raw_log_transport_errors_are_sanitized_and_not_retried(
+    stage, condition, expected_status, capsys
+):
     core, batch = Mock(), Mock()
     batch.read_namespaced_job_status.return_value = NS(
-        status=NS(conditions=[NS(type="Complete", status="True")])
+        status=NS(conditions=[NS(type=condition, status="True")])
     )
     core.list_namespaced_pod.return_value = NS(items=[NS(metadata=NS(name="run-pod"))])
     response = Mock()
@@ -539,7 +548,7 @@ def test_wait_raw_log_transport_errors_are_sanitized_and_not_retried(stage, caps
         core.read_namespaced_pod_log.return_value = response
         response.read.side_effect = HTTPError("private detail")
     assert launcher.wait_result(core, batch, "run", "dify", 1, mode="preview") == {
-        "status": "uncertain",
+        "status": expected_status,
         "counts": {},
         "planned_counts": {},
     }

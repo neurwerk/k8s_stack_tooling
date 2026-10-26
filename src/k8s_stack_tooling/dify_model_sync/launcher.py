@@ -229,7 +229,11 @@ def wait_result(
                         finally:
                             response.release_conn()
                 except (ApiException, HTTPError, OSError, ValueError):
-                    return {"status": "uncertain", "counts": {}, "planned_counts": {}}
+                    return {
+                        "status": "failed" if failed else "uncertain",
+                        "counts": {},
+                        "planned_counts": {},
+                    }
             return {
                 "status": "failed" if failed else ("complete" if summary else "uncertain"),
                 **(summary or {"counts": {}, "planned_counts": {}}),
