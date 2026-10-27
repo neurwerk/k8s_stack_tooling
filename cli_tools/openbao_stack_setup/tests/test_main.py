@@ -18,9 +18,6 @@ from openbao_stack_setup.client import OpenBaoError
 from openbao_stack_setup.cluster import ClusterError, KubernetesApiEndpoint, StackIdentity
 from openbao_stack_setup.custody import CustodianKey, CustodyPaths
 from openbao_stack_setup.main import (
-    _BOOTSTRAP_EXTERNAL_SECRETS,
-    _BOOTSTRAP_HELM_RELEASES,
-    _BOOTSTRAP_SECRET_STORES,
     SetupError,
     _arguments,
     _ask_password,
@@ -28,7 +25,6 @@ from openbao_stack_setup.main import (
     _bootstrap,
     _bound_kit,
     _confirm,
-    _converge_bootstrap_secret_stores,
     _deliver_bootstrap_passwords,
     _kubectl_executable,
     _openbao,
@@ -38,9 +34,7 @@ from openbao_stack_setup.main import (
     _prompt_provider,
     _read_ca,
     _reconcile,
-    _reconcile_bootstrap_helm_releases,
     _recovery_pgp_keys,
-    _refresh_bootstrap_external_secrets,
     _refresh_provider,
     _required_package_paths,
     _revoke_other_root_tokens,
@@ -57,18 +51,9 @@ from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS
 from openbao_stack_setup.recovery import RecoveryKit
 from openbao_stack_setup.selection import SelectedRun
 
-SOURCE_ARGS = [
-    "--client-root",
-    "/client",
-    "--source-cache",
-    "/cache",
-    "--cluster-dir",
-    "clusters/example",
-]
-
 
 def selected_run() -> SelectedRun:
-    return SelectedRun(verified(), "test-operation")
+    return SelectedRun(verified())
 
 
 def kit(checkpoint: str = "initialized") -> RecoveryKit:
@@ -182,10 +167,6 @@ class ControllingTerminal:
     ],
 )
 def test_explicit_subcommands(argv: list[str], command: str) -> None:
-    if command != "status":
-        argv = [*argv, *SOURCE_ARGS]
-    if command in ("bootstrap", "reconcile"):
-        argv = [*argv, "--operation-id", "test-operation"]
     assert _arguments().parse_args(argv).command == command
 
 
@@ -211,9 +192,6 @@ def test_main_dispatches(command: str, target: str) -> None:
         rotate_contextforge_token=False,
         prepare_rejected_request_debug=False,
         provider="brave",
-        client_root=Path("/client"),
-        source_cache=Path("/cache"),
-        cluster_dir="clusters/example",
     )
     with (
         patch("openbao_stack_setup.main._arguments") as arguments,
@@ -244,9 +222,6 @@ def test_main_redacts_expected_failures(capsys: pytest.CaptureFixture[str]) -> N
         command="preflight",
         context="ctx",
         client="client",
-        client_root=Path("/client"),
-        source_cache=Path("/cache"),
-        cluster_dir="clusters/example",
     )
     with (
         patch("openbao_stack_setup.main._arguments") as arguments,
@@ -277,9 +252,6 @@ def test_reconcile_confirmation_argument_requires_exact_client_without_prompt() 
     args = _arguments().parse_args(
         [
             "reconcile",
-            *SOURCE_ARGS,
-            "--operation-id",
-            "test-operation",
             "--context",
             "ctx",
             "--client",
@@ -705,146 +677,6 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     )
 
 
-def test_bootstrap_refreshes_every_declared_external_secret() -> None:
-    expected = (
-        ("auth-keycloak-openbao-secret", "auth-keycloak", "auth-keycloak-openbao-secret"),
-        ("auth-keycloak-secrets", "auth-keycloak", "auth-keycloak-secrets"),
-        ("auth-keycloak-smtp-secret", "auth-keycloak", "auth-keycloak-smtp-secret"),
-        (
-            "auth-keycloak-api-key-bridge-openbao-secret",
-            "auth-keycloak-api-key-bridge",
-            "auth-keycloak-api-key-bridge-openbao-secret",
-        ),
-        (
-            "frontend-studio-openbao-secret",
-            "frontend-studio",
-            "frontend-studio-openbao-secret",
-        ),
-        ("infra-agentgateway-secrets", "infra-agentgateway", "infra-agentgateway-secrets"),
-        ("cert-manager-issuers-values", "infra-cert-manager", "cert-manager-issuers-values"),
-        ("postgres-auth-values", "infra-postgres-auth", "postgres-auth-values"),
-        (
-            "postgres-operations-values",
-            "infra-postgres-operations",
-            "postgres-operations-values",
-        ),
-        (
-            "monitor-fluent-bit-shared-ingest-secret",
-            "monitor-fluent-bit",
-            "monitor-fluent-bit-shared-ingest-secret",
-        ),
-        (
-            "monitor-kube-prometheus-stack-secret",
-            "monitor-kube-prometheus-stack",
-            "monitor-kube-prometheus-stack-secret",
-        ),
-        (
-            "monitor-kube-prometheus-stack-smtp-secret",
-            "monitor-kube-prometheus-stack",
-            "monitor-kube-prometheus-stack-smtp-secret",
-        ),
-        ("monitor-langfuse-secrets", "monitor-langfuse", "monitor-langfuse-secrets"),
-        ("monitor-opensearch-secret", "monitor-opensearch", "monitor-opensearch-secret"),
-        ("monitor-pii-engine-secrets", "monitor-pii-engine", "monitor-pii-engine-secrets"),
-    )
-    assert (
-        tuple(
-            (target.name, target.namespace, target.target_secret)
-            for target in _BOOTSTRAP_EXTERNAL_SECRETS
-        )
-        == expected
-    )
-
-    cluster = MagicMock()
-    _refresh_bootstrap_external_secrets(cluster, False)
-
-    assert cluster.force_external_secret_refresh.call_args_list == [
-        call(name, namespace, target_secret) for name, namespace, target_secret in expected
-    ]
-
-    cluster.reset_mock()
-    _refresh_bootstrap_external_secrets(cluster, True)
-    assert cluster.force_external_secret_refresh.call_args_list == [
-        *[call(name, namespace, target_secret) for name, namespace, target_secret in expected],
-        call(
-            "auth-keycloak-active-directory-secret",
-            "auth-keycloak",
-            "auth-keycloak-active-directory-secret",
-        ),
-    ]
-
-
-def test_bootstrap_converges_every_declared_secret_store(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    expected = (
-        ("auth-keycloak-openbao-secret-store", "auth-keycloak"),
-        ("auth-keycloak-api-key-bridge-openbao-secret-store", "auth-keycloak-api-key-bridge"),
-        ("frontend-studio-openbao-secret-store", "frontend-studio"),
-        ("infra-agentgateway-openbao-secret-store", "infra-agentgateway"),
-        ("infra-cert-manager-openbao-secret-store", "infra-cert-manager"),
-        ("infra-postgres-auth-openbao-secret-store", "infra-postgres-auth"),
-        ("infra-postgres-operations-openbao-secret-store", "infra-postgres-operations"),
-        ("monitor-fluent-bit-openbao-secret-store", "monitor-fluent-bit"),
-        ("monitor-kube-prometheus-stack-openbao-secret-store", "monitor-kube-prometheus-stack"),
-        ("monitor-langfuse-openbao-secret-store", "monitor-langfuse"),
-        ("monitor-opensearch-openbao-secret-store", "monitor-opensearch"),
-        ("monitor-pii-engine-openbao-secret-store", "monitor-pii-engine"),
-    )
-    assert tuple((target.name, target.namespace) for target in _BOOTSTRAP_SECRET_STORES) == expected
-
-    cluster = MagicMock()
-    _converge_bootstrap_secret_stores(cluster)
-
-    assert cluster.ensure_secret_store_ready.call_args_list == [
-        call(name, namespace) for name, namespace in expected
-    ]
-    output = capsys.readouterr().out
-    assert "(1/12)" in output
-    assert "(12/12)" in output
-
-
-def test_bootstrap_force_reconciles_blocked_helm_releases() -> None:
-    expected = (
-        ("cert-manager-issuers", "infra-cert-manager"),
-        ("postgres-auth", "infra-postgres-auth"),
-        ("postgres-operations", "infra-postgres-operations"),
-        ("kube-prometheus-stack", "monitor-kube-prometheus-stack"),
-        ("opensearch", "monitor-opensearch"),
-        ("pii-engine", "monitor-pii-engine"),
-    )
-    assert tuple((target.name, target.namespace) for target in _BOOTSTRAP_HELM_RELEASES) == expected
-
-    cluster = MagicMock()
-    tokens = [f"force-{index}" for index in range(len(expected))]
-    cluster.force_reconcile.side_effect = tokens
-    _reconcile_bootstrap_helm_releases(cluster, False)
-
-    assert cluster.force_reconcile.call_args_list == [
-        call(name, namespace) for name, namespace in expected
-    ]
-    assert cluster.wait_helm_release.call_args_list == [
-        call(name, namespace, timeout_seconds=1800, force_token=token)
-        for (name, namespace), token in zip(expected, tokens, strict=True)
-    ]
-
-    cluster.reset_mock()
-    cluster.force_reconcile.side_effect = [
-        *[f"force-{index}" for index in range(len(expected))],
-        "force-ad",
-    ]
-    _reconcile_bootstrap_helm_releases(cluster, True)
-    assert cluster.force_reconcile.call_args_list[-1] == call(
-        "keycloak-active-directory", "auth-keycloak"
-    )
-    assert cluster.wait_helm_release.call_args_list[-1] == call(
-        "keycloak-active-directory",
-        "auth-keycloak",
-        timeout_seconds=900,
-        force_token="force-ad",
-    )
-
-
 def test_bootstrap_rejects_unsafe_states(tmp_path: Path) -> None:
     cluster = MagicMock()
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
@@ -978,7 +810,6 @@ def test_seed_finish_and_root_revocation(
         patch("openbao_stack_setup.main._prepare_selected", side_effect=prepare),
         patch("openbao_stack_setup.main.with_checkpoint", side_effect=[seeded, complete]),
         patch("openbao_stack_setup.main.update") as update,
-        patch("openbao_stack_setup.main._converge_runtime") as converge,
     ):
         _seed_and_finish(
             cluster,
@@ -994,7 +825,6 @@ def test_seed_finish_and_root_revocation(
     assert update.call_count == 2
     assert events == ["prepare", "revoke-self"]
     cluster.reconcile_kustomization.assert_not_called()
-    converge.assert_not_called()
     cluster.active_directory_required.assert_not_called()
     root.revoke_accessor.assert_called_once_with("root")
     root.revoke_self.assert_called_once_with()
@@ -1017,8 +847,6 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
         patch("openbao_stack_setup.main._prepare_selected", return_value=kit("seeded")) as prepare,
         patch("openbao_stack_setup.main._verify_secret_operator"),
         patch("openbao_stack_setup.main._revoke_other_root_tokens"),
-        patch("openbao_stack_setup.main._refresh_bootstrap_external_secrets"),
-        patch("openbao_stack_setup.main._reconcile_bootstrap_helm_releases"),
         patch("openbao_stack_setup.main.with_checkpoint", return_value=complete),
         patch("openbao_stack_setup.main.update") as update,
     ):
@@ -1054,7 +882,7 @@ def test_seed_waits_for_bootstrap_password_acknowledgement(tmp_path: Path) -> No
             side_effect=SetupError("Bootstrap password acknowledgement did not match"),
         ),
         patch("openbao_stack_setup.main.seed_bootstrap") as seed,
-        patch("openbao_stack_setup.main.reserve_reconciliation"),
+        patch("openbao_stack_setup.main.plan_reconciliation_access"),
         pytest.raises(SetupError, match="did not match"),
     ):
         _seed_and_finish(
@@ -1161,10 +989,6 @@ def test_reconcile_revokes_root_without_implicit_runtime_convergence(
             "openbao_stack_setup.main._prepare_selected",
             side_effect=lambda *_args, **_kwargs: events.append("prepare") or kit("complete"),
         ) as prepare,
-        patch(
-            "openbao_stack_setup.main._converge_runtime",
-            side_effect=lambda *_args, **_kwargs: events.append("converge"),
-        ) as converge,
     ):
         _reconcile(
             "ctx",
@@ -1184,7 +1008,6 @@ def test_reconcile_revokes_root_without_implicit_runtime_convergence(
         assert cluster.require_contextforge_stopped.call_count == 2
     else:
         cluster.require_contextforge_stopped.assert_not_called()
-    converge.assert_not_called()
 
 
 def test_rotation_refuses_running_application_before_custody_or_openbao(tmp_path: Path) -> None:
@@ -1234,7 +1057,6 @@ def test_preparation_failure_revokes_bootstrap_root_and_stops_convergence(tmp_pa
     with (
         patch("openbao_stack_setup.main.OpenBaoClient", return_value=root),
         patch("openbao_stack_setup.main._prepare_selected", side_effect=OpenBaoError("HTTP 400")),
-        patch("openbao_stack_setup.main._converge_runtime") as converge,
         patch("openbao_stack_setup.main.update") as update,
         pytest.raises(OpenBaoError, match="HTTP 400"),
     ):
@@ -1249,7 +1071,6 @@ def test_preparation_failure_revokes_bootstrap_root_and_stops_convergence(tmp_pa
             run=selected_run(),
         )
     root.revoke_self.assert_called_once_with()
-    converge.assert_not_called()
     update.assert_not_called()
 
 

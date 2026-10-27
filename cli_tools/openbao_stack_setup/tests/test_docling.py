@@ -16,7 +16,6 @@ from openbao_stack_setup.credentials import plan_bootstrap_passwords
 from openbao_stack_setup.main import (
     SetupError,
     _bootstrap,
-    _converge_runtime,
     _reconcile,
     _refresh_provider,
     _set_provider,
@@ -239,20 +238,6 @@ def test_provider_cas_siblings_and_header_safety(tmp_path: Path) -> None:
 
 def test_consumer_refresh_never_waits_for_external_token_or_application() -> None:
     target = MagicMock()
-    _converge_runtime(target, False)
-    assert not any("docling" in str(c) for c in target.mock_calls)
-    target.reset_mock()
-    _converge_runtime(target, False, docling_enabled=True)
-    for namespace, name in (
-        ("docling", "docling-api"),
-        ("monitor-agentgateway-extproc", "monitor-agentgateway-extproc-docling-secret"),
-    ):
-        store = call.ensure_secret_store_ready(f"{namespace}-openbao-secret-store", namespace)
-        refresh = call.force_external_secret_refresh(name, namespace, name)
-        assert target.mock_calls.index(store) < target.mock_calls.index(refresh)
-    assert not any("docling-inference" in str(c) for c in target.mock_calls)
-    assert not any("docling" in str(c) for c in target.force_reconcile.call_args_list)
-    target.reset_mock()
     _refresh_provider(target, MANAGED_CREDENTIALS["docling-inference"])
     assert target.mock_calls == [
         call.force_external_secret_refresh("docling-inference", "docling", "docling-inference")

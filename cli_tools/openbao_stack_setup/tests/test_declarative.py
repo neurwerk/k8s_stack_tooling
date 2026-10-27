@@ -22,7 +22,7 @@ from openbao_stack_setup.declarative import (
     plan_credentials,
 )
 from openbao_stack_setup.main import _prepare_bootstrap_passwords
-from openbao_stack_setup.reconcile import reconcile_openbao, reserve_reconciliation
+from openbao_stack_setup.reconcile import plan_reconciliation_access, reconcile_openbao
 from openbao_stack_setup.recovery import load, write_new
 
 
@@ -42,12 +42,6 @@ def credential_writes(session):
     ]
 
 
-def reserve(api, setups, operation="one", **kwargs):
-    return reserve_reconciliation(
-        api, identity(), operation, "selection", compose_readers(setups), **kwargs
-    )
-
-
 @pytest.mark.parametrize(
     "encoding,size", [("hex", 32), ("hex", 16), ("base64url", 32), ("base64", 32)]
 )
@@ -58,10 +52,9 @@ def test_generated_encoding_round_trip_and_existing_size_protection(tmp_path, en
     session = FakeSession()
     api = client(tmp_path, session)
     selected = {"sample": setup}
-    reservation = reserve(api, selected)
     plan = plan_credentials(api, selected)
     assert credential_writes(session) == []
-    apply_credentials(api, plan, reservation=reservation)
+    apply_credentials(api, plan)
     value = session.secrets["addons/sample/runtime"].values["key"]
     assert isinstance(value, str)
     if encoding == "hex":
@@ -106,15 +99,13 @@ def test_interrupted_reference_writes_retry_from_persisted_canonical_key(tmp_pat
     session = FakeSession()
     api = client(tmp_path, session)
     selected = {"sample": setup}
-    reservation = reserve(api, selected)
     session.failure = ("POST", "secret/data/addons/sample/copy", 400, {})
     with pytest.raises(OpenBaoError, match="HTTP 400"):
-        apply_credentials(api, plan_credentials(api, selected), reservation=reservation)
+        apply_credentials(api, plan_credentials(api, selected))
     original = session.secrets["addons/sample/source"].values["key"]
     assert "addons/sample/copy" not in session.secrets
     session.failure = None
-    resumed = reserve(api, selected, resume=True, previous_process_stopped=True)
-    apply_credentials(api, plan_credentials(api, selected), reservation=resumed)
+    apply_credentials(api, plan_credentials(api, selected))
     assert session.secrets["addons/sample/source"].values["key"] == original
     assert session.secrets["addons/sample/source"].version == 1
     assert session.secrets["addons/sample/copy"].values["key"] == original
@@ -135,8 +126,7 @@ def test_acyclic_fields_can_cross_records_in_both_directions(tmp_path):
     session = FakeSession()
     api = client(tmp_path, session)
     selected = {"sample": setup}
-    reservation = reserve(api, selected)
-    apply_credentials(api, plan_credentials(api, selected), reservation=reservation)
+    apply_credentials(api, plan_credentials(api, selected))
     first = session.secrets["addons/sample/first"]
     assert first.values["source"] == first.values["last"]
     assert first.version == 2
@@ -157,11 +147,10 @@ def test_stale_read_only_source_stops_plan_before_dependent_write(tmp_path):
     api = client(tmp_path, session)
     session.secrets["addons/sample/source"] = StoredSecret({"value": "before"})
     selected = {"sample": setup}
-    reservation = reserve(api, selected)
     plan = plan_credentials(api, selected)
     session.secrets["addons/sample/source"] = StoredSecret({"value": "concurrent"}, 2)
     with pytest.raises(OpenBaoError, match="snapshot changed"):
-        apply_credentials(api, plan, reservation=reservation)
+        apply_credentials(api, plan)
     assert credential_writes(session) == []
 
 
@@ -219,9 +208,8 @@ def test_disabled_fields_do_not_read_or_require_inputs_and_updates_preserve_sibl
         {"tts": "retained-tts", "unrelated": "retained"}
     )
     selected = {"sample": speech_setup(True, False)}
-    reservation = reserve(api, selected)
     plan = plan_credentials(api, selected, supplied={"sample": {"stt": {"token": "new-stt"}}})
-    apply_credentials(api, plan, reservation=reservation)
+    apply_credentials(api, plan)
     assert session.secrets["addons/sample/speech"].values == {
         "stt": "new-stt",
         "tts": "retained-tts",
@@ -302,8 +290,7 @@ def test_existing_key_and_accepted_slots_are_preserved(tmp_path, slot):
     session.secrets["addons/sample/runtime"] = StoredSecret({"key": key})
     session.secrets["addons/sample/verifiers"] = StoredSecret(dict(values))
     selected = {"sample": verifier_setup()}
-    reservation = reserve(api, selected)
-    apply_credentials(api, plan_credentials(api, selected), reservation=reservation)
+    apply_credentials(api, plan_credentials(api, selected))
     assert session.secrets["addons/sample/runtime"].values["key"] == key
     expected = {**values, **({"primary": digest} if slot == "missing-primary" else {})}
     assert session.secrets["addons/sample/verifiers"].values == expected
@@ -353,11 +340,10 @@ def test_prepared_output_is_create_only_and_missing_or_invalid_values_fail(tmp_p
     session = FakeSession()
     api = client(tmp_path, session)
     selected = {"sample": setup}
-    reservation = reserve(api, selected)
     with pytest.raises(OpenBaoError, match="prevalidated prepared output"):
         plan_credentials(api, selected)
     plan = plan_credentials(api, selected, prepared={"sample": {"native-token": "synthetic-token"}})
-    apply_credentials(api, plan, reservation=reservation)
+    apply_credentials(api, plan)
     assert (
         plan_credentials(
             api, selected, prepared={"sample": {"native-token": "another-valid-token"}}
@@ -393,7 +379,6 @@ def test_acknowledged_handover_persists_before_clear_and_conflicts_stop(tmp_path
         kit, pending = _prepare_bootstrap_passwords(
             api, kit, recovery_file, definitions=handover_definitions(selected, definitions)
         )
-    reservation = reserve(api, selected)
     with pytest.raises(OpenBaoError, match="not persisted"):
         complete_handover(api, kit, recovery_file)
     assert load(recovery_file).pending_bootstrap_passwords == pending
@@ -409,7 +394,7 @@ def test_acknowledged_handover_persists_before_clear_and_conflicts_stop(tmp_path
         plan_credentials(api, selected, handover=kit, definitions=definitions)
     del session.secrets["addons/sample/admin"]
     plan = plan_credentials(api, selected, handover=kit, definitions=definitions)
-    apply_credentials(api, plan, reservation=reservation)
+    apply_credentials(api, plan)
     complete_handover(api, kit, recovery_file)
     assert load(recovery_file).pending_bootstrap_passwords is None
     assert session.secrets["addons/sample/admin"].values["password"] == pending["sample/admin"]
@@ -434,19 +419,19 @@ def test_base_reader_union_survives_reconciliation_and_addon_deselection(tmp_pat
     source(session)
     api = client(tmp_path, session)
     readers = compose_readers({"sample": setup})
-    reservation = reserve_reconciliation(api, identity(), "one", "selection", readers)
-    report = reconcile_openbao(api, identity(), passwords(), reservation=reservation)
+    access = plan_reconciliation_access(api, identity(), readers)
+    reconcile_openbao(api, identity(), passwords())
     base_policy = session.policies["auth-keycloak"]
-    apply_access(api, reservation)
-    complete_access(api, reservation, applied_version=report.applied_version)
-    policy = reservation.intended[0].policy
+    apply_access(api, access)
+    complete_access(api, access)
+    policy = access.intended[0].policy
     assert all(path in str(session.policies[policy]) for path in readers[0].records)
     role = api.read_kubernetes_role("auth-keycloak")
     assert role is not None and role["token_policies"] == ["auth-keycloak", policy]
-    removed = reserve_reconciliation(api, identity(), "two", "removed", ())
-    report = reconcile_openbao(api, identity(), reservation=removed)
+    removed = plan_reconciliation_access(api, identity(), ())
+    reconcile_openbao(api, identity())
     apply_access(api, removed)
-    complete_access(api, removed, applied_version=report.applied_version)
+    complete_access(api, removed)
     assert policy not in session.policies
     assert session.policies["auth-keycloak"] == base_policy
     role = api.read_kubernetes_role("auth-keycloak")

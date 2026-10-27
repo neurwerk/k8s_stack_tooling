@@ -13,7 +13,7 @@ from typing import cast
 from k8s_stack_tooling.addons import ContractError, Setup, valid_value, validate_verifier_slots
 from k8s_stack_tooling.addons.schema import CredentialField
 
-from openbao_stack_setup.access import AccessReader, AccessReservation, require_reservation
+from openbao_stack_setup.access import AccessReader
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError, SecretRecord
 from openbao_stack_setup.credentials import BootstrapPassword, InternalResult
 from openbao_stack_setup.recovery import (
@@ -163,16 +163,12 @@ def plan_credentials(
     return _writes(setups, snapshots, resolved, levels)
 
 
-def apply_credentials(
-    client: OpenBaoClient, plan: CredentialPlan, *, reservation: AccessReservation
-) -> InternalResult:
+def apply_credentials(client: OpenBaoClient, plan: CredentialPlan) -> InternalResult:
     """Apply preflighted dependency-ordered CAS writes; stop without rollback on failure."""
     changed = []
-    require_reservation(client, reservation)
     _check_versions(client, dict(plan.versions))
     versions = dict(plan.versions)
     for write in plan.writes:
-        require_reservation(client, reservation)
         client.write_secret(write.path, write.values, write.version)
         versions[write.path] = write.version + 1
         if write.path not in changed:

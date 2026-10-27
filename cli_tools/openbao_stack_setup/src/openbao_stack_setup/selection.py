@@ -1,11 +1,11 @@
-"""Bind workstation setup to the shared complete-selection verifier, without acquisition."""
+"""Acquire and verify the current client's pinned definitions with the shared parser."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import re
+import tempfile
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
@@ -18,7 +18,7 @@ from k8s_stack_tooling.addons import (
     selection_projection,
     verify_selection,
 )
-from k8s_stack_tooling.addons.acquisition import source_checkouts
+from k8s_stack_tooling.addons.acquisition import acquire_selection, source_checkouts
 from k8s_stack_tooling.addons.schema import Input
 
 from openbao_stack_setup.client import OpenBaoError
@@ -28,12 +28,9 @@ from openbao_stack_setup.native import REGISTRY_TYPE, prepare_native_output
 
 @dataclass(frozen=True)
 class SelectedRun:
-    """Verified nonsecret authority and privately captured pre-custody native outputs."""
+    """Verified definitions and private credential inputs for one reconciliation."""
 
     verified: VerifiedSelection
-    operation_id: str
-    resume: bool = False
-    previous_process_stopped: bool = False
     input_groups: tuple[str, ...] = ()
     prepared: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
 
@@ -63,48 +60,50 @@ class SelectedRun:
 
     @property
     def fingerprint(self) -> str:
-        """Bind retries and handover to sources, approval, features, and instance selection."""
+        """Bind pending password handover to the verified definitions and selection."""
         payload = json.dumps(selection_projection(self.verified), sort_keys=True).encode()
         return hashlib.sha256(payload).hexdigest()
 
 
-def verify_client_sources(
-    cluster: Cluster, client_root: Path, source_cache: Path, cluster_dir: str
-) -> VerifiedSelection:
-    """Discover existing local checkouts offline and compare the live staged ConfigMap."""
-    base, checkouts = source_checkouts(client_root, cluster_dir=cluster_dir, cache=source_cache)
-    result = verify_selection(
-        client_root,
-        checkouts,
-        cluster_dir=cluster_dir,
-        base=base,
-        installable=True,
-        staged_projection=cluster.selection_projection(),
-    )
-    SelectedRun(result, "").require_verified()
+def verify_client_sources(cluster: Cluster) -> VerifiedSelection:
+    """Acquire immutable sources automatically and compare the complete staged selection."""
+    client_root = Path.cwd().resolve()
+    while not (client_root / ".git").exists():
+        if client_root.parent == client_root:
+            raise OpenBaoError("Run setup from the selected client Git checkout")
+        client_root = client_root.parent
+    if not (client_root / "config/addons.yaml").is_file():
+        raise OpenBaoError("Run setup from the selected client Git checkout")
+    projection = cluster.selection_projection()
+    data = projection.get("data")
+    if not isinstance(data, dict):
+        raise OpenBaoError("Staged selection has no valid cluster directory")
+    try:
+        cluster_dir = json.loads(data["selection.json"])["clusterDirectory"]
+    except (KeyError, TypeError, ValueError):
+        raise OpenBaoError("Staged selection has no valid cluster directory") from None
+    if not isinstance(cluster_dir, str) or not cluster_dir:
+        raise OpenBaoError("Staged selection has no valid cluster directory")
+    with tempfile.TemporaryDirectory(prefix="stack-setup-sources-") as temporary:
+        cache = Path(temporary).resolve()
+        acquire_selection(client_root, cluster_dir=cluster_dir, cache=cache)
+        base, checkouts = source_checkouts(client_root, cluster_dir=cluster_dir, cache=cache)
+        result = verify_selection(
+            client_root,
+            checkouts,
+            cluster_dir=cluster_dir,
+            base=base,
+            installable=True,
+            staged_projection=projection,
+        )
+    SelectedRun(result).require_verified()
     return result
 
 
-def selected_run(
-    cluster: Cluster, verified: VerifiedSelection, args: argparse.Namespace
-) -> SelectedRun:
-    """Prepare declared native outputs before the caller loads custody or root authority."""
-    run = SelectedRun(
-        verified,
-        args.operation_id,
-        args.resume,
-        args.previous_process_stopped,
-        tuple(args.input_group or ()),
-    )
+def selected_run(verified: VerifiedSelection, args: argparse.Namespace) -> SelectedRun:
+    """Validate selected credential input groups without a separate operation lifecycle."""
+    run = SelectedRun(verified, tuple(args.input_group or ()))
     run.require_verified()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run.operation_id):
-        raise OpenBaoError("Operation ID must be a bounded nonsecret identifier")
-    if args.native_namespace is not None and not re.fullmatch(
-        r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", args.native_namespace
-    ):
-        raise OpenBaoError("Invalid native scratch namespace")
-    if run.resume != run.previous_process_stopped:
-        raise OpenBaoError("Resume requires explicit confirmation that the former process stopped")
     allowed = {
         f"{addon}/{field.supplied.group}"
         for addon, setup in run.setups.items()
@@ -114,8 +113,16 @@ def selected_run(
     }
     if not set(run.input_groups) <= allowed or len(set(run.input_groups)) != len(run.input_groups):
         raise OpenBaoError("Input groups must be unique active selected groups")
+    return run
+
+
+def prepare_native_outputs(
+    cluster: Cluster, run: SelectedRun, needed: set[tuple[str, str]]
+) -> None:
+    """Prepare only missing native credentials, without passing OpenBao authority to native code."""
+    run.require_verified()
     native_requests = []
-    for item in verified.addons:
+    for item in run.verified.addons:
         addon = item.definition.metadata.name
         outputs = {output.id: output for output in item.definition.spec.native_outputs}
         artifacts = {artifact.id: artifact for artifact in item.definition.spec.artifacts}
@@ -123,33 +130,45 @@ def selected_run(
             field.prepared_output
             for record in item.definition.spec.setup.records
             for field in record.fields.values()
-            if field.prepared_output is not None
+            if field.prepared_output is not None and (addon, field.prepared_output) in needed
         }
-        if requested and not args.native_namespace:
-            raise OpenBaoError(
-                "Selected native outputs require an explicit scratch --native-namespace"
-            )
         for output_id in sorted(requested):
+            records = {
+                record.id
+                for record in item.definition.spec.setup.records
+                if any(field.prepared_output == output_id for field in record.fields.values())
+            }
+            namespaces = {
+                delivery.namespace
+                for delivery in item.definition.spec.setup.deliveries
+                if records.intersection(delivery.records)
+            }
+            if len(namespaces) != 1:
+                raise OpenBaoError(
+                    "Native credential preparation requires one unambiguous delivery namespace"
+                )
+            namespace = namespaces.pop()
             output = outputs[output_id]
-            pull_inputs = approved_pull_inputs(
-                item.definition.spec.inputs, verified, args.native_namespace
+            pull_inputs = approved_pull_inputs(item.definition.spec.inputs, run.verified, namespace)
+            native_requests.append(
+                (addon, namespace, output, artifacts[output.artifact], pull_inputs)
             )
-            native_requests.append((addon, output, artifacts[output.artifact], pull_inputs))
     # Preflight only inputs actually attached to this operation's native Pods.
-    needed = {
-        (item.namespace, item.name): item for _, _, _, inputs in native_requests for item in inputs
+    pull_inputs = {
+        (item.namespace, item.name): item
+        for _, _, _, _, inputs in native_requests
+        for item in inputs
     }
-    cluster.require_external_inputs(list(needed.values()))
-    for addon, output, artifact, pull_inputs in native_requests:
+    cluster.require_external_inputs(list(pull_inputs.values()))
+    for addon, namespace, output, artifact, pull_inputs in native_requests:
         values = prepare_native_output(
             cluster,
-            namespace=args.native_namespace,
+            namespace=namespace,
             definition=output,
             artifact=artifact,
             pull_inputs=pull_inputs,
         )
         run.prepared.setdefault(addon, {})[output.id] = values[output.output_key]
-    return run
 
 
 def approved_pull_inputs(

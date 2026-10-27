@@ -13,7 +13,7 @@ from openbao_stack_setup.catalog import namespace_policy
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError
 from openbao_stack_setup.cluster import ClusterError
 from openbao_stack_setup.credentials import plan_bootstrap_passwords
-from openbao_stack_setup.main import SetupError, _converge_runtime, _set_provider
+from openbao_stack_setup.main import SetupError, _set_provider
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, update_provider
 from openbao_stack_setup.reconcile import (
     CURRENT_RECONCILIATION_VERSION,
@@ -119,17 +119,6 @@ def test_selected_catalog_is_scoped_and_never_generates_oauth(
     )
     assert "tailscale/external" in str(operator_request.body)
     assert capsys.readouterr() == ("", "")
-
-
-def test_staged_convergence_waits_only_for_store() -> None:
-    target = MagicMock()
-    _converge_runtime(target, False)
-    assert not any("tailscale" in str(c) for c in target.mock_calls)
-    target.reset_mock()
-    _converge_runtime(target, False, tailscale_enabled=True)
-    target.ensure_secret_store_ready.assert_any_call("tailscale-openbao-secret-store", "tailscale")
-    assert not any("operator-oauth" in str(c) for c in target.mock_calls)
-    assert not any("tailscale" in str(c) for c in target.force_reconcile.mock_calls)
 
 
 def test_deselection_removes_issued_token_policy_and_login_but_retains_credentials(

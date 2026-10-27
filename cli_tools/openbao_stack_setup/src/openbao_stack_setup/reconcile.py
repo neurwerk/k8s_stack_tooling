@@ -6,12 +6,10 @@ from dataclasses import dataclass
 from importlib.metadata import version as distribution_version
 
 from openbao_stack_setup.access import (
+    AccessPlan,
     AccessReader,
-    AccessReservation,
     load_access,
-    require_reservation,
-    reserve_access,
-    validate_access_roles,
+    plan_access,
 )
 from openbao_stack_setup.catalog import (
     ACTIVE_DIRECTORY_FIELDS,
@@ -74,14 +72,12 @@ def reconcile_openbao(
     rejection_debug_enabled: bool = False,
     tailscale_enabled: bool = False,
     glitchtip_enabled: bool = False,
-    reservation: AccessReservation | None = None,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
     client.ensure_kv_v2_mount()
     record = client.read_secret(RECONCILIATION_STATE_PATH)
     state = _load_state(record, identity)
-    _require_access_operation(client, record, reservation)
     _require_bootstrap_passwords(client, passwords)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
         raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
@@ -139,10 +135,10 @@ def reconcile_openbao(
     )
     debug = reconcile_rejection_debug(client, enabled=rejection_debug_enabled)
 
-    if reservation is None and state.applied_version < CURRENT_RECONCILIATION_VERSION:
+    if state.applied_version < CURRENT_RECONCILIATION_VERSION:
         client.write_secret(
             RECONCILIATION_STATE_PATH,
-            _state_values(identity),
+            {**(record.values if record else {}), **_state_values(identity)},
             state.record_version,
         )
     return ReconciliationReport(
@@ -152,16 +148,6 @@ def reconcile_openbao(
         len(set(internal.changed_paths) | set(debug.changed_paths)),
         internal.added_fields + debug.added_fields,
     )
-
-
-def _require_access_operation(
-    client: OpenBaoClient, record: SecretRecord | None, reservation: AccessReservation | None
-) -> None:
-    if reservation is not None:
-        require_reservation(client, reservation)
-        validate_access_roles(client, reservation)
-    elif record is not None and "access" in record.values:
-        raise OpenBaoError("Selected access reconciliation requires an explicit reservation")
 
 
 def _load_state(record: SecretRecord | None, expected_identity: ReconciliationIdentity) -> _State:
@@ -208,17 +194,12 @@ def _load_state(record: SecretRecord | None, expected_identity: ReconciliationId
     return _State(identity, applied_version, record.version)
 
 
-def reserve_reconciliation(
+def plan_reconciliation_access(
     client: OpenBaoClient,
     identity: ReconciliationIdentity,
-    operation_id: str,
-    selection: str,
     readers: tuple[AccessReader, ...],
-    *,
-    resume: bool = False,
-    previous_process_stopped: bool = False,
-) -> AccessReservation:
-    """Reserve the existing cluster-bound state before Base or selected access mutations."""
+) -> AccessPlan:
+    """Validate cluster identity and remember reader ownership before grant changes."""
     record = client.read_secret(RECONCILIATION_STATE_PATH)
     state = _load_state(record, identity)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
@@ -227,15 +208,7 @@ def reserve_reconciliation(
         values = _state_values(identity)
         values["appliedVersion"] = 0
         record = SecretRecord(values, 0)
-    return reserve_access(
-        client,
-        record,
-        operation_id,
-        selection,
-        readers,
-        resume=resume,
-        previous_process_stopped=previous_process_stopped,
-    )
+    return plan_access(client, record, readers)
 
 
 def _state_values(identity: ReconciliationIdentity) -> dict[str, JsonValue]:

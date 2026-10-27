@@ -1,7 +1,7 @@
-"""Private native preparation, called BEFORE custody or OpenBao authority is loaded.
+"""Private preparation of missing native credentials, without OpenBao authority.
 
 Requires the supported platform's enforcing NetworkPolicy CNI and trusted admission
-and administrators. The operator selects an existing scratch namespace. This module
+and administrators. The product delivery selects an existing namespace. This module
 does not create namespaces, inspect credentials, or establish a new sandbox system.
 """
 
@@ -294,10 +294,10 @@ def prepare_native_output(
     artifact: Artifact,
     pull_inputs: tuple[ExternalInput, ...] = (),
 ) -> dict[str, str]:
-    """Prepare one output before custody, trusting supported CNI/admission enforcement.
+    """Prepare one missing output, trusting supported CNI/admission enforcement.
 
     Namespace must already exist. No root client or secret input is accepted. The
-    caller must first verify source/selection and invoke this before loading custody.
+    caller must first verify source/selection. Native execution gets no custody material.
     Cleanup uses UID preconditions and never deletes namespaces or storage. An
     ambiguous creation response is reported, not retried or deleted without a UID.
     """
