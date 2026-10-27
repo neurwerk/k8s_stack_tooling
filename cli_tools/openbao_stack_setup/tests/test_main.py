@@ -12,10 +12,10 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 from kubernetes.client.exceptions import ApiException
+from test_selected_cli import verified
 
-from openbao_stack_setup.catalog import ADDONS
 from openbao_stack_setup.client import OpenBaoError
-from openbao_stack_setup.cluster import Cluster, ClusterError, KubernetesApiEndpoint, StackIdentity
+from openbao_stack_setup.cluster import ClusterError, KubernetesApiEndpoint, StackIdentity
 from openbao_stack_setup.custody import CustodianKey, CustodyPaths
 from openbao_stack_setup.main import (
     _BOOTSTRAP_EXTERNAL_SECRETS,
@@ -40,10 +40,10 @@ from openbao_stack_setup.main import (
     _reconcile,
     _reconcile_bootstrap_helm_releases,
     _recovery_pgp_keys,
-    _refresh_addon,
     _refresh_bootstrap_external_secrets,
     _refresh_provider,
     _required_package_paths,
+    _revoke_other_root_tokens,
     _seed_and_finish,
     _set_provider,
     _status,
@@ -54,8 +54,21 @@ from openbao_stack_setup.main import (
     main,
 )
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS
-from openbao_stack_setup.reconcile import ReconciliationIdentity
 from openbao_stack_setup.recovery import RecoveryKit
+from openbao_stack_setup.selection import SelectedRun
+
+SOURCE_ARGS = [
+    "--client-root",
+    "/client",
+    "--source-cache",
+    "/cache",
+    "--cluster-dir",
+    "clusters/example",
+]
+
+
+def selected_run() -> SelectedRun:
+    return SelectedRun(verified(), "test-operation")
 
 
 def kit(checkpoint: str = "initialized") -> RecoveryKit:
@@ -82,139 +95,6 @@ def kit(checkpoint: str = "initialized") -> RecoveryKit:
 @contextmanager
 def opened(api: MagicMock) -> Iterator[MagicMock]:
     yield api
-
-
-@pytest.mark.parametrize(
-    "addons", [(), ("librechat",), ("dify",), ("knowledge-center",), ("dify", "knowledge-center")]
-)
-def test_addon_refresh_catalog_is_complete_and_selected(addons: tuple[str, ...]) -> None:
-    cluster = MagicMock()
-    _refresh_bootstrap_external_secrets(cluster, False)
-    base_calls = cluster.force_external_secret_refresh.call_args_list[:]
-    cluster.reset_mock()
-    _refresh_bootstrap_external_secrets(cluster, False, addons=addons)
-    expected = []
-    if "librechat" in addons:
-        expected += [
-            ("frontend-librechat-runtime-secret", "frontend-librechat"),
-            ("librechat-oidc-secret", "auth-keycloak"),
-            ("librechat-documentdb-password", "infra-postgres-operations"),
-        ]
-    if "dify" in addons:
-        expected += [
-            ("dify-oidc-secret", "auth-keycloak"),
-            ("frontend-dify-postgres-password", "infra-postgres-operations"),
-            ("frontend-dify-openbao-secret", "frontend-dify"),
-            ("frontend-dify-runtime-secret", "frontend-dify"),
-            ("dify-managed-key-verifiers", "auth-keycloak-api-key-bridge"),
-        ]
-    if "knowledge-center" in addons:
-        expected += [
-            ("forgejo-runtime", "forgejo"),
-            ("forgejo-postgres-password", "infra-postgres-operations"),
-            ("forgejo-oidc-values", "auth-keycloak"),
-        ]
-    assert cluster.force_external_secret_refresh.call_args_list == base_calls + [
-        call(name, namespace, name) for name, namespace in expected
-    ]
-
-
-@pytest.mark.parametrize(
-    "addon_id,database",
-    [
-        ("dify", "frontend-dify-postgres"),
-        ("knowledge-center", "forgejo-postgres"),
-        ("librechat", "librechat-documentdb"),
-        ("open-webui", "open-webui-postgres"),
-    ],
-)
-def test_addon_refresh_orders_secrets_database_and_consumers(addon_id: str, database: str) -> None:
-    cluster = MagicMock()
-    cluster.selected_addons.return_value = (addon_id,)
-    with (
-        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
-        patch("openbao_stack_setup.main._confirm"),
-        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
-        patch("openbao_stack_setup.main.subprocess.run") as rollout,
-    ):
-        _refresh_addon("context", "client", addon_id)
-    assert rollout.call_count > 0
-    assert all(
-        item.args[0][:3] == ["/tools/kubectl", "--context", "context"]
-        for item in rollout.call_args_list
-    )
-    assert rollout.call_args_list[-1].args[0][-1] == "--timeout=10m"
-    calls = cluster.mock_calls
-    database_index = calls.index(call.force_reconcile(database, "infra-postgres-operations"))
-    secret_indexes = [
-        i for i, item in enumerate(calls) if item[0] == "force_external_secret_refresh"
-    ]
-    assert secret_indexes and max(secret_indexes) < database_index
-    upgrades = [item for item in calls if item[0] == "force_reconcile"]
-    assert upgrades[0] == call.force_reconcile(database, "infra-postgres-operations")
-    assert len(upgrades) > 1
-    if addon_id == "open-webui":
-        producer_index = calls.index(
-            call.force_reconcile("frontend-open-webui-shared", "frontend-open-webui")
-        )
-        producer_ready_index = calls.index(
-            call.wait_helm_release(
-                "frontend-open-webui-shared",
-                "frontend-open-webui",
-                timeout_seconds=900,
-                force_token=cluster.force_reconcile.return_value,
-            )
-        )
-        consumer_index = calls.index(
-            call.force_reconcile("frontend-open-webui", "frontend-open-webui")
-        )
-        assert database_index < producer_index < producer_ready_index < consumer_index
-    cluster.reset_mock()
-    cluster.force_external_secret_refresh.side_effect = ClusterError("Secret delivery failed")
-    with (
-        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
-        patch("openbao_stack_setup.main._confirm"),
-        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
-        patch("openbao_stack_setup.main.subprocess.run") as rollout,
-        pytest.raises(ClusterError, match="Secret delivery failed"),
-    ):
-        _refresh_addon("context", "client", addon_id)
-    cluster.force_reconcile.assert_not_called()
-    rollout.assert_not_called()
-
-
-def test_addon_refresh_without_database_orders_secrets_and_consumers() -> None:
-    catalog = replace(ADDONS["dify"], database_release=None)
-    cluster = MagicMock()
-    cluster.selected_addons.return_value = ("dify",)
-    with (
-        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
-        patch("openbao_stack_setup.main.addon_catalogs", return_value=(catalog,)),
-        patch("openbao_stack_setup.main._confirm"),
-        patch("openbao_stack_setup.main._kubectl_executable", return_value="/tools/kubectl"),
-        patch("openbao_stack_setup.main.subprocess.run") as rollout,
-    ):
-        _refresh_addon("context", "client", "dify")
-    calls = cluster.mock_calls
-    secret_indexes = [
-        i for i, item in enumerate(calls) if item[0] == "force_external_secret_refresh"
-    ]
-    consumer_indexes = [i for i, item in enumerate(calls) if item[0] == "force_reconcile"]
-    assert secret_indexes and consumer_indexes
-    assert max(secret_indexes) < min(consumer_indexes)
-    assert cluster.force_reconcile.call_args_list == [
-        call(target.name, target.namespace) for target in catalog.consumers
-    ]
-    assert cluster.wait_helm_release.call_args_list == [
-        call(
-            target.name,
-            target.namespace,
-            timeout_seconds=target.timeout_seconds,
-            force_token=cluster.force_reconcile.return_value,
-        )
-        for target in catalog.consumers
-    ]
-    assert rollout.call_count == 2 * len(catalog.workloads)
 
 
 class ControllingTerminal:
@@ -302,6 +182,10 @@ class ControllingTerminal:
     ],
 )
 def test_explicit_subcommands(argv: list[str], command: str) -> None:
+    if command != "status":
+        argv = [*argv, *SOURCE_ARGS]
+    if command in ("bootstrap", "reconcile"):
+        argv = [*argv, "--operation-id", "test-operation"]
     assert _arguments().parse_args(argv).command == command
 
 
@@ -327,26 +211,48 @@ def test_main_dispatches(command: str, target: str) -> None:
         rotate_contextforge_token=False,
         prepare_rejected_request_debug=False,
         provider="brave",
+        client_root=Path("/client"),
+        source_cache=Path("/cache"),
+        cluster_dir="clusters/example",
     )
     with (
         patch("openbao_stack_setup.main._arguments") as arguments,
         patch(f"openbao_stack_setup.main.{target}") as operation,
+        patch("openbao_stack_setup.main.Cluster"),
+        patch("openbao_stack_setup.main.verify_client_sources", return_value=verified()),
+        patch("openbao_stack_setup.main.selected_run", return_value=selected_run()),
     ):
         arguments.return_value.parse_args.return_value = args
         main()
     if command == "reconcile":
         operation.assert_called_once_with(
-            "ctx", "client", Path("custody"), [Path("one"), Path("two")], "client", False, False
+            "ctx",
+            "client",
+            Path("custody"),
+            [Path("one"), Path("two")],
+            "client",
+            False,
+            False,
+            run=selected_run(),
         )
     else:
         operation.assert_called_once()
 
 
 def test_main_redacts_expected_failures(capsys: pytest.CaptureFixture[str]) -> None:
-    args = SimpleNamespace(command="preflight", context="ctx", client="client")
+    args = SimpleNamespace(
+        command="preflight",
+        context="ctx",
+        client="client",
+        client_root=Path("/client"),
+        source_cache=Path("/cache"),
+        cluster_dir="clusters/example",
+    )
     with (
         patch("openbao_stack_setup.main._arguments") as arguments,
         patch("openbao_stack_setup.main._preflight", side_effect=ClusterError("safe message")),
+        patch("openbao_stack_setup.main.Cluster"),
+        patch("openbao_stack_setup.main.verify_client_sources", return_value=verified()),
         pytest.raises(SystemExit) as captured,
     ):
         arguments.return_value.parse_args.return_value = args
@@ -371,6 +277,9 @@ def test_reconcile_confirmation_argument_requires_exact_client_without_prompt() 
     args = _arguments().parse_args(
         [
             "reconcile",
+            *SOURCE_ARGS,
+            "--operation-id",
+            "test-operation",
             "--context",
             "ctx",
             "--client",
@@ -399,7 +308,7 @@ def test_reconcile_rejects_wrong_confirmation_before_custody() -> None:
         patch("openbao_stack_setup.main.prepare_custody_paths") as custody,
         pytest.raises(SetupError, match="did not match"),
     ):
-        _reconcile("ctx", "client", None, [Path("one"), Path("two")], "other")
+        _reconcile("ctx", "client", None, [Path("one"), Path("two")], "other", run=selected_run())
     cluster.require_openbao_release.assert_not_called()
     custody.assert_not_called()
 
@@ -502,7 +411,7 @@ def test_bootstrap_password_delivery_uses_only_the_controlling_tty(
     assert modes == ["r", "w"]
     output = terminal.getvalue()
     assert "Keycloak bootstrap administrator: keycloak-password" in output
-    assert "Dify break-glass administrator: dify-password" in output
+    assert "dify-password" not in output
     assert "Langfuse initial administrator: langfuse-password" in output
     assert "Grafana administrator: grafana-password" in output
     assert "machine-password" not in output
@@ -584,12 +493,6 @@ def test_prepare_bootstrap_passwords_redisplays_pending_values_on_resume(tmp_pat
     deliver.assert_called_once_with({"keycloak": "keycloak-password"})
     update.assert_called_once_with(tmp_path / "recovery", prepared)
 
-    pending_dify = replace(
-        kit(), pending_bootstrap_passwords={"dify": "undelivered-synthetic-password"}
-    )
-    with pytest.raises(SetupError, match="Dify selection changed"):
-        _prepare_bootstrap_passwords(MagicMock(), pending_dify, tmp_path / "recovery")
-
 
 def test_preflight_reports_identity(capsys: pytest.CaptureFixture[str]) -> None:
     cluster = MagicMock()
@@ -600,7 +503,7 @@ def test_preflight_reports_identity(capsys: pytest.CaptureFixture[str]) -> None:
         "172.20.1.202", 6443
     )
     with patch("openbao_stack_setup.main.Cluster", return_value=cluster):
-        _preflight("ctx", "client")
+        _preflight("ctx", "client", verified())
     output = capsys.readouterr().out
     assert "client=client cluster=cluster context=ctx" in output
     assert "SMTP credentials required=False" in output
@@ -618,7 +521,6 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.seal_exists.return_value = False
     cluster.active_directory_required.return_value = True
-    cluster.selected_addons.return_value = ("knowledge-center",)
     cluster.tailscale_enabled.return_value = True
     cluster.docling_enabled.return_value = True
     api = MagicMock()
@@ -673,7 +575,7 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         patch("openbao_stack_setup.main._openbao", side_effect=open_api),
         patch("openbao_stack_setup.main._seed_and_finish") as finish,
     ):
-        _bootstrap("ctx", "client", tmp_path)
+        _bootstrap("ctx", "client", tmp_path, run=selected_run())
 
     write_new.assert_called_once_with(seal_file, initial)
     cluster.require_bootstrap_prerequisites.assert_called_once_with()
@@ -695,12 +597,12 @@ def test_new_bootstrap_initializes_and_seeds(tmp_path: Path) -> None:
         seal_file,
         True,
         True,
-        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=True,
         glitchtip_enabled=True,
+        run=selected_run(),
     )
     cluster.active_directory_required.assert_called_once_with()
 
@@ -713,7 +615,6 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
-    cluster.selected_addons.return_value = ()
     cluster.tailscale_enabled.return_value = False
     cluster.docling_enabled.return_value = True
     api = MagicMock()
@@ -730,7 +631,7 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         patch("openbao_stack_setup.main._seed_and_finish") as finish,
         patch("openbao_stack_setup.main._decrypt_custodian_packages", return_value=("one", "two")),
     ):
-        _bootstrap("ctx", "client", tmp_path)
+        _bootstrap("ctx", "client", tmp_path, run=selected_run())
     finish.assert_called_once_with(
         cluster,
         api,
@@ -739,12 +640,12 @@ def test_bootstrap_resume_uses_recovery_root(tmp_path: Path) -> None:
         recovery_file,
         False,
         True,
-        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=False,
         glitchtip_enabled=True,
+        run=selected_run(),
     )
     cluster.force_reconcile.assert_not_called()
     cluster.wait_helm_release.assert_not_called()
@@ -760,7 +661,6 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
     cluster.contextforge_admin_email.return_value = None
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
-    cluster.selected_addons.return_value = ()
     cluster.tailscale_enabled.return_value = False
     cluster.docling_enabled.return_value = False
     api = MagicMock()
@@ -784,7 +684,7 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         patch("openbao_stack_setup.main.update") as update,
         patch("openbao_stack_setup.main._seed_and_finish") as finish,
     ):
-        _bootstrap("ctx", "client", tmp_path)
+        _bootstrap("ctx", "client", tmp_path, run=selected_run())
 
     write_packages.assert_called_once_with(paths, staged)
     update.assert_called_once_with(seal_file, initialized)
@@ -796,12 +696,12 @@ def test_bootstrap_resumes_after_packages_precede_checkpoint(tmp_path: Path) -> 
         seal_file,
         False,
         False,
-        cluster.selected_addons.return_value,
         cluster.contextforge_admin_email.return_value,
         cluster.studio_mcp_ids.return_value,
         cluster.rejection_debug_enabled.return_value,
         tailscale_enabled=False,
         glitchtip_enabled=False,
+        run=selected_run(),
     )
 
 
@@ -870,25 +770,6 @@ def test_bootstrap_refreshes_every_declared_external_secret() -> None:
             "auth-keycloak-active-directory-secret",
             "auth-keycloak",
             "auth-keycloak-active-directory-secret",
-        ),
-    ]
-
-    cluster.reset_mock()
-    _refresh_bootstrap_external_secrets(cluster, False, addons=("dify",))
-    assert cluster.force_external_secret_refresh.call_args_list == [
-        *[call(name, namespace, target_secret) for name, namespace, target_secret in expected],
-        call("dify-oidc-secret", "auth-keycloak", "dify-oidc-secret"),
-        call(
-            "frontend-dify-postgres-password",
-            "infra-postgres-operations",
-            "frontend-dify-postgres-password",
-        ),
-        call("frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"),
-        call("frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"),
-        call(
-            "dify-managed-key-verifiers",
-            "auth-keycloak-api-key-bridge",
-            "dify-managed-key-verifiers",
         ),
     ]
 
@@ -976,7 +857,7 @@ def test_bootstrap_rejects_unsafe_states(tmp_path: Path) -> None:
         patch("openbao_stack_setup.main.prepare_custody_paths", return_value=paths),
         pytest.raises(SetupError, match="Static seal already exists"),
     ):
-        _bootstrap("ctx", "client", tmp_path)
+        _bootstrap("ctx", "client", tmp_path, run=selected_run())
 
     recovery_file = tmp_path / "existing.json"
     recovery_file.write_text("existing", encoding="utf-8")
@@ -991,7 +872,7 @@ def test_bootstrap_rejects_unsafe_states(tmp_path: Path) -> None:
         patch("openbao_stack_setup.main._openbao", return_value=opened(api)),
         pytest.raises(SetupError, match="recovery requires escalation"),
     ):
-        _bootstrap("ctx", "client", tmp_path)
+        _bootstrap("ctx", "client", tmp_path, run=selected_run())
 
 
 def test_custodian_package_paths_must_be_distinct(tmp_path: Path) -> None:
@@ -1068,15 +949,15 @@ def test_seed_finish_and_root_revocation(
         {"policies": ["root"]},
         {"policies": ["default"]},
     ]
-    report = SimpleNamespace(external_records_changed=2, internal_records_changed=10)
     seeded = kit("seeded")
     complete = kit("complete")
     events: list[str] = []
 
-    def seed(*_: object, **options: object) -> SimpleNamespace:
+    def prepare(*_: object, **options: object) -> RecoveryKit:
         assert options["docling_enabled"] is True
-        events.append("seed")
-        return report
+        events.append("prepare")
+        _revoke_other_root_tokens(root)
+        return kit()
 
     def record(name: str) -> Callable[..., None]:
         def operation(*_: object) -> None:
@@ -1094,27 +975,10 @@ def test_seed_finish_and_root_revocation(
             "openbao_stack_setup.main._prompt_bootstrap_credentials",
             return_value=({}, {}, {}),
         ),
-        patch(
-            "openbao_stack_setup.main._prepare_bootstrap_passwords",
-            return_value=(kit(), {"keycloak": "keycloak-password"}),
-        ),
-        patch("openbao_stack_setup.main.seed_bootstrap", side_effect=seed),
-        patch("openbao_stack_setup.main.reconcile_mcp", side_effect=record("mcp")) as mcp,
+        patch("openbao_stack_setup.main._prepare_selected", side_effect=prepare),
         patch("openbao_stack_setup.main.with_checkpoint", side_effect=[seeded, complete]),
         patch("openbao_stack_setup.main.update") as update,
-        patch("openbao_stack_setup.main._verify_secret_operator", side_effect=record("verify")),
-        patch(
-            "openbao_stack_setup.main._converge_bootstrap_secret_stores",
-            side_effect=record("stores"),
-        ),
-        patch(
-            "openbao_stack_setup.main._refresh_bootstrap_external_secrets",
-            side_effect=record("refresh"),
-        ),
-        patch(
-            "openbao_stack_setup.main._reconcile_bootstrap_helm_releases",
-            side_effect=record("reconcile"),
-        ),
+        patch("openbao_stack_setup.main._converge_runtime") as converge,
     ):
         _seed_and_finish(
             cluster,
@@ -1125,28 +989,17 @@ def test_seed_finish_and_root_revocation(
             True,
             docling_enabled=True,
             mcp_ids=("brave",),
+            run=selected_run(),
         )
     assert update.call_count == 2
-    assert events == [
-        "seed",
-        "mcp",
-        "verify",
-        "revoke-self",
-        "stores",
-        "refresh",
-        "reconcile",
-        "infrastructure",
-    ]
-    cluster.reconcile_kustomization.assert_called_once_with("infrastructure")
+    assert events == ["prepare", "revoke-self"]
+    cluster.reconcile_kustomization.assert_not_called()
+    converge.assert_not_called()
     cluster.active_directory_required.assert_not_called()
     root.revoke_accessor.assert_called_once_with("root")
     root.revoke_self.assert_called_once_with()
-    mcp.assert_called_once_with(root, ("brave",))
     output = capsys.readouterr().out
-    assert "this takes approximately 2 minutes" in output
-    assert "this usually takes a few minutes" in output
-    assert "OpenSearch hooks may take 1-2 minutes" in output
-    assert "no progress after 10 minutes" in output
+    assert "no root token was retained" in output
 
 
 def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) -> None:
@@ -1156,17 +1009,12 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
     unauthenticated.ca_cert = tmp_path / "ca"
     root = MagicMock()
     complete = kit("complete")
-    reconciled = SimpleNamespace(
-        applied_version=1,
-        internal_records_changed=1,
-        internal_fields_added=7,
-    )
 
     with (
         patch("openbao_stack_setup.main.OpenBaoClient", return_value=root),
         patch("openbao_stack_setup.main._prompt_bootstrap_credentials") as prompt,
         patch("openbao_stack_setup.main.seed_bootstrap") as seed,
-        patch("openbao_stack_setup.main.reconcile_openbao", return_value=reconciled) as reconcile,
+        patch("openbao_stack_setup.main._prepare_selected", return_value=kit("seeded")) as prepare,
         patch("openbao_stack_setup.main._verify_secret_operator"),
         patch("openbao_stack_setup.main._revoke_other_root_tokens"),
         patch("openbao_stack_setup.main._refresh_bootstrap_external_secrets"),
@@ -1181,18 +1029,10 @@ def test_seeded_resume_reconciles_additive_internal_credentials(tmp_path: Path) 
             kit("seeded"),
             tmp_path / "recovery",
             False,
+            run=selected_run(),
         )
 
-    reconcile.assert_called_once_with(
-        root,
-        ReconciliationIdentity("client", "cluster", "namespace"),
-        tailscale_enabled=False,
-        glitchtip_enabled=False,
-        docling_enabled=False,
-        addons=(),
-        contextforge_admin_email=None,
-        rejection_debug_enabled=False,
-    )
+    assert prepare.call_args.kwargs["initial"] is None
     prompt.assert_not_called()
     seed.assert_not_called()
     root.revoke_self.assert_called_once_with()
@@ -1214,6 +1054,7 @@ def test_seed_waits_for_bootstrap_password_acknowledgement(tmp_path: Path) -> No
             side_effect=SetupError("Bootstrap password acknowledgement did not match"),
         ),
         patch("openbao_stack_setup.main.seed_bootstrap") as seed,
+        patch("openbao_stack_setup.main.reserve_reconciliation"),
         pytest.raises(SetupError, match="did not match"),
     ):
         _seed_and_finish(
@@ -1223,6 +1064,7 @@ def test_seed_waits_for_bootstrap_password_acknowledgement(tmp_path: Path) -> No
             kit(),
             tmp_path / "recovery",
             False,
+            run=selected_run(),
         )
     seed.assert_not_called()
     root.revoke_self.assert_called_once_with()
@@ -1278,21 +1120,20 @@ def test_status_and_recovery_verification(tmp_path: Path) -> None:
         _verify_recovery("ctx", "client", tmp_path, [tmp_path / "one", tmp_path / "two"])
 
 
-@pytest.mark.parametrize("forgejo_enabled", [False, True])
+@pytest.mark.parametrize("contextforge_enabled", [False, True])
 @pytest.mark.parametrize(
     "debug_enabled,prepare_debug", [(False, False), (False, True), (True, False)]
 )
-def test_reconcile_revokes_root_before_runtime_convergence(
-    tmp_path: Path, forgejo_enabled: bool, debug_enabled: bool, prepare_debug: bool
+def test_reconcile_revokes_root_without_implicit_runtime_convergence(
+    tmp_path: Path, contextforge_enabled: bool, debug_enabled: bool, prepare_debug: bool
 ) -> None:
     cluster = MagicMock()
     cluster.glitchtip_enabled.return_value = False
     cluster.contextforge_admin_email.return_value = (
-        "recovery@example.com" if forgejo_enabled else None
+        "recovery@example.com" if contextforge_enabled else None
     )
     cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
     cluster.active_directory_required.return_value = False
-    cluster.selected_addons.return_value = ("knowledge-center",) if forgejo_enabled else ()
     cluster.tailscale_enabled.return_value = True
     cluster.docling_enabled.return_value = True
     cluster.studio_mcp_ids.return_value = ("brave",)
@@ -1302,7 +1143,6 @@ def test_reconcile_revokes_root_before_runtime_convergence(
     root = MagicMock()
     events: list[str] = []
     root.revoke_self.side_effect = lambda: events.append("revoke")
-    report = SimpleNamespace(previous_version=0, applied_version=1, replicated_records=1)
     paths = CustodyPaths(tmp_path, tmp_path / "seal.json", tmp_path / "packages")
 
     with (
@@ -1317,17 +1157,10 @@ def test_reconcile_revokes_root_before_runtime_convergence(
         patch("openbao_stack_setup.main._decrypt_custodian_packages", return_value=("one", "two")),
         patch("openbao_stack_setup.main._openbao", return_value=opened(api)),
         patch("openbao_stack_setup.main.OpenBaoClient", return_value=root),
-        patch("openbao_stack_setup.main.reconcile_openbao", return_value=report) as reconcile,
         patch(
-            "openbao_stack_setup.main.reconcile_mcp",
-            side_effect=lambda *_args: events.append("mcp"),
-        ) as mcp,
-        patch("openbao_stack_setup.main._verify_secret_operator"),
-        patch("openbao_stack_setup.main._revoke_other_root_tokens"),
-        patch(
-            "openbao_stack_setup.main._prepare_contextforge_token",
-            side_effect=lambda *_args, **_kwargs: events.append("token"),
-        ) as prepare_token,
+            "openbao_stack_setup.main._prepare_selected",
+            side_effect=lambda *_args, **_kwargs: events.append("prepare") or kit("complete"),
+        ) as prepare,
         patch(
             "openbao_stack_setup.main._converge_runtime",
             side_effect=lambda *_args, **_kwargs: events.append("converge"),
@@ -1338,37 +1171,20 @@ def test_reconcile_revokes_root_before_runtime_convergence(
             "client",
             tmp_path,
             [Path("one"), Path("two")],
-            rotate_contextforge_token=forgejo_enabled,
+            rotate_contextforge_token=contextforge_enabled,
             prepare_rejected_request_debug=prepare_debug,
+            run=selected_run(),
         )
 
-    reconcile.assert_called_once_with(
-        root,
-        ReconciliationIdentity("client", "cluster", "namespace"),
-        tailscale_enabled=True,
-        glitchtip_enabled=False,
-        docling_enabled=True,
-        addons=cluster.selected_addons.return_value,
-        contextforge_admin_email=cluster.contextforge_admin_email.return_value,
-        rejection_debug_enabled=debug_enabled or prepare_debug,
-    )
-    mcp.assert_called_once_with(root, ("brave",))
-    assert events == ["mcp"] + (["token"] if forgejo_enabled else []) + ["revoke", "converge"]
-    if forgejo_enabled:
-        prepare_token.assert_called_once_with(root, "client", "cluster", "namespace", rotate=True)
+    assert prepare.call_args.kwargs["rejection_debug_enabled"] is (debug_enabled or prepare_debug)
+    assert prepare.call_args.kwargs["rotate_contextforge_token"] is contextforge_enabled
+    assert prepare.call_args.kwargs["mcp_ids"] == ("brave",)
+    assert events == ["prepare", "revoke"]
+    if contextforge_enabled:
         assert cluster.require_contextforge_stopped.call_count == 2
     else:
-        prepare_token.assert_not_called()
-    converge.assert_called_once_with(
-        cluster,
-        False,
-        True,
-        cluster.selected_addons.return_value,
-        cluster.contextforge_admin_email.return_value,
-        debug_enabled,
-        tailscale_enabled=True,
-        glitchtip_enabled=False,
-    )
+        cluster.require_contextforge_stopped.assert_not_called()
+    converge.assert_not_called()
 
 
 def test_rotation_refuses_running_application_before_custody_or_openbao(tmp_path: Path) -> None:
@@ -1382,7 +1198,12 @@ def test_rotation_refuses_running_application_before_custody_or_openbao(tmp_path
         pytest.raises(ClusterError, match="not stopped"),
     ):
         _reconcile(
-            "ctx", "client", tmp_path, [Path("one"), Path("two")], rotate_contextforge_token=True
+            "ctx",
+            "client",
+            tmp_path,
+            [Path("one"), Path("two")],
+            rotate_contextforge_token=True,
+            run=selected_run(),
         )
     custody.assert_not_called()
     openbao.assert_not_called()
@@ -1400,20 +1221,19 @@ def test_invalid_mcp_selection_stops_before_confirmation_or_custody(command: str
         pytest.raises(ClusterError, match="Invalid Studio MCP"),
     ):
         if command == "bootstrap":
-            _bootstrap("ctx", "client", None)
+            _bootstrap("ctx", "client", None, run=selected_run())
         else:
-            _reconcile("ctx", "client", None, [Path("one"), Path("two")])
+            _reconcile("ctx", "client", None, [Path("one"), Path("two")], run=selected_run())
     confirm.assert_not_called()
     custody.assert_not_called()
     openbao.assert_not_called()
 
 
-def test_mcp_failure_revokes_bootstrap_root_and_stops_convergence(tmp_path: Path) -> None:
+def test_preparation_failure_revokes_bootstrap_root_and_stops_convergence(tmp_path: Path) -> None:
     root = MagicMock()
     with (
         patch("openbao_stack_setup.main.OpenBaoClient", return_value=root),
-        patch("openbao_stack_setup.main.reconcile_openbao"),
-        patch("openbao_stack_setup.main.reconcile_mcp", side_effect=OpenBaoError("HTTP 400")),
+        patch("openbao_stack_setup.main._prepare_selected", side_effect=OpenBaoError("HTTP 400")),
         patch("openbao_stack_setup.main._converge_runtime") as converge,
         patch("openbao_stack_setup.main.update") as update,
         pytest.raises(OpenBaoError, match="HTTP 400"),
@@ -1426,6 +1246,7 @@ def test_mcp_failure_revokes_bootstrap_root_and_stops_convergence(tmp_path: Path
             tmp_path / "unused",
             False,
             mcp_ids=("brave",),
+            run=selected_run(),
         )
     root.revoke_self.assert_called_once_with()
     converge.assert_not_called()
@@ -1443,7 +1264,7 @@ def test_reconcile_requires_complete_bootstrap(tmp_path: Path) -> None:
         patch("openbao_stack_setup.main._bound_kit", return_value=kit("seeded")),
         pytest.raises(SetupError, match="must be complete"),
     ):
-        _reconcile("ctx", "client", tmp_path, [Path("one"), Path("two")])
+        _reconcile("ctx", "client", tmp_path, [Path("one"), Path("two")], run=selected_run())
 
 
 def test_provider_update_and_refresh() -> None:
@@ -1555,67 +1376,6 @@ def test_active_directory_update_fails_before_prompt_or_openbao_when_disabled() 
     confirm.assert_not_called()
     prompt.assert_not_called()
     openbao.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("direction", "values"),
-    [
-        ("stt", None),
-        ("tts", "{}"),
-        ("stt", "frontendLibrechat: {speech: {stt: {enabled: false, auth: {enabled: true}}}}"),
-        ("tts", "frontendLibrechat: {speech: {tts: {enabled: true, auth: {enabled: false}}}}"),
-        ("stt", "frontendLibrechat: {speech: {stt: {enabled: 'true', auth: {enabled: true}}}}"),
-        ("tts", "frontendLibrechat: {speech: {tts: {enabled: true, auth: {enabled: 1}}}}"),
-        ("stt", "frontendLibrechat: {speech: []}"),
-    ],
-)
-def test_speech_update_rejects_unselected_or_invalid_values_before_secret_interaction(
-    direction: str, values: str | None
-) -> None:
-    cluster = MagicMock()
-    cluster._product_values.side_effect = lambda *args, **kwargs: Cluster._product_values(
-        cluster, *args, **kwargs
-    )
-    cluster.librechat_speech_credentials_required.side_effect = lambda selected: (
-        Cluster.librechat_speech_credentials_required(cluster, selected)
-    )
-    if values is None:
-        cluster.core.read_namespaced_config_map.side_effect = ApiException(status=404)
-    else:
-        cluster.core.read_namespaced_config_map.return_value = SimpleNamespace(
-            data={"values.yaml": values}
-        )
-    with (
-        patch("openbao_stack_setup.main.Cluster", return_value=cluster),
-        patch("openbao_stack_setup.main._confirm") as confirm,
-        patch("openbao_stack_setup.main._prompt_provider") as prompt,
-        patch("openbao_stack_setup.main._openbao") as openbao,
-        pytest.raises((SetupError, ClusterError), match="LibreChat"),
-    ):
-        _set_provider("ctx", "client", f"librechat-{direction}")
-    cluster.core.read_namespaced_config_map.assert_called_once_with(
-        "librechat-product-values", "frontend-librechat"
-    )
-    confirm.assert_not_called()
-    prompt.assert_not_called()
-    openbao.assert_not_called()
-    cluster.token_request.assert_not_called()
-
-
-@pytest.mark.parametrize("direction", ["stt", "tts"])
-def test_selected_speech_refreshes_only_its_direction(direction: str) -> None:
-    cluster = MagicMock()
-    cluster._product_values.return_value = {
-        "frontendLibrechat": {"speech": {direction: {"enabled": True, "auth": {"enabled": True}}}}
-    }
-    assert Cluster.librechat_speech_credentials_required(cluster, direction) is True
-    _refresh_provider(cluster, MANAGED_CREDENTIALS[f"librechat-{direction}"])
-    target = f"frontend-librechat-{direction}-secret"
-    cluster.force_external_secret_refresh.assert_called_once_with(
-        target, "frontend-librechat", target
-    )
-    cluster.force_reconcile.assert_not_called()
-    cluster.wait_helm_release.assert_not_called()
 
 
 def test_recovery_binding() -> None:

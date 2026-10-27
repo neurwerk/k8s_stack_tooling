@@ -99,33 +99,6 @@ def test_reconcile_is_idempotent_and_preserves_state_cas_version(tmp_path: Path)
     assert session.secrets[RECONCILIATION_STATE_PATH].version == state_version
 
 
-def test_selected_librechat_reconciles_namespace_policy_and_preserves_deselected_data(
-    tmp_path: Path,
-) -> None:
-    session = FakeSession()
-    source(session)
-    api = client(tmp_path, session)
-    reconcile_openbao(api, identity(), passwords(), addons=("librechat",))
-    paths = {call.path for call in session.calls}
-    assert "sys/policies/acl/frontend-librechat" in paths
-    assert "auth/kubernetes/role/frontend-librechat" in paths
-    assert "auth/kubernetes/role/librechat-code-interpreter" not in paths
-    product = deepcopy(session.secrets["frontend-librechat/internal"].values)
-    database = deepcopy(session.secrets["infra-postgres-operations/internal"].values)
-    assert database["documentdbPassword"] == product["documentdbPassword"]
-    session.calls.clear()
-    reconcile_openbao(api, identity(), addons=())
-    assert session.secrets["frontend-librechat/internal"].values == product
-    assert session.secrets["infra-postgres-operations/internal"].values == database
-    assert "frontend-librechat" in session.policies
-    assert "frontend-librechat" in session.kubernetes_roles
-    assert all(
-        call.path in ("sys/policies/acl/tailscale", "auth/kubernetes/role/tailscale")
-        for call in session.calls
-        if call.method == "DELETE"
-    )
-
-
 @pytest.mark.parametrize(
     ("values", "message"),
     [
@@ -169,7 +142,7 @@ def test_reconcile_fails_closed_on_missing_password_or_conflicting_replica(
 def test_postgres_conflict_does_not_advance_state_and_retry_converges(tmp_path: Path) -> None:
     session = FakeSession()
     source(session)
-    session.secrets[RECONCILIATION_STATE_PATH] = StoredSecret(state_values(applied=2))
+    session.secrets[RECONCILIATION_STATE_PATH] = StoredSecret(state_values(applied=0))
     session.secrets["infra-postgres-auth/internal"] = StoredSecret(
         {"adminPassword": "postgres-admin", "keycloakPassword": "conflict"}
     )
@@ -178,13 +151,13 @@ def test_postgres_conflict_does_not_advance_state_and_retry_converges(tmp_path: 
     with pytest.raises(OpenBaoError, match="credential mismatch"):
         reconcile_openbao(api, identity(), passwords())
 
-    assert session.secrets[RECONCILIATION_STATE_PATH].values == state_values(applied=2)
+    assert session.secrets[RECONCILIATION_STATE_PATH].values == state_values(applied=0)
     canonical = session.secrets["auth-keycloak/internal"].values["dbPassword"]
     session.secrets["infra-postgres-auth/internal"].values["keycloakPassword"] = canonical
 
     report = reconcile_openbao(api, identity())
 
-    assert report.previous_version == 2
+    assert report.previous_version == 0
     assert report.applied_version == CURRENT_RECONCILIATION_VERSION
     assert session.secrets[RECONCILIATION_STATE_PATH].values == state_values()
     assert session.secrets["infra-postgres-auth/internal"].values == {
@@ -355,49 +328,16 @@ def test_schema_3_adds_only_agentgateway_database_credentials(tmp_path: Path) ->
     assert reconcile_openbao(api, identity()).internal_fields_added == 0
 
 
-def test_schema_2_librechat_credentials_migrate_exactly_once(tmp_path: Path) -> None:
+def test_retired_addon_state_fails_without_migration(tmp_path: Path) -> None:
     session = FakeSession()
     source(session)
     api = client(tmp_path, session)
     reconcile_openbao(api, identity(), passwords())
     session.secrets[RECONCILIATION_STATE_PATH].values = state_values(applied=2)
-    session.secrets["frontend-librechat/internal"] = StoredSecret({})
-    librechat = session.secrets["frontend-librechat/internal"].values
-    librechat.update(
-        {
-            "ragPostgresqlUser": "librechat",
-            "ferretdbPassword": "retired-password",
-            "ferretdbUser": "librechat",
-            "weaviateApiKey": "retired-api-key",
-        }
-    )
-    del session.secrets["infra-postgres-auth/internal"]
-    del session.secrets["infra-postgres-operations/internal"]
-
-    report = reconcile_openbao(api, identity())
-
-    assert report.previous_version == 2
-    migrated = dict(session.secrets["frontend-librechat/internal"].values)
-    assert migrated["ragPostgresqlUser"] == "librechat_rag"
-    assert "ferretdbPassword" not in migrated
-    assert "ferretdbUser" not in migrated
-    assert "weaviateApiKey" not in migrated
-    reconcile_openbao(api, identity())
-    assert session.secrets["frontend-librechat/internal"].values == migrated
-
-
-def test_schema_2_librechat_username_migration_fails_closed(tmp_path: Path) -> None:
-    session = FakeSession()
-    source(session)
-    api = client(tmp_path, session)
-    reconcile_openbao(api, identity(), passwords())
-    session.secrets[RECONCILIATION_STATE_PATH].values = state_values(applied=2)
-    session.secrets["frontend-librechat/internal"] = StoredSecret({"ragPostgresqlUser": "other"})
-
-    with pytest.raises(OpenBaoError, match=r"credential mismatch.*ragPostgresqlUser"):
+    retained = deepcopy(session.secrets)
+    with pytest.raises(OpenBaoError, match="unsupported"):
         reconcile_openbao(api, identity())
-
-    assert session.secrets[RECONCILIATION_STATE_PATH].values == state_values(applied=2)
+    assert session.secrets == retained
 
 
 def test_reconcile_preserves_complete_active_directory_siblings(tmp_path: Path) -> None:

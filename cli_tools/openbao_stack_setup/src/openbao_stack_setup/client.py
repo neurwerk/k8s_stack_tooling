@@ -334,6 +334,13 @@ class OpenBaoClient:
         """Disable new logins through one role; an absent role is already disabled."""
         self._request("DELETE", f"auth/kubernetes/role/{namespace}", allow_not_found=True)
 
+    def read_kubernetes_role(self, name: str) -> dict[str, JsonValue] | None:
+        """Read live role bindings and policy attachments before changing owned access."""
+        response = self._request("GET", f"auth/kubernetes/role/{name}", allow_not_found=True)
+        if response is None:
+            return None
+        return _mapping(_mapping(response, "Kubernetes role").get("data"), "Kubernetes role data")
+
     def write_kubernetes_role(self, namespace: str) -> None:
         """Create or replace a namespace-scoped External Secrets role."""
         self._write(

@@ -7,6 +7,7 @@ import pytest
 from fake import FakeSession, StoredSecret
 from kubernetes.client.exceptions import ApiException
 from test_cluster import cluster
+from test_main import selected_run
 
 from openbao_stack_setup.catalog import DOCLING_NAMESPACES
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError
@@ -39,7 +40,6 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
         patch.object(target, "identity"),
         patch.object(target, "require_bootstrap_prerequisites"),
         patch.object(target, "active_directory_required"),
-        patch.object(target, "selected_addons", return_value=()),
         patch.object(target, "tailscale_enabled", return_value=False),
         patch("openbao_stack_setup.main._confirm") as confirm,
         patch("openbao_stack_setup.main._prompt_provider") as prompt,
@@ -79,8 +79,8 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
             with pytest.raises((SetupError, ClusterError), match="Docling"):
                 _set_provider("ctx", "client", "docling-inference")
         for operation in (
-            lambda: _bootstrap("ctx", "client", None),
-            lambda: _reconcile("ctx", "client", None, None),
+            lambda: _bootstrap("ctx", "client", None, run=selected_run()),
+            lambda: _reconcile("ctx", "client", None, None, run=selected_run()),
         ):
             with pytest.raises(ClusterError, match="Docling"):
                 operation()

@@ -1,0 +1,192 @@
+name: Release stack-setup
+
+on:
+  push:
+    tags: ["stack-setup-v*"]
+
+concurrency:
+  group: stack-setup-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate standalone setup release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli_tools/openbao_stack_setup
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Validate setup tag, version and published SDK lock
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = re.fullmatch(r"stack-setup-v([0-9]+\.[0-9]+\.[0-9]+)", os.environ["RELEASE_TAG"])
+          if tag is None:
+              raise SystemExit("Setup release tag must match stack-setup-vX.Y.Z")
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          packages = tomllib.loads(Path("uv.lock").read_text())["package"]
+          setup = next(p for p in packages if p["name"] == "openbao-stack-setup")
+          if project["name"] != "openbao-stack-setup" or (
+              project["version"], setup["version"]
+          ) != (tag[1], tag[1]):
+              raise SystemExit("Setup tag, project and lock versions disagree")
+          sdk = next((p for p in packages if p["name"] == "k8s-stack-tooling"), None)
+          if sdk is None or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", sdk["version"]):
+              raise SystemExit("Setup requires the published, versioned SDK in its final lock")
+          version = sdk["version"]
+          url = (
+              "https://github.com/neurwerk/k8s_stack_tooling/releases/download/"
+              f"v{version}/k8s_stack_tooling-{version}-py3-none-any.whl"
+          )
+          if sdk["source"] != {"url": url} or not any(
+              wheel.get("url") == url
+              and re.fullmatch(r"sha256:[0-9a-f]{64}", wheel.get("hash", ""))
+              for wheel in sdk.get("wheels", [])
+          ):
+              raise SystemExit("Setup SDK dependency must use the published wheel URL and hash")
+          PY
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Verify final setup lockfile
+        run: uv lock --check
+
+  quality:
+    name: Run repository quality gates
+    uses: ./.github/workflows/cli-quality.yaml
+
+  release:
+    needs: [validate, quality]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: cli_tools/openbao_stack_setup
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+
+      - name: Build and verify standalone setup distributions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          uv python install 3.12.14
+          # Same isolated build inputs as the shared SDK release.
+          cat > "$RUNNER_TEMP/build-constraints.txt" <<'EOF'
+          hatchling==1.27.0
+          packaging==26.3
+          pathspec==1.1.1
+          pluggy==1.7.0
+          trove-classifiers==2026.9.21.13
+          EOF
+          for output in python-dist python-dist-repeat; do
+            uv build --python 3.12.14 \
+              --build-constraint "$RUNNER_TEMP/build-constraints.txt" \
+              --out-dir "$RUNNER_TEMP/$output"
+          done
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import tarfile
+          import tomllib
+          import zipfile
+          from email.parser import BytesParser
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          version = os.environ["RELEASE_TAG"].removeprefix("stack-setup-v")
+          if project["version"] != version or project["name"] != "openbao-stack-setup":
+              raise SystemExit("Tagged setup source and Python package version disagree")
+          root = Path(os.environ["RUNNER_TEMP"])
+          dist, repeat = root / "python-dist", root / "python-dist-repeat"
+          wheel = f"openbao_stack_setup-{version}-py3-none-any.whl"
+          sdist = f"openbao_stack_setup-{version}.tar.gz"
+          with zipfile.ZipFile(dist / wheel) as archive:
+              metadata = archive.read(f"openbao_stack_setup-{version}.dist-info/METADATA")
+              entrypoints = archive.read(f"openbao_stack_setup-{version}.dist-info/entry_points.txt")
+              if b"stack-setup = openbao_stack_setup.main:main" not in entrypoints:
+                  raise SystemExit("Setup wheel lacks the installed stack-setup command")
+          with tarfile.open(dist / sdist) as archive:
+              stream = archive.extractfile(f"openbao_stack_setup-{version}/PKG-INFO")
+              if stream is None:
+                  raise SystemExit("Setup source distribution has no package metadata")
+              source_metadata = stream.read()
+          for payload in (metadata, source_metadata):
+              parsed = BytesParser().parsebytes(payload)
+              if (parsed["Name"], parsed["Version"], parsed["Requires-Python"]) != (
+                  project["name"], version, project["requires-python"]
+              ):
+                  raise SystemExit("Setup distribution metadata does not match tagged project")
+          checksums = []
+          for name in sorted((wheel, sdist)):
+              payload = (dist / name).read_bytes()
+              if payload != (repeat / name).read_bytes():
+                  raise SystemExit("Repeated setup distribution builds differ")
+              checksums.append(f"{hashlib.sha256(payload).hexdigest()}  {name}\n")
+          (dist / "SHA256SUMS").write_text("".join(checksums))
+          PY
+
+      - name: Create standalone setup GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#stack-setup-v}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Reusing existing standalone setup release'
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "Neurwerk stack-setup v$version" --generate-notes
+          fi
+
+      - name: Publish immutable standalone setup assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#stack-setup-v}"
+          dist="$RUNNER_TEMP/python-dist"
+          existing="$(mktemp -d "$RUNNER_TEMP/setup-release-existing.XXXXXX")"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets > "$existing/assets.json"
+          for name in "openbao_stack_setup-$version-py3-none-any.whl" \
+                      "openbao_stack_setup-$version.tar.gz" SHA256SUMS; do
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' \
+              "$existing/assets.json")"
+            if [[ "$count" == 1 ]]; then
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$name" --dir "$existing"
+              if ! cmp --silent "$dist/$name" "$existing/$name"; then
+                printf 'Existing release asset differs; refusing replacement: %s\n' "$name" >&2
+                exit 1
+              fi
+              printf 'Reusing identical release asset: %s\n' "$name"
+            elif [[ "$count" == 0 ]]; then
+              gh release upload "$RELEASE_TAG" "$dist/$name" --repo "$GITHUB_REPOSITORY"
+            else
+              printf 'Duplicate release asset name: %s\n' "$name" >&2
+              exit 1
+            fi
+          done

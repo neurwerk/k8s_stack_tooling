@@ -14,15 +14,18 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Never, TextIO, override
 
 import questionary
 import requests
+from k8s_stack_tooling.addons import ContractError, Setup, VerifiedSelection, valid_value
+from k8s_stack_tooling.addons.schema import Target
 from kubernetes.client.exceptions import ApiException
 
+from openbao_stack_setup.access import apply_access, complete_access
 from openbao_stack_setup.catalog import (
-    ADDONS,
     AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,
     AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,
     BOOTSTRAP_EXTERNAL_SECRETS,
@@ -40,13 +43,13 @@ from openbao_stack_setup.catalog import (
     TAILSCALE_EXTERNAL_SECRET,
     TAILSCALE_SECRET_STORE,
     HelmReleaseTarget,
-    addon_catalogs,
 )
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError, TokenAccessorLookupError
 from openbao_stack_setup.cluster import Cluster, ClusterError, StackIdentity
 from openbao_stack_setup.contextforge import ROTATE_BEFORE_SECONDS, reconcile_contextforge_token
 from openbao_stack_setup.credentials import (
     BOOTSTRAP_PASSWORDS,
+    BootstrapPassword,
     plan_bootstrap_passwords,
 )
 from openbao_stack_setup.custody import (
@@ -65,10 +68,23 @@ from openbao_stack_setup.custody import (
     validate_package_set,
     write_custodian_package,
 )
+from openbao_stack_setup.declarative import (
+    apply_credentials,
+    complete_handover,
+    compose_readers,
+    handover_definitions,
+    plan_credentials,
+)
 from openbao_stack_setup.glitchtip import parse_dsn_export, provisioning_payload, store_project_dsn
 from openbao_stack_setup.mcp import reconcile_mcp
+from openbao_stack_setup.native import NativeError
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
-from openbao_stack_setup.reconcile import ReconciliationIdentity, reconcile_openbao
+from openbao_stack_setup.reconcile import (
+    CURRENT_RECONCILIATION_VERSION,
+    ReconciliationIdentity,
+    reconcile_openbao,
+    reserve_reconciliation,
+)
 from openbao_stack_setup.recovery import (
     RecoveryKit,
     RecoveryKitError,
@@ -76,6 +92,7 @@ from openbao_stack_setup.recovery import (
     new_kit,
     new_static_seal,
     update,
+    validate_pending_password_bindings,
     with_bootstrap_passwords_acknowledged,
     with_checkpoint,
     with_initialization_material,
@@ -83,6 +100,12 @@ from openbao_stack_setup.recovery import (
     write_new,
 )
 from openbao_stack_setup.seed import seed_bootstrap
+from openbao_stack_setup.selection import (
+    SelectedRun,
+    approved_pull_inputs,
+    selected_run,
+    verify_client_sources,
+)
 
 _ADDRESS = "https://127.0.0.1:8200"
 _BOOTSTRAP_PASSWORD_ACKNOWLEDGEMENT = "I HAVE SAVED THESE PASSWORDS"  # noqa: S105
@@ -115,17 +138,20 @@ def _arguments() -> argparse.ArgumentParser:
     _guarded(commands.add_parser("preflight"))
     bootstrap = _guarded(commands.add_parser("bootstrap"))
     bootstrap.add_argument("--custody-root", type=Path)
+    bootstrap.add_argument("--confirm", metavar="CLIENT")
+    _operation_arguments(bootstrap)
     reconcile = _guarded(commands.add_parser("reconcile"))
     reconcile.add_argument("--custody-root", type=Path)
     reconcile.add_argument("--custodian-package", action="append", type=Path, required=True)
     reconcile.add_argument("--confirm", metavar="CLIENT")
+    _operation_arguments(reconcile)
     reconcile.add_argument("--rotate-contextforge-token", action="store_true")
     reconcile.add_argument(
         "--prepare-rejected-request-debug",
         action="store_true",
         help="Prepare isolated debug credentials before enabling client runtime resources.",
     )
-    status = _guarded(commands.add_parser("status"))
+    status = _guarded(commands.add_parser("status"), sources=False)
     status.add_argument("--custody-root", type=Path)
     recovery = commands.add_parser("recovery")
     recovery_commands = recovery.add_subparsers(dest="recovery_command", required=True)
@@ -143,50 +169,102 @@ def _arguments() -> argparse.ArgumentParser:
         dsn.add_argument(f"--{field}", required=True)
     addon = commands.add_parser("addon")
     addon_commands = addon.add_subparsers(dest="addon_command", required=True)
-    refresh = _guarded(addon_commands.add_parser("refresh"))
-    refresh.add_argument("addon_id", choices=sorted(ADDONS))
+    for mode in ("refresh", "provision", "restart"):
+        operation = _guarded(addon_commands.add_parser(mode))
+        operation.add_argument("addon_id")
+        operation.add_argument("--confirm", metavar="CLIENT")
     return parser
 
 
-def _guarded(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def _guarded(parser: argparse.ArgumentParser, *, sources: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--context", required=True)
     parser.add_argument("--client", required=True)
+    if sources:
+        parser.add_argument("--client-root", type=Path, required=True)
+        parser.add_argument("--source-cache", type=Path, required=True)
+        parser.add_argument("--cluster-dir", required=True)
     return parser
+
+
+def _operation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--operation-id", required=True, help="Nonsecret ID reused only to resume this operation."
+    )
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--previous-process-stopped", action="store_true")
+    parser.add_argument(
+        "--input-group",
+        action="append",
+        metavar="ADDON/GROUP",
+        help="Update an enabled group; missing enabled inputs are prompted automatically.",
+    )
+    parser.add_argument(
+        "--native-namespace", help="Existing scratch namespace for declared native preparation."
+    )
 
 
 def main() -> None:
     """Parse a single guarded operator command."""
     args = _arguments().parse_args()
     try:
-        if args.command == "preflight":
-            _preflight(args.context, args.client)
-        elif args.command == "bootstrap":
-            _bootstrap(args.context, args.client, args.custody_root)
-        elif args.command == "reconcile":
+        verified = None
+        if args.command != "status":
+            cluster = Cluster(args.context)
+            cluster.identity(args.client)
+            verified = verify_client_sources(
+                cluster, args.client_root, args.source_cache, args.cluster_dir
+            )
+        _dispatch(args, verified)
+    except (
+        ClusterError,
+        ContractError,
+        CustodyError,
+        NativeError,
+        OpenBaoError,
+        RecoveryKitError,
+        SetupError,
+    ) as exc:
+        print(f"ERROR: {exc}")
+        raise SystemExit(1) from None
+
+
+def _dispatch(args: argparse.Namespace, verified: VerifiedSelection | None) -> None:
+    if args.command == "status":
+        _status(args.context, args.client, args.custody_root)
+        return
+    if verified is None:
+        raise SetupError("Complete verified source selection is required")
+    SelectedRun(verified, "").require_verified()
+    if args.command in ("bootstrap", "reconcile"):
+        _confirm(args.context, args.client, "Prepare selected credentials", args.confirm)
+        run = selected_run(Cluster(args.context), verified, args)
+        if args.command == "bootstrap":
+            _bootstrap(
+                args.context, args.client, args.custody_root, run=run, confirmation=args.client
+            )
+        else:
             _reconcile(
                 args.context,
                 args.client,
                 args.custody_root,
                 args.custodian_package,
-                args.confirm,
+                args.client,
                 args.rotate_contextforge_token,
                 args.prepare_rejected_request_debug,
+                run=run,
             )
-        elif args.command == "status":
-            _status(args.context, args.client, args.custody_root)
-        elif args.command == "recovery":
-            _verify_recovery(args.context, args.client, args.custody_root, args.custodian_package)
-        elif args.command == "addon":
-            _refresh_addon(args.context, args.client, args.addon_id)
-        elif getattr(args, "secret_command", None) == "set-contextforge-oauth":
-            _set_contextforge_oauth(args.context, args.client, args.integration_id)
-        elif getattr(args, "secret_command", None) == "import-glitchtip-dsn":
-            _import_glitchtip_dsn(args)
-        else:
-            _set_provider(args.context, args.client, args.provider)
-    except (ClusterError, CustodyError, OpenBaoError, RecoveryKitError, SetupError) as exc:
-        print(f"ERROR: {exc}")
-        raise SystemExit(1) from None
+    elif args.command == "preflight":
+        _preflight(args.context, args.client, verified)
+    elif args.command == "recovery":
+        _verify_recovery(args.context, args.client, args.custody_root, args.custodian_package)
+    elif args.command == "addon":
+        _addon_lifecycle(args, verified)
+    elif getattr(args, "secret_command", None) == "set-contextforge-oauth":
+        _set_contextforge_oauth(args.context, args.client, args.integration_id)
+    elif getattr(args, "secret_command", None) == "import-glitchtip-dsn":
+        _import_glitchtip_dsn(args)
+    else:
+        _set_provider(args.context, args.client, args.provider)
 
 
 def _confirm(context: str, client: str, action: str, confirmation: str | None = None) -> None:
@@ -200,7 +278,8 @@ def _confirm(context: str, client: str, action: str, confirmation: str | None = 
         raise SetupError("Confirmation did not match the requested client")
 
 
-def _preflight(context: str, client: str) -> None:
+def _preflight(context: str, client: str, verified: VerifiedSelection) -> None:
+    SelectedRun(verified, "").require_verified()
     cluster = Cluster(context)
     identity = cluster.identity(client)
     smtp_required = cluster.require_bootstrap_prerequisites()
@@ -208,7 +287,7 @@ def _preflight(context: str, client: str) -> None:
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     glitchtip_enabled = cluster.glitchtip_enabled()
-    addons = cluster.selected_addons()
+    addons = tuple(item.definition.metadata.name for item in verified.addons)
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     rejection_debug_enabled = cluster.rejection_debug_enabled()
@@ -236,7 +315,11 @@ def _bootstrap(
     context: str,
     client: str,
     custody_root: Path | None,
+    *,
+    run: SelectedRun,
+    confirmation: str | None = None,
 ) -> None:
+    run.require_verified()
     print("Validating cluster identity and bootstrap prerequisites...")
     cluster = Cluster(context)
     identity = cluster.identity(client)
@@ -245,11 +328,10 @@ def _bootstrap(
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     glitchtip_enabled = cluster.glitchtip_enabled()
-    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     rejection_debug_enabled = cluster.rejection_debug_enabled()
-    _confirm(context, client, "Bootstrap OpenBao")
+    _confirm(context, client, "Bootstrap OpenBao", confirmation)
     endpoint = cluster.validate_kubernetes_api_endpoint()
     print(f"Kubernetes API endpoint verified: {endpoint.address}:{endpoint.port}")
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -310,12 +392,12 @@ def _bootstrap(
                 paths.seal_file,
                 active_directory_required,
                 docling_enabled,
-                addons,
                 contextforge_admin_email,
                 mcp_ids,
                 rejection_debug_enabled,
                 tailscale_enabled=tailscale_enabled,
                 glitchtip_enabled=glitchtip_enabled,
+                run=run,
             )
             return
         if kit.checkpoint == "seal-created":
@@ -337,12 +419,12 @@ def _bootstrap(
                 paths.seal_file,
                 active_directory_required,
                 docling_enabled,
-                addons,
                 contextforge_admin_email,
                 mcp_ids,
                 rejection_debug_enabled,
                 tailscale_enabled=tailscale_enabled,
                 glitchtip_enabled=glitchtip_enabled,
+                run=run,
             )
             return
         if kit.checkpoint == "complete":
@@ -358,12 +440,12 @@ def _bootstrap(
             paths.seal_file,
             active_directory_required,
             docling_enabled,
-            addons,
             contextforge_admin_email,
             mcp_ids,
             rejection_debug_enabled,
             tailscale_enabled=tailscale_enabled,
             glitchtip_enabled=glitchtip_enabled,
+            run=run,
         )
 
 
@@ -375,81 +457,42 @@ def _seed_and_finish(
     recovery_file: Path,
     active_directory_required: bool,
     docling_enabled: bool = False,
-    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     mcp_ids: tuple[str, ...] | None = None,
     rejection_debug_enabled: bool = False,
     *,
     tailscale_enabled: bool = False,
     glitchtip_enabled: bool = False,
+    run: SelectedRun,
 ) -> None:
     root = OpenBaoClient(_ADDRESS, root_token, unauthenticated.ca_cert, unauthenticated.session)
     try:
+        initial = None
         if kit.checkpoint == "initialized":
             print("Collecting provider credentials and seeding OpenBao...")
-            providers, smtp, active_directory = _prompt_bootstrap_credentials(
+            initial = _prompt_bootstrap_credentials(
                 cluster.smtp_required(), active_directory_required
             )
-            kit, bootstrap_passwords = _prepare_bootstrap_passwords(
-                root, kit, recovery_file, addons=addons
-            )
-            report = seed_bootstrap(
-                root,
-                providers,
-                smtp,
-                bootstrap_passwords,
-                ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
-                active_directory=active_directory,
-                glitchtip_enabled=glitchtip_enabled,
-                docling_enabled=docling_enabled,
-                addons=addons,
-                contextforge_admin_email=contextforge_admin_email,
-                rejection_debug_enabled=rejection_debug_enabled,
-                tailscale_enabled=tailscale_enabled,
-            )
+        kit = _prepare_selected(
+            cluster,
+            unauthenticated,
+            root,
+            kit,
+            recovery_file,
+            run,
+            initial=initial,
+            docling_enabled=docling_enabled,
+            contextforge_admin_email=contextforge_admin_email,
+            mcp_ids=mcp_ids,
+            rejection_debug_enabled=rejection_debug_enabled,
+            tailscale_enabled=tailscale_enabled,
+            glitchtip_enabled=glitchtip_enabled,
+        )
+        if kit.checkpoint == "initialized":
             kit = with_checkpoint(kit, "seeded")
             update(recovery_file, kit)
-            print(
-                "Seeded OpenBao "
-                f"external_records={report.external_records_changed} "
-                f"internal_records={report.internal_records_changed}"
-            )
-        else:
-            print("Reconciling the versioned OpenBao catalog...")
-            reconciled = reconcile_openbao(
-                root,
-                ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
-                glitchtip_enabled=glitchtip_enabled,
-                docling_enabled=docling_enabled,
-                addons=addons,
-                contextforge_admin_email=contextforge_admin_email,
-                rejection_debug_enabled=rejection_debug_enabled,
-                tailscale_enabled=tailscale_enabled,
-            )
-            print(
-                "Reconciled OpenBao catalog "
-                f"version={reconciled.applied_version} "
-                f"internal_records={reconciled.internal_records_changed} "
-                f"internal_fields_added={reconciled.internal_fields_added}"
-            )
-        _prepare_mcp_credentials(root, mcp_ids)
-        if contextforge_admin_email is not None:
-            _prepare_contextforge_token(root, kit.client, kit.cluster_id, kit.namespace_uid)
-        print("Verifying restricted secret-operator access and revoking other root tokens...")
-        _verify_secret_operator(cluster, unauthenticated)
-        _revoke_other_root_tokens(root)
     finally:
         root.revoke_self()
-    _converge_runtime(
-        cluster,
-        active_directory_required,
-        docling_enabled,
-        addons,
-        contextforge_admin_email,
-        rejection_debug_enabled,
-        tailscale_enabled=tailscale_enabled,
-        glitchtip_enabled=glitchtip_enabled,
-    )
     kit = with_checkpoint(kit, "complete")
     update(recovery_file, kit)
     print("OpenBao bootstrap completed; no root token was retained.")
@@ -463,14 +506,15 @@ def _reconcile(
     confirmation: str | None = None,
     rotate_contextforge_token: bool = False,
     prepare_rejected_request_debug: bool = False,
+    *,
+    run: SelectedRun,
 ) -> None:
+    run.require_verified()
     cluster = Cluster(context)
     identity = cluster.identity(client)
-    active_directory_required = cluster.active_directory_required()
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
     glitchtip_enabled = cluster.glitchtip_enabled()
-    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     if rotate_contextforge_token:
         if contextforge_admin_email is None:
@@ -498,52 +542,133 @@ def _reconcile(
         token = unauthenticated.create_recovery_root_token(recovery_shares)
         root = OpenBaoClient(_ADDRESS, token, unauthenticated.ca_cert, unauthenticated.session)
         try:
-            report = reconcile_openbao(
+            if rotate_contextforge_token:
+                cluster.require_contextforge_stopped()
+            _prepare_selected(
+                cluster,
+                unauthenticated,
                 root,
-                ReconciliationIdentity(
-                    identity.client,
-                    identity.cluster_id,
-                    identity.namespace_uid,
-                ),
-                glitchtip_enabled=glitchtip_enabled,
+                kit,
+                paths.seal_file,
+                run,
                 docling_enabled=docling_enabled,
-                addons=addons,
+                glitchtip_enabled=glitchtip_enabled,
                 contextforge_admin_email=contextforge_admin_email,
+                mcp_ids=mcp_ids,
                 rejection_debug_enabled=prepare_debug,
                 tailscale_enabled=tailscale_enabled,
+                rotate_contextforge_token=rotate_contextforge_token,
             )
-            _prepare_mcp_credentials(root, mcp_ids)
-            if contextforge_admin_email is not None:
-                if rotate_contextforge_token:
-                    cluster.require_contextforge_stopped()
-                _prepare_contextforge_token(
-                    root,
-                    identity.client,
-                    identity.cluster_id,
-                    identity.namespace_uid,
-                    rotate=rotate_contextforge_token,
-                )
-            _verify_secret_operator(cluster, unauthenticated)
-            _revoke_other_root_tokens(root)
         finally:
             root.revoke_self()
     print(
-        "Reconciled OpenBao catalog "
-        f"from_version={report.previous_version} "
-        f"to_version={report.applied_version} "
-        f"replicated_records={report.replicated_records}; temporary root token revoked."
+        "Selected credentials and access prepared; temporary root revoked. "
+        "Lifecycle actions are separate."
     )
-    _converge_runtime(
-        cluster,
-        active_directory_required,
-        docling_enabled,
-        addons,
-        contextforge_admin_email,
-        rejection_debug_enabled,
-        tailscale_enabled=tailscale_enabled,
-        glitchtip_enabled=glitchtip_enabled,
+
+
+def _prepare_selected(
+    cluster: Cluster,
+    unauthenticated: OpenBaoClient,
+    root: OpenBaoClient,
+    kit: RecoveryKit,
+    recovery_file: Path,
+    run: SelectedRun,
+    *,
+    initial: tuple[dict[str, dict[str, str]], dict[str, str], dict[str, str]] | None = None,
+    docling_enabled: bool = False,
+    contextforge_admin_email: str | None = None,
+    mcp_ids: tuple[str, ...] | None = None,
+    rejection_debug_enabled: bool = False,
+    tailscale_enabled: bool = False,
+    glitchtip_enabled: bool = False,
+    rotate_contextforge_token: bool = False,
+) -> RecoveryKit:
+    run.require_verified()
+    identity = ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid)
+    reservation = reserve_reconciliation(
+        root,
+        identity,
+        run.operation_id,
+        run.fingerprint,
+        compose_readers(run.setups),
+        resume=run.resume,
+        previous_process_stopped=run.previous_process_stopped,
     )
-    print("OpenBao reconciliation completed.")
+    definitions = dict.fromkeys(run.setups, run.fingerprint)
+    base_passwords = tuple(
+        replace(item, definition=run.fingerprint) for item in BOOTSTRAP_PASSWORDS
+    )
+    descriptors = (*base_passwords, *handover_definitions(run.setups, definitions))
+    kit, pending = _prepare_bootstrap_passwords(root, kit, recovery_file, definitions=descriptors)
+    supplied = _selected_inputs(root, run)
+    plan = plan_credentials(
+        root,
+        run.setups,
+        supplied=supplied,
+        prepared=run.prepared,
+        handover=kit,
+        definitions=definitions,
+        base_handover=base_passwords,
+    )
+    core_passwords = {item.key: pending[item.key] for item in base_passwords if item.key in pending}
+    options = {
+        "docling_enabled": docling_enabled,
+        "contextforge_admin_email": contextforge_admin_email,
+        "rejection_debug_enabled": rejection_debug_enabled,
+        "tailscale_enabled": tailscale_enabled,
+        "glitchtip_enabled": glitchtip_enabled,
+        "reservation": reservation,
+    }
+    if initial is not None:
+        providers, smtp, active_directory = initial
+        seed_bootstrap(
+            root,
+            providers,
+            smtp,
+            core_passwords,
+            identity,
+            active_directory=active_directory,
+            **options,
+        )
+    else:
+        reconcile_openbao(root, identity, core_passwords, **options)
+    _prepare_mcp_credentials(root, mcp_ids)
+    if contextforge_admin_email is not None:
+        _prepare_contextforge_token(
+            root, kit.client, kit.cluster_id, kit.namespace_uid, rotate=rotate_contextforge_token
+        )
+    apply_credentials(root, plan, reservation=reservation)
+    apply_access(root, reservation)
+    _verify_secret_operator(cluster, unauthenticated)
+    _revoke_other_root_tokens(root)
+    if kit.pending_bootstrap_passwords:
+        kit = complete_handover(root, kit, recovery_file)
+    complete_access(root, reservation, applied_version=CURRENT_RECONCILIATION_VERSION)
+    return kit
+
+
+def _selected_inputs(root: OpenBaoClient, run: SelectedRun) -> dict[str, dict[str, dict[str, str]]]:
+    supplied: dict[str, dict[str, dict[str, str]]] = {}
+    for addon, setup in run.setups.items():
+        for group in setup.input_groups:
+            consumers = [
+                (record.path, name)
+                for record in setup.records
+                for name, field in record.fields.items()
+                if field.supplied is not None and field.supplied.group == group.id
+            ]
+            if not consumers:
+                continue
+            requested = f"{addon}/{group.id}" in run.input_groups
+            existing = [(root.read_secret(path), name) for path, name in consumers]
+            if not requested and all(record and name in record.values for record, name in existing):
+                continue
+            values = {key: _ask_password(f"{addon}/{group.id} {key}:") for key in group.fields}
+            if any(not valid_value(values[key], rule) for key, rule in group.fields.items()):
+                raise SetupError("Supplied credential group is invalid; values hidden")
+            supplied.setdefault(addon, {})[group.id] = values
+    return supplied
 
 
 def _prepare_contextforge_token(
@@ -576,28 +701,65 @@ def _prepare_mcp_credentials(root: OpenBaoClient, identities: tuple[str, ...] | 
 
 
 def _prepare_bootstrap_passwords(
-    client: OpenBaoClient, kit: RecoveryKit, recovery_file: Path, *, addons: tuple[str, ...] = ()
+    client: OpenBaoClient,
+    kit: RecoveryKit,
+    recovery_file: Path,
+    *,
+    definitions: tuple[BootstrapPassword, ...] | None = None,
 ) -> tuple[RecoveryKit, dict[str, str]]:
+    bindings = _password_bindings(definitions) if definitions is not None else None
+    if kit.pending_password_bindings is not None:
+        validate_pending_password_bindings(kit, bindings or {})
+    elif kit.pending_bootstrap_passwords is not None and definitions is not None:
+        raise SetupError("Pending password delivery has no selected-definition binding")
     if kit.pending_bootstrap_passwords is None:
         client.ensure_kv_v2_mount()
-        planned = plan_bootstrap_passwords(client, addons=addons)
+        planned = plan_bootstrap_passwords(client, definitions=definitions)
         if not planned:
             return kit, {}
-        kit = with_pending_bootstrap_passwords(kit, planned)
+        kit = with_pending_bootstrap_passwords(
+            kit,
+            planned,
+            bindings=({key: bindings[key] for key in planned} if bindings is not None else None),
+        )
         update(recovery_file, kit)
     passwords = kit.pending_bootstrap_passwords
     if passwords is None:
         raise SetupError("Bootstrap password delivery state is invalid")
-    if "dify" in passwords and "dify" not in addons:
-        raise SetupError("Dify selection changed during pending bootstrap password delivery")
     if not kit.bootstrap_passwords_acknowledged:
-        _deliver_bootstrap_passwords(passwords)
+        if definitions is None:
+            _deliver_bootstrap_passwords(passwords)
+        else:
+            _deliver_bootstrap_passwords(passwords, definitions=definitions)
         kit = with_bootstrap_passwords_acknowledged(kit)
         update(recovery_file, kit)
     return kit, dict(passwords)
 
 
-def _deliver_bootstrap_passwords(passwords: dict[str, str]) -> None:
+def _password_bindings(definitions: tuple[BootstrapPassword, ...]) -> dict[str, dict[str, str]]:
+    bindings = {
+        item.key: {
+            "label": item.label,
+            "path": item.path,
+            "field": item.field,
+            "definition": item.definition,
+        }
+        for item in definitions
+    }
+    if len(bindings) != len(definitions) or any(
+        not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        for key, binding in bindings.items()
+        for value in (key, *binding.values())
+    ):
+        raise SetupError("Selected password definitions are invalid")
+    if len({(item.path, item.field) for item in definitions}) != len(definitions):
+        raise SetupError("Selected password destinations are duplicated")
+    return bindings
+
+
+def _deliver_bootstrap_passwords(
+    passwords: dict[str, str], *, definitions: tuple[BootstrapPassword, ...] = BOOTSTRAP_PASSWORDS
+) -> None:
     try:
         with (
             Path("/dev/tty").open("r", encoding="utf-8") as terminal_input,
@@ -605,17 +767,23 @@ def _deliver_bootstrap_passwords(passwords: dict[str, str]) -> None:
         ):
             if not terminal_input.isatty() or not terminal_output.isatty():
                 raise SetupError("Bootstrap password delivery requires a controlling TTY")
-            _write_bootstrap_passwords(terminal_input, terminal_output, passwords)
+            _write_bootstrap_passwords(
+                terminal_input, terminal_output, passwords, definitions=definitions
+            )
     except OSError:
         raise SetupError("Bootstrap password delivery requires a controlling TTY") from None
 
 
 def _write_bootstrap_passwords(
-    terminal_input: TextIO, terminal_output: TextIO, passwords: dict[str, str]
+    terminal_input: TextIO,
+    terminal_output: TextIO,
+    passwords: dict[str, str],
+    *,
+    definitions: tuple[BootstrapPassword, ...] = BOOTSTRAP_PASSWORDS,
 ) -> None:
     terminal_output.write("Save these newly generated bootstrap passwords now.\n")
     terminal_output.write("They will not be displayed again after acknowledgement.\n\n")
-    for password in BOOTSTRAP_PASSWORDS:
+    for password in definitions:
         value = passwords.get(password.key)
         if value is not None:
             terminal_output.write(f"{password.label}: {value}\n")
@@ -675,7 +843,6 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     identity = cluster.identity(client)
     tailscale_enabled = cluster.tailscale_enabled()
     docling_enabled = cluster.docling_enabled()
-    addons = cluster.selected_addons()
     contextforge_admin_email = cluster.contextforge_admin_email()
     mcp_ids = cluster.studio_mcp_ids()
     paths = prepare_custody_paths(custody_root or default_custody_root(client))
@@ -685,7 +852,7 @@ def _status(context: str, client: str, custody_root: Path | None) -> None:
     print(f"client={client} initialized={initialized} recovery_checkpoint={checkpoint}")
     print(f"Tailscale OAuth catalog selected={tailscale_enabled}")
     print(f"Docling credential catalog selected={docling_enabled}")
-    print(f"Selected addon catalogs={','.join(addons) or 'none'}")
+    print("Use preflight to verify the complete selected add-on sources.")
     print(f"ContextForge staged credential catalog selected={contextforge_admin_email is not None}")
     print(
         f"Studio MCP shared-key catalog selected={mcp_ids is not None} paths={len(mcp_ids or ())}"
@@ -731,12 +898,6 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
         raise SetupError("Docling private-vlm inference is not selected for the client")
     if provider_name == "active-directory" and not cluster.active_directory_required():
         raise SetupError("Active Directory federation is disabled for the selected client")
-    if provider_name in ("librechat-stt", "librechat-tts") and not (
-        cluster.librechat_speech_credentials_required(provider_name.removeprefix("librechat-"))
-    ):
-        raise SetupError(
-            "LibreChat speech or its authentication is disabled for the selected client"
-        )
     _confirm(context, client, f"Update {provider_name} credentials")
     values = _prompt_provider(provider)
     with _openbao(cluster) as unauthenticated:
@@ -932,15 +1093,12 @@ def _refresh_bootstrap_external_secrets(
     cluster: Cluster,
     active_directory_required: bool,
     docling_enabled: bool = False,
-    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
 ) -> None:
     targets = _BOOTSTRAP_EXTERNAL_SECRETS
     if active_directory_required:
         targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,)
-    for catalog in addon_catalogs(addons):
-        targets += catalog.external_secrets
     if docling_enabled:
         targets += DOCLING_EXTERNAL_SECRETS
     if contextforge_admin_email is not None:
@@ -964,7 +1122,6 @@ def _converge_runtime(
     cluster: Cluster,
     active_directory_required: bool,
     docling_enabled: bool = False,
-    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
     *,
@@ -989,9 +1146,6 @@ def _converge_runtime(
             "Tailscale OAuth access prepared; use secret set tailscale-oauth to verify delivery. "
             "Operator activation remains separate."
         )
-    for catalog in addon_catalogs(addons):
-        store = catalog.secret_store
-        cluster.ensure_secret_store_ready(store.name, store.namespace)
     if docling_enabled:
         for store in DOCLING_SECRET_STORES:
             cluster.ensure_secret_store_ready(store.name, store.namespace)
@@ -1003,7 +1157,6 @@ def _converge_runtime(
         cluster,
         active_directory_required,
         docling_enabled,
-        addons,
         contextforge_admin_email,
         rejection_debug_enabled,
     )
@@ -1042,47 +1195,95 @@ def _force_helm_release(cluster: Cluster, target: HelmReleaseTarget) -> None:
     )
 
 
-def _refresh_addon(context: str, client: str, addon_id: str) -> None:
-    cluster = Cluster(context)
-    cluster.identity(client)
-    if addon_id not in cluster.selected_addons():
-        raise SetupError("Addon is not selected for this client")
-    catalog = addon_catalogs((addon_id,))[0]
+def _addon_lifecycle(args: argparse.Namespace, verified: VerifiedSelection) -> None:
+    run = SelectedRun(verified, "")
+    run.require_verified()
+    setup = run.setups.get(args.addon_id)
+    if setup is None:
+        raise SetupError("Add-on is not selected for this client")
+    cluster = Cluster(args.context)
+    cluster.identity(args.client)
+    targets = []
+    if args.addon_command == "provision":
+        targets = setup.lifecycle.provision
+    elif args.addon_command == "restart":
+        targets = setup.lifecycle.restart
+    product = next(
+        item.definition
+        for item in verified.addons
+        if item.definition.metadata.name == args.addon_id
+    )
+    for namespace in sorted({target.namespace for target in targets}):
+        requested = [item for item in product.spec.inputs if item.namespace == namespace]
+        cluster.require_external_inputs(list(approved_pull_inputs(requested, verified, namespace)))
+    _confirm(args.context, args.client, f"Add-on {args.addon_command}", args.confirm)
+    _deliver_selected(cluster, setup)
+    if args.addon_command == "provision":
+        for target in setup.lifecycle.provision:
+            if target.kind == "HelmRelease":
+                _force_helm_release(cluster, HelmReleaseTarget(target.name, target.namespace))
+            else:
+                cluster.wait_declared_job(target.name, target.namespace)
+    elif args.addon_command == "restart":
+        for target in setup.lifecycle.restart:
+            _restart_target(cluster, target)
+    print(f"Selected add-on {args.addon_command} completed.")
+
+
+def _deliver_selected(cluster: Cluster, setup: Setup) -> None:
+    deliveries = {(item.namespace, item.name): item for item in setup.deliveries}
+    targets = list(setup.lifecycle.delivery)
+    if not targets:
+        seen = set()
+        for delivery in setup.deliveries:
+            store = (delivery.namespace, delivery.secret_store)
+            if store not in seen:
+                targets.append(Target(kind="SecretStore", namespace=store[0], name=store[1]))
+                seen.add(store)
+            targets.append(
+                Target(kind="ExternalSecret", namespace=delivery.namespace, name=delivery.name)
+            )
+    requested = {
+        (target.namespace, target.name) for target in targets if target.kind == "ExternalSecret"
+    }
+    if requested != deliveries.keys():
+        raise SetupError("Delivery inventory must cover every selected ExternalSecret exactly")
+    for target in targets:
+        if target.kind == "SecretStore":
+            cluster.ensure_secret_store_ready(target.name, target.namespace)
+        else:
+            delivery = deliveries[(target.namespace, target.name)]
+            cluster.ensure_secret_store_ready(delivery.secret_store, delivery.namespace)
+            cluster.force_external_secret_refresh(
+                delivery.name, delivery.namespace, delivery.target_secret
+            )
+
+
+def _restart_target(cluster: Cluster, target: Target) -> None:
     kubectl = _kubectl_executable()
-    _confirm(context, client, "Refresh addon credentials and consumers")
-    store = catalog.secret_store
-    cluster.ensure_secret_store_ready(store.name, store.namespace)
-    for target in catalog.external_secrets:
-        cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
-    if catalog.database_release is not None:
-        _force_helm_release(cluster, catalog.database_release)
-    for target in catalog.consumers:
-        _force_helm_release(cluster, target)
     try:
         for action in ("restart", "status"):
-            for workload in catalog.workloads:
-                command = [
-                    kubectl,
-                    "--context",
-                    context,
-                    "--namespace",
-                    catalog.namespace,
-                    "rollout",
-                    action,
-                    workload,
-                ]
-                if action == "status":
-                    command.append("--timeout=10m")
-                subprocess.run(
-                    command,
-                    check=True,
-                    timeout=660,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            command = [
+                kubectl,
+                "--context",
+                cluster.context,
+                "--namespace",
+                target.namespace,
+                "rollout",
+                action,
+                f"{target.kind.lower()}/{target.name}",
+            ]
+            if action == "status":
+                command.append("--timeout=10m")
+            subprocess.run(
+                command,
+                check=True,
+                timeout=660,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     except (OSError, subprocess.SubprocessError):
-        raise SetupError("Addon workload restart or readiness check failed") from None
-    print("Addon credential delivery and consumers reconciled.")
+        raise SetupError("Selected workload restart or readiness check failed") from None
 
 
 def _bound_kit(path: Path, identity: StackIdentity) -> RecoveryKit:

@@ -49,8 +49,6 @@ MANAGED_CREDENTIALS: dict[str, Provider] = {
     "image-inspection": Provider(
         "image-inspection", ("monitor-agentgateway-extproc/external",), ("apiKey",)
     ),
-    "librechat-stt": Provider("librechat-stt", ("frontend-librechat/external",), ("sttApiKey",)),
-    "librechat-tts": Provider("librechat-tts", ("frontend-librechat/external",), ("ttsApiKey",)),
 }
 
 

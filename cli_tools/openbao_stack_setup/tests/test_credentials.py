@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 
@@ -26,7 +25,7 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
 
     base_passwords = plan_bootstrap_passwords(api)
     assert "dify" not in base_passwords
-    reconcile_internal_credentials(api, base_passwords)
+    first = reconcile_internal_credentials(api, base_passwords)
     assert "frontend-dify/internal" not in session.secrets
     assert "frontend-librechat/internal" not in session.secrets
     assert "frontend-open-webui/internal" not in session.secrets
@@ -46,84 +45,16 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     )
     assert "difyPassword" not in session.secrets["infra-postgres-operations/internal"].values
 
-    planned = plan_bootstrap_passwords(api, addons=("dify",))
-    first = reconcile_internal_credentials(api, planned, addons=("dify", "librechat", "open-webui"))
     original = {path: dict(record.values) for path, record in session.secrets.items()}
-    selected_again = reconcile_internal_credentials(api, {}, addons=("open-webui",))
-    assert selected_again.changed_paths == ()
     second = reconcile_internal_credentials(api, {})
 
-    assert set(first.changed_paths) == {
-        "frontend-dify/internal",
-        "auth-keycloak/internal",
-        "auth-keycloak-api-key-bridge/internal",
-        "infra-postgres-operations/internal",
-        "frontend-librechat/internal",
-        "frontend-open-webui/internal",
-    }
+    assert set(first.changed_paths) == set(original)
     assert first.added_fields > 0
-    assert set(planned) == {"dify"}
     assert second.changed_paths == ()
     assert second.added_fields == 0
     assert {path: record.values for path, record in session.secrets.items()} == original
 
-    openwebui = original["frontend-open-webui/internal"]
-    assert all(
-        isinstance(openwebui[field], str) and openwebui[field]
-        for field in (
-            "postgresqlPassword",
-            "webuiSecretKey",
-            "oauthSessionTokenEncryptionKey",
-            "oauthClientInfoEncryptionKey",
-        )
-    )
-    assert (
-        openwebui["openidClientSecret"]
-        == original["auth-keycloak/internal"]["openwebuiClientSecret"]
-    )
-    assert (
-        openwebui["postgresqlPassword"]
-        == original["infra-postgres-operations/internal"]["openwebuiPassword"]
-    )
-
-    dify = original["frontend-dify/internal"]
-    assert all(
-        dify[field]
-        for field in ("difyAgentApiToken", "difyAgentServerSecretKey", "difyAgentSandboxAuthToken")
-    )
-    assert (
-        len(
-            {
-                dify[field]
-                for field in (
-                    "difyAgentApiToken",
-                    "difyAgentServerSecretKey",
-                    "difyAgentSandboxAuthToken",
-                )
-            }
-        )
-        == 3
-    )
-
-    librechat = original["frontend-librechat/internal"]
-    assert {
-        "valkeyPassword",
-        "documentdbUser",
-        "documentdbPassword",
-        "adminPanelSessionSecret",
-        "adminPanelMetricsSecret",
-    }.issubset(librechat)
-    assert librechat["documentdbUser"] == "librechat"
-    assert "librechat-code-interpreter/internal" not in original
-    assert not {"ragPostgresqlPassword", "codeInterpreterJwtPrivateKey"} & librechat.keys()
     bridge = original["auth-keycloak-api-key-bridge/internal"]
-    dify_key = dify["agentgatewayApiKey"]
-    assert isinstance(dify_key, str)
-    assert (
-        bridge["difyAgentgatewayPrimaryVerifierSha256"]
-        == hashlib.sha256(dify_key.encode()).hexdigest()
-    )
-    assert bridge["difyAgentgatewaySecondaryVerifierSha256"] == ""
     assert isinstance(bridge["postgresqlPassword"], str)
     assert re.fullmatch(r"[A-Za-z0-9_-]+", bridge["postgresqlPassword"])
     agentgateway = original["infra-agentgateway/internal"]
@@ -161,14 +92,11 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     postgres_operations = original["infra-postgres-operations/internal"]
     assert set(postgres_auth) == {"adminPassword", "keycloakPassword"}
     assert set(postgres_operations) == {
-        "openwebuiPassword",
         "adminPassword",
         "agentgatewayPassword",
         "apiKeyBridgePassword",
         "studioPassword",
-        "difyPassword",
         "langfusePassword",
-        "documentdbPassword",
     }
     assert postgres_auth["adminPassword"]
     assert postgres_operations["adminPassword"]
@@ -176,11 +104,6 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
     assert postgres_operations["apiKeyBridgePassword"] == bridge["postgresqlPassword"]
     assert postgres_operations["studioPassword"] == studio["postgresqlPassword"]
     assert postgres_auth["keycloakPassword"] == original["auth-keycloak/internal"]["dbPassword"]
-    assert postgres_operations["documentdbPassword"] == librechat["documentdbPassword"]
-    assert (
-        postgres_operations["difyPassword"]
-        == original["frontend-dify/internal"]["postgresPassword"]
-    )
     assert (
         postgres_operations["langfusePassword"]
         == original["monitor-langfuse/internal"]["postgresqlPassword"]
@@ -259,11 +182,7 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
         ("infra-postgres-operations/internal", "agentgatewayPassword"),
         ("infra-postgres-operations/internal", "apiKeyBridgePassword"),
         ("infra-postgres-operations/internal", "studioPassword"),
-        ("infra-postgres-operations/internal", "documentdbPassword"),
-        ("infra-postgres-operations/internal", "difyPassword"),
         ("infra-postgres-operations/internal", "langfusePassword"),
-        ("infra-postgres-operations/internal", "openwebuiPassword"),
-        ("frontend-open-webui/internal", "openidClientSecret"),
     ],
 )
 def test_postgres_consumer_conflicts_are_rejected(tmp_path: Path, path: str, field: str) -> None:
@@ -271,32 +190,15 @@ def test_postgres_consumer_conflicts_are_rejected(tmp_path: Path, path: str, fie
     api = client(tmp_path, session)
     reconcile_internal_credentials(
         api,
-        plan_bootstrap_passwords(api, addons=("dify",)),
-        addons=("dify", "librechat", "open-webui"),
+        plan_bootstrap_passwords(api),
     )
     session.secrets[path].values[field] = "conflict"
     existing = dict(session.secrets[path].values)
 
     with pytest.raises(OpenBaoError, match=rf"credential mismatch at {path}/{field}"):
-        reconcile_internal_credentials(api, {}, addons=("dify", "librechat", "open-webui"))
+        reconcile_internal_credentials(api, {})
 
     assert session.secrets[path].values == existing
-
-
-def test_bridge_verifier_must_match_managed_key(tmp_path: Path) -> None:
-    session = FakeSession()
-    api = client(tmp_path, session)
-    session.secrets["auth-keycloak-api-key-bridge/internal"] = StoredSecret(
-        {
-            "difyAgentgatewayPrimaryVerifierSha256": "wrong-primary",
-            "difyAgentgatewaySecondaryVerifierSha256": "wrong-secondary",
-        }
-    )
-
-    with pytest.raises(OpenBaoError, match="managed verifier slot"):
-        reconcile_internal_credentials(
-            api, plan_bootstrap_passwords(api, addons=("dify",)), addons=("dify",)
-        )
 
 
 def test_existing_bootstrap_passwords_are_not_planned(tmp_path: Path) -> None:

@@ -200,67 +200,16 @@ def test_active_directory_requirement(values: str, expected: bool) -> None:
     assert target.active_directory_required() is expected
 
 
-@pytest.mark.parametrize(
-    ("values", "expected"),
-    [
-        ("{}", False),
-        ("forgejo: {}", False),
-        ("forgejo: {enabled: false}", False),
-        ("forgejo: {enabled: true, hostname: git.example.test}", True),
-    ],
-)
-def test_forgejo_selector_uses_existing_client_values(values: str, expected: bool) -> None:
+def test_reads_only_the_staged_source_projection() -> None:
     target = cluster()
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": values}
+        metadata=SimpleNamespace(name="addon-selection", namespace="flux-system"),
+        data={"selection.json": "synthetic-projection"},
     )
-    assert ("knowledge-center" in target.selected_addons()) is expected
-    target.core.read_namespaced_config_map.assert_called_once_with("client-values", "auth-keycloak")
-
-
-@pytest.mark.parametrize(
-    ("values", "expected"),
-    [
-        ("{}", False),
-        ("dify: {enabled: false}", False),
-        ("dify: {enabled: true, hostname: dify.example.test}", True),
-        ("dify: null", None),
-        ('dify: {enabled: "true", hostname: dify.example.test}', None),
-        ("dify: {enabled: true}", None),
-        ("dify: {enabled: true, hostname: '  '}", None),
-    ],
-)
-def test_dify_selector_fails_closed(values: str, expected: bool | None) -> None:
-    target = cluster()
-    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": values}
+    assert target.selection_projection()["data"] == {"selection.json": "synthetic-projection"}
+    target.core.read_namespaced_config_map.assert_called_once_with(
+        "addon-selection", "flux-system", _request_timeout=(5, 30)
     )
-    if expected is None:
-        with pytest.raises(ClusterError, match=r"[Aa]ddon"):
-            target.selected_addons()
-    else:
-        assert ("dify" in target.selected_addons()) is expected
-    target.core.read_namespaced_config_map.assert_called_once_with("client-values", "auth-keycloak")
-
-
-@pytest.mark.parametrize(
-    "values",
-    [
-        "[]",
-        "forgejo: null",
-        "forgejo: false",
-        'forgejo: {enabled: "true"}',
-        "forgejo: {enabled: true}",
-        "forgejo: {enabled: true, hostname: ' '}",
-    ],
-)
-def test_forgejo_selector_rejects_invalid_values(values: str) -> None:
-    target = cluster()
-    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": values}
-    )
-    with pytest.raises(ClusterError, match=r"[Aa]ddon"):
-        target.selected_addons()
 
 
 def test_rejects_non_boolean_active_directory_choice() -> None:
