@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
 import questionary
+from dotenv import load_dotenv
 
 from platform_release import main as base
 from platform_release.commands import CommandRunner, SubprocessRunner
@@ -23,13 +25,14 @@ from platform_release.python_releases import (
 )
 
 ACTIONS = ("status", "check", "publish", "verify")
+TARGETS = {"base": "Base", "tooling": "Tooling", "setup": "Setup"}
 
 
 def parser() -> argparse.ArgumentParser:
     """Build offline help; no repository, network, signing or SDK import is involved."""
     result = argparse.ArgumentParser(
         prog="release-manager",
-        description="Workstation releases only; never deploys or accesses a cluster.",
+        description="Release manager for Base, Tooling and setup.",
         epilog="Run here: tooling/cli_tools/platform_release. Select a target for its menu.",
     )
     targets = result.add_subparsers(dest="target")
@@ -62,17 +65,37 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def repository_path(args: argparse.Namespace, runner: CommandRunner) -> Path:
-    """Find repository paths only, never import code from a sibling checkout."""
+def load_cli_env() -> None:
+    """Load only the optional .env in the explicitly selected CLI project working directory."""
+    project = Path.cwd() / "pyproject.toml"
+    if not project.is_file():
+        return
+    if tomllib.loads(project.read_text()).get("project", {}).get("name") != "platform-release":
+        return
+    config = project.parent / ".env"
+    if config.is_symlink() or (config.exists() and not config.is_file()):
+        raise base.ReleaseError("the CLI project's .env must be a regular local file")
+    load_dotenv(dotenv_path=config, override=False)
+
+
+def repository_path(args: argparse.Namespace, prompt: base.Prompt | None = None) -> Path:
+    """Use explicit flags, existing process environment, then local dotenv; never guess a repo."""
     if args.repo is not None:
-        return cast(Path, args.repo)
+        return cast(Path, args.repo).expanduser()
     workspace = os.environ.get("WORKSPACE_ROOT")
     if workspace:
-        return Path(workspace) / ("base" if args.target == "base" else "tooling")
-    root = Path(base._checked(runner, ("git", "rev-parse", "--show-toplevel")))
-    if args.target == "base":
-        raise base.ReleaseError("pass --repo /path/to/base or set WORKSPACE_ROOT")
-    return root
+        root = Path(workspace).expanduser()
+        if not root.is_absolute():
+            raise base.ReleaseError("WORKSPACE_ROOT must be an absolute workspace path")
+        return root / ("base" if args.target == "base" else "tooling")
+    if prompt is not None:
+        path = prompt.ask(f"{TARGETS[args.target]} repository path: ")
+        if path:
+            args.repo = Path(path).expanduser()
+            return args.repo
+    raise base.ReleaseError(
+        "pass --repo or set absolute WORKSPACE_ROOT in the CLI project's .env or environment"
+    )
 
 
 def _reviewed_commit(args: argparse.Namespace, prompt: base.Prompt, interactive: bool) -> str:
@@ -89,7 +112,7 @@ def _base_action(
     args: argparse.Namespace, runner: CommandRunner, prompt: base.Prompt, interactive: bool
 ) -> int:
     """Delegate the Base lifecycle unchanged, including its protected staging workflow."""
-    path = repository_path(args, runner)
+    path = repository_path(args, prompt if interactive else None)
     action = "continue" if args.action == "verify" else args.action
     if action == "publish":
         commit = _reviewed_commit(args, prompt, interactive)
@@ -135,7 +158,7 @@ def _base_arguments(
 def _python_action(
     args: argparse.Namespace, runner: CommandRunner, prompt: base.Prompt, interactive: bool
 ) -> int:
-    repo = base._repository(runner, repository_path(args, runner))
+    repo = base._repository(runner, repository_path(args, prompt if interactive else None))
     if repo.slug != "neurwerk/k8s_stack_tooling":
         raise base.ReleaseError("tooling/setup releases require neurwerk/k8s_stack_tooling")
     if args.tag is not None or args.pr is not None:
@@ -163,6 +186,41 @@ def _python_action(
     return 0
 
 
+def menu_action(
+    command_parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> argparse.Namespace | None:
+    """Select a target/action; Back discards target-specific arguments before returning."""
+    if args.target is None:
+        print("Release manager\nChoose a target, then an action.")
+        target = questionary.select(
+            "Release target",
+            choices=[
+                *(questionary.Choice(label, value=value) for value, label in TARGETS.items()),
+                questionary.Choice("Exit", value="exit"),
+            ],
+        ).ask()
+        if target in (None, "exit"):
+            return None
+        args = command_parser.parse_args([target])
+    choice = questionary.select(
+        f"{TARGETS[args.target]} release",
+        choices=[
+            questionary.Choice("Show status", value="status"),
+            questionary.Choice("Check", value="check"),
+            questionary.Choice("Sign and publish", value="publish"),
+            questionary.Choice("Verify publication", value="verify"),
+            questionary.Choice("Back", value="back"),
+        ],
+        default="status",
+    ).ask()
+    if choice is None:
+        return None
+    if choice == "back":
+        return command_parser.parse_args([])
+    args.action = choice
+    return args
+
+
 def run_cli(
     arguments: Sequence[str] | None = None,
     *,
@@ -170,30 +228,29 @@ def run_cli(
     prompt: base.Prompt | None = None,
     isatty: bool | None = None,
 ) -> int:
-    """Print bare help successfully; target menus exist only on an ordinary terminal."""
+    """Show offline help outside a terminal, otherwise offer targets and simple action menus."""
     command_parser = parser()
     args = command_parser.parse_args(arguments)
-    if args.target is None:
+    interactive = (sys.stdin.isatty() and sys.stdout.isatty()) if isatty is None else isatty
+    if args.target is None and not interactive:
         command_parser.print_help()
         return 0
-    interactive = (sys.stdin.isatty() and sys.stdout.isatty()) if isatty is None else isatty
-    if args.action is None and not interactive:
+    if getattr(args, "action", None) is None and not interactive:
         command_parser.parse_args([args.target, "--help"])
         return 0
-    active_runner = runner or SubprocessRunner(verbose=args.verbose)
+    active_runner = runner or SubprocessRunner(verbose=getattr(args, "verbose", False))
     active_prompt = prompt or base.TerminalPrompt()
-    menu = args.action is None
+    menu = args.target is None or args.action is None
     try:
+        load_cli_env()
         while True:
             if menu:
-                choice = questionary.select(
-                    f"{args.target} release — workstation only",
-                    choices=[*ACTIONS, "exit"],
-                    default="status",
-                ).ask()
-                if choice in (None, "exit"):
+                selected = menu_action(command_parser, args)
+                if selected is None:
                     return 0
-                args.action = choice
+                args = selected
+                if args.target is None:
+                    continue
             result = (
                 _base_action(args, active_runner, active_prompt, interactive)
                 if args.target == "base"

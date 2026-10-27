@@ -5,16 +5,20 @@ Run releases from the trusted workstation, not an operations VM or cluster. This
 ## Start
 
 ```bash
-cd "$WORKSPACE_ROOT/tooling/cli_tools/platform_release"
+cd /absolute/path/to/k8s_stack/tooling/cli_tools/platform_release
+cp -n .env.example .env
+# Edit .env once: WORKSPACE_ROOT=/absolute/path/to/k8s_stack
 uv run release-manager
 uv run release-manager base
 uv run release-manager tooling
 uv run release-manager setup
 ```
 
-The bare command prints help successfully without prompts or repository/network access. A target opens its status/check/publish/verify menu only in an interactive terminal. Outside a terminal, supply an action or use `--help`.
+In a terminal, the bare command shows a short introduction and a Base/Tooling/Setup/Exit target menu. Each target offers Show status, Check, Sign and publish, Verify publication, and Back. Choosing a target or Back does not access repositories or the network. Outside a terminal, the bare command prints help and exits successfully; explicit `--help` is always offline and noninteractive. Direct commands remain available.
 
-`WORKSPACE_ROOT` supplies the Base/Tooling repository paths. Override either with `--repo /absolute/repository/path`. No source code is imported from sibling repositories. Leave existing `platform-release` commands available for Base release preparation, notes, and PR selection.
+The optional `.env` is loaded automatically from this CLI project's current working directory, identified by its `platform-release` project metadata. This works with installed and editable packages; it does not depend on the package's installation location. Missing `.env` is fine. The CLI does not search ancestors, inspect sibling configuration/credentials, or load another directory's `.env`. No `uv --env-file`, `UV_ENV_FILE`, or export step is required. Keep `.env` local and ignored; `.env.example` contains only nonsecret location configuration. The original `platform-release` command's startup behavior is unchanged.
+
+Location precedence is `--repo` first, then an existing process `WORKSPACE_ROOT`, then `.env`'s `WORKSPACE_ROOT`. Existing process variables are never overwritten. Use an absolute workspace root containing `base/` and `tooling/`. Without a known location, an interactive action asks for the repository path; a noninteractive action fails clearly instead of guessing the current Git repository. No source code is imported from sibling repositories. Use existing `platform-release` commands for Base release preparation, notes, and PR selection.
 
 ## Explicit actions
 
