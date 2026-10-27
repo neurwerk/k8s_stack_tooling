@@ -140,28 +140,19 @@ def required_ci(runner: CommandRunner, repo: Repository, commit: str) -> None:
 
 
 def check_python(runner: CommandRunner, repo: Repository, release: PythonRelease) -> None:
-    """Run the existing target quality commands and require the full repository CI gate."""
+    """Validate release identity and exact CI evidence, not Linux application checks locally."""
+    _clean_target(runner, repo, release.commit)
+    if _repository(runner, repo.path) != repo:
+        raise ReleaseError("repository identity changed before release validation")
+    if release_spec(runner, repo, release.target, release.commit) != release:
+        raise ReleaseError("reviewed project/lock metadata differs from the release target")
     workflow = f".github/workflows/{release.workflow}"
     _checked(runner, ("git", "cat-file", "-e", f"{release.commit}:{workflow}"), cwd=repo.path)
-    directory = repo.path / release.directory
-    if (repo.path / "Makefile").is_file():
-        _checked(runner, ("make", "check"), cwd=repo.path, live=True)
-    else:
-        for command in (
-            ("uv", "lock", "--check"),
-            ("uv", "sync", "--frozen", "--dev"),
-            ("uv", "run", "--frozen", "ruff", "check", "."),
-            ("uv", "run", "--frozen", "ruff", "format", "--check", "."),
-            ("uv", "run", "--frozen", "ty", "check"),
-            ("uv", "run", "--frozen", "pytest"),
-            ("uv", "build"),
-        ):
-            _checked(runner, command, cwd=directory, live=True)
+    required_ci(runner, repo, release.commit)
     if release.target == "setup":
         published_sdk(runner, repo, release)
-    required_ci(runner, repo, release.commit)
     _clean_target(runner, repo, release.commit)
-    print("Target checks and exact-commit full repository Required CI passed.")
+    print("Release metadata and exact-commit Required CI verified; application checks stay in CI.")
 
 
 def _release_metadata(runner: CommandRunner, repo: Repository, tag: str) -> dict[str, Any] | None:

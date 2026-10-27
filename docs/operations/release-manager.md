@@ -35,11 +35,11 @@ uv run release-manager base publish --commit <reviewed-full-SHA> --tag vX.Y.Z
 uv run release-manager base verify --tag vX.Y.Z
 ```
 
-Status is informational, not verification. Python targets derive their version/tag from committed project metadata and matching lockfiles: `vX.Y.Z` for Tooling and `stack-setup-vX.Y.Z` for setup. Check/publish/verify require an exact reviewed commit already in the remote default branch's history. Fetch and isolated linked worktree preparation preserve the original files/index; dirty or occupied release destinations stop without cleanup. Trusted repository checks run as local code, not in a sandbox.
+Status is informational, not verification. Python targets derive their version/tag from committed project metadata and matching lockfiles: `vX.Y.Z` for Tooling and `stack-setup-vX.Y.Z` for setup. Check/publish/verify require an exact reviewed commit already in the remote default branch's history. Fetch and isolated linked worktree preparation preserve the original files/index; dirty or occupied release destinations stop without cleanup. Base's local checks execute trusted repository code, not in a sandbox.
 
 Base delegates to the existing protected staging/publication flow. Its publication requires the reviewed current remote default tip and retains Base's release-PR, signature, provenance, and full check gates. Base verification delegates to its existing publication verifier.
 
-Tooling/setup check runs the target's existing lock, lint, format, type, test, and build commands (or repository `make check` when supplied), then requires full repository `Required CI` from GitHub Actions on that exact commit. Tooling checks need the pinned render/Node tools used by repository CI. Setup additionally requires its canonical published SDK wheel URL and a lock hash matching the actual published wheel and `SHA256SUMS`; candidate overrides cannot establish release readiness.
+Tooling/setup `check` and `publish` validate the exact repository/reviewed revision, committed project/lock version, owning workflow, and successful full-repository GitHub Actions `Required CI` on that same commit. They do not rerun application pytest, lint, type checks, builds, or `make` on the workstation: Linux application checks remain mandatory in CI, so macOS operators do not need the Linux application toolchain. Setup additionally requires its canonical published SDK wheel URL and a lock hash matching the actual published wheel and `SHA256SUMS`; candidate overrides cannot establish release readiness. Publication still checks the approved SSH-agent signer, exact confirmation, and immutable tag/ref identity. Base's delegated local checks and protected publication workflow are unchanged.
 
 ## Signing, publication and retries
 
