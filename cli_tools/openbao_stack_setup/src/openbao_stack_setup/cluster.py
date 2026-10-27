@@ -13,6 +13,7 @@ from typing import cast
 import kubernetes.client
 import kubernetes.config
 import yaml
+from k8s_stack_tooling.addons import ExternalInput, validate_external_input
 from kubernetes.client.exceptions import ApiException
 
 from openbao_stack_setup.client import OpenBaoError
@@ -192,24 +193,53 @@ class Cluster:
             raise ClusterError("Keycloak Active Directory enabled value must be a boolean")
         return enabled
 
-    def selected_addons(self) -> tuple[str, ...]:
-        """Read addon selections before optional namespaces or credentials exist."""
-        from openbao_stack_setup.catalog import ADDONS
+    def selection_projection(self) -> dict[str, object]:
+        """Read only the early, nonsecret selected-source ConfigMap."""
+        try:
+            resource = self.core.read_namespaced_config_map(
+                "addon-selection", "flux-system", _request_timeout=(5, 30)
+            )
+        except ApiException as exc:
+            raise ClusterError(
+                f"Selected-source projection is unavailable: HTTP {exc.status}"
+            ) from None
+        return {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": resource.metadata.name, "namespace": resource.metadata.namespace},
+            "data": resource.data or {},
+        }
 
-        values = self._product_values("client-values", "auth-keycloak", "Client")
-        if not isinstance(values, dict):
-            raise ClusterError("Client values contain an invalid addon contract")
-        selected = []
-        for name, catalog in ADDONS.items():
-            product = values.get(catalog.configuration_key, {})
-            if not isinstance(product, dict) or type(product.get("enabled", False)) is not bool:
-                raise ClusterError("Addon enabled value must be a boolean")
-            if product.get("enabled", False):
-                hostname = product.get("hostname")
-                if not isinstance(hostname, str) or not hostname.strip():
-                    raise ClusterError("Enabled addon requires a nonblank hostname")
-                selected.append(name)
-        return tuple(selected)
+    def require_external_inputs(self, required: list[ExternalInput]) -> None:
+        """Require live operator input identity/type/keys without decoding or displaying data."""
+        for item in required:
+            try:
+                resource = self.core.read_namespaced_secret(
+                    item.name, item.namespace, _request_timeout=(5, 30)
+                )
+                with kubernetes.client.ApiClient() as api:
+                    document = api.sanitize_for_serialization(resource)
+                validate_external_input(item, document)
+            except Exception:  # noqa: BLE001 -- API bodies and resource values must stay private.
+                raise ClusterError(
+                    "Required operator external input is missing or has invalid "
+                    "identity, type, or keys"
+                ) from None
+
+    def wait_declared_job(self, name: str, namespace: str) -> None:
+        """Wait for an existing Flux-owned provisioning Job without recreating it."""
+        from k8s_stack_tooling.api.jobs import wait_for_job
+
+        batch = kubernetes.client.BatchV1Api()
+        try:
+            job = batch.read_namespaced_job(name, namespace, _request_timeout=(5, 30))
+        except ApiException as exc:
+            raise ClusterError(f"Provisioning Job is unavailable: HTTP {exc.status}") from None
+        if (
+            wait_for_job(batch, namespace=namespace, name=name, uid=job.metadata.uid, seconds=600)
+            != "complete"
+        ):
+            raise ClusterError("Provisioning Job did not complete successfully")
 
     def glitchtip_enabled(self) -> bool:
         """Read the optional GlitchTip credential-catalog selection."""
@@ -414,25 +444,6 @@ class Cluster:
         ):
             raise ClusterError("Selected Docling requires the exact managed Secret references")
         return mode if enabled else None
-
-    def librechat_speech_credentials_required(self, direction: str) -> bool:
-        """Require both canonical speech selectors before accepting a managed key."""
-        if direction not in ("stt", "tts"):
-            raise ClusterError("Unsupported LibreChat speech direction")
-        values = self._product_values(
-            "librechat-product-values", "frontend-librechat", "LibreChat", optional=True
-        )
-        for key in ("frontendLibrechat", "speech", direction):
-            if not isinstance(values, dict):
-                raise ClusterError("LibreChat product values contain an invalid speech contract")
-            values = values.get(key, {})
-        if not isinstance(values, dict) or not isinstance(values.get("auth", {}), dict):
-            raise ClusterError("LibreChat product values contain an invalid speech contract")
-        enabled = values.get("enabled", False)
-        auth_enabled = values.get("auth", {}).get("enabled", False)
-        if not isinstance(enabled, bool) or not isinstance(auth_enabled, bool):
-            raise ClusterError("LibreChat speech enabled and auth.enabled must be booleans")
-        return enabled and auth_enabled
 
     def _product_values(
         self, name: str, namespace: str, product: str, *, optional: bool = False

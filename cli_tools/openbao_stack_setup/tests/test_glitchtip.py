@@ -249,6 +249,8 @@ def test_setters_independently_retry_delivery_after_revocation_in_either_order(
 
 @pytest.mark.parametrize("selected", [False, True])
 def test_preflight_reports_actual_glitchtip_selection(monkeypatch, capsys, selected):
+    from test_selected_cli import verified
+
     selector = configured_cluster()
     selector.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": "glitchtip: {enabled: " + str(selected).lower() + "}"}
@@ -257,12 +259,14 @@ def test_preflight_reports_actual_glitchtip_selection(monkeypatch, capsys, selec
     target.glitchtip_enabled = selector.glitchtip_enabled
     target.studio_mcp_ids.return_value = ()
     monkeypatch.setattr(cli, "Cluster", lambda context: target)
-    cli._preflight("context", "client")
+    cli._preflight("context", "client", verified())
     assert f"GlitchTip staged credential catalog selected={selected}" in capsys.readouterr().out
     target.token_request.assert_not_called()
 
 
 def test_malformed_glitchtip_selection_stops_before_credentials_or_custody(monkeypatch):
+    from test_selected_cli import verified
+
     selector = configured_cluster()
     selector.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": 'glitchtip: {enabled: "true"}'}
@@ -276,7 +280,7 @@ def test_malformed_glitchtip_selection_stops_before_credentials_or_custody(monke
         patch("openbao_stack_setup.main.prepare_custody_paths") as custody,
         pytest.raises(ClusterError, match="GlitchTip"),
     ):
-        cli._preflight("context", "client")
+        cli._preflight("context", "client", verified())
     prompt.assert_not_called()
     login.assert_not_called()
     custody.assert_not_called()
@@ -302,6 +306,12 @@ def test_handoff_revokes_operator_and_preserves_concurrent_siblings_when_cas_wri
         [
             "secret",
             "import-glitchtip-dsn",
+            "--client-root",
+            "/client",
+            "--source-cache",
+            "/cache",
+            "--cluster-dir",
+            "clusters/example",
             "--context",
             "test",
             "--client",

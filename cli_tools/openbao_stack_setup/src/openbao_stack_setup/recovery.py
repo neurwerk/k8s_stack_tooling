@@ -8,7 +8,7 @@ import os
 import secrets
 import tempfile
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 
@@ -36,6 +36,7 @@ class RecoveryKit:
     custodian_private_keys: tuple[str, str, str] | None
     initialization_root_token: str | None
     encrypted_recovery_shares: tuple[str, str, str] | None
+    pending_password_bindings: dict[str, dict[str, str]] | None = None
 
 
 def new_static_seal() -> tuple[bytes, str]:
@@ -101,7 +102,11 @@ def load(path: Path) -> RecoveryKit:
         values = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise RecoveryKitError("Recovery file could not be read") from None
-    if not isinstance(values, dict) or set(values) != {
+    if not isinstance(values, dict):
+        raise RecoveryKitError("Recovery file has an invalid schema")
+    # Existing custody kits remain usable; this is not an add-on record migration.
+    values.setdefault("pending_password_bindings", None)
+    if set(values) != {
         "schema_version",
         "client",
         "cluster_id",
@@ -118,6 +123,7 @@ def load(path: Path) -> RecoveryKit:
         "custodian_private_keys",
         "initialization_root_token",
         "encrypted_recovery_shares",
+        "pending_password_bindings",
     }:
         raise RecoveryKitError("Recovery file has an invalid schema")
     try:
@@ -185,6 +191,9 @@ def with_checkpoint(kit: RecoveryKit, checkpoint: str) -> RecoveryKit:
         static_seal_key_id=kit.static_seal_key_id,
         checkpoint=checkpoint,
         pending_bootstrap_passwords=pending_bootstrap_passwords,
+        pending_password_bindings=(
+            None if checkpoint == "seeded" else kit.pending_password_bindings
+        ),
         bootstrap_passwords_acknowledged=(
             False if checkpoint == "seeded" else kit.bootstrap_passwords_acknowledged
         ),
@@ -202,12 +211,20 @@ def with_checkpoint(kit: RecoveryKit, checkpoint: str) -> RecoveryKit:
     )
 
 
-def with_pending_bootstrap_passwords(kit: RecoveryKit, passwords: dict[str, str]) -> RecoveryKit:
+def with_pending_bootstrap_passwords(
+    kit: RecoveryKit,
+    passwords: dict[str, str],
+    *,
+    bindings: dict[str, dict[str, str]] | None = None,
+) -> RecoveryKit:
     """Persist newly generated human passwords before displaying them."""
-    if kit.checkpoint != "initialized" or kit.pending_bootstrap_passwords is not None:
+    if (
+        kit.checkpoint not in {"initialized", "complete"}
+        or kit.pending_bootstrap_passwords is not None
+    ):
         raise RecoveryKitError("Bootstrap passwords cannot be staged at this checkpoint")
     staged = dict(passwords)
-    if not staged or not _valid_password_mapping(staged):
+    if not _valid_password_mapping(staged, bindings):
         raise RecoveryKitError("Bootstrap passwords are invalid")
     return RecoveryKit(
         schema_version=kit.schema_version,
@@ -218,6 +235,11 @@ def with_pending_bootstrap_passwords(kit: RecoveryKit, passwords: dict[str, str]
         static_seal_key_id=kit.static_seal_key_id,
         checkpoint=kit.checkpoint,
         pending_bootstrap_passwords=staged,
+        pending_password_bindings=(
+            {key: dict(binding) for key, binding in bindings.items()}
+            if bindings is not None
+            else None
+        ),
         bootstrap_passwords_acknowledged=False,
         ceremony_id=kit.ceremony_id,
         custodian_names=kit.custodian_names,
@@ -242,6 +264,7 @@ def with_bootstrap_passwords_acknowledged(kit: RecoveryKit) -> RecoveryKit:
         static_seal_key_id=kit.static_seal_key_id,
         checkpoint=kit.checkpoint,
         pending_bootstrap_passwords=kit.pending_bootstrap_passwords,
+        pending_password_bindings=kit.pending_password_bindings,
         bootstrap_passwords_acknowledged=True,
         ceremony_id=kit.ceremony_id,
         custodian_names=kit.custodian_names,
@@ -250,6 +273,30 @@ def with_bootstrap_passwords_acknowledged(kit: RecoveryKit) -> RecoveryKit:
         custodian_private_keys=kit.custodian_private_keys,
         initialization_root_token=kit.initialization_root_token,
         encrypted_recovery_shares=kit.encrypted_recovery_shares,
+    )
+
+
+def validate_pending_password_bindings(
+    kit: RecoveryKit, bindings: dict[str, dict[str, str]]
+) -> None:
+    """Reject changed selected definitions before displaying or writing pending passwords."""
+    pending = kit.pending_bootstrap_passwords
+    if pending is None or kit.pending_password_bindings is None:
+        raise RecoveryKitError("Bound password delivery is not pending")
+    selected = {key: bindings[key] for key in pending if key in bindings}
+    if selected != kit.pending_password_bindings:
+        raise RecoveryKitError("Selected password definitions changed during pending delivery")
+
+
+def with_password_delivery_complete(kit: RecoveryKit) -> RecoveryKit:
+    """Clear acknowledged pending values after the caller verifies their persisted records."""
+    if kit.pending_bootstrap_passwords is None or not kit.bootstrap_passwords_acknowledged:
+        raise RecoveryKitError("Password delivery has not been acknowledged")
+    return replace(
+        kit,
+        pending_bootstrap_passwords=None,
+        pending_password_bindings=None,
+        bootstrap_passwords_acknowledged=False,
     )
 
 
@@ -289,11 +336,11 @@ def with_initialization_material(
 def _valid_pending_bootstrap_passwords(kit: RecoveryKit) -> bool:
     pending = kit.pending_bootstrap_passwords
     if pending is None:
-        return not kit.bootstrap_passwords_acknowledged
+        return not kit.bootstrap_passwords_acknowledged and kit.pending_password_bindings is None
     return (
         isinstance(pending, dict)
-        and kit.checkpoint == "initialized"
-        and _valid_password_mapping(pending)
+        and kit.checkpoint in {"initialized", "complete"}
+        and _valid_password_mapping(pending, kit.pending_password_bindings)
     )
 
 
@@ -330,11 +377,37 @@ def _valid_custody_state(kit: RecoveryKit) -> bool:
     )
 
 
-def _valid_password_mapping(passwords: dict[str, str]) -> bool:
+def _valid_password_mapping(
+    passwords: dict[str, str], bindings: dict[str, dict[str, str]] | None = None
+) -> bool:
+    if bindings is not None:
+        return (
+            isinstance(bindings, dict)
+            and bool(passwords)
+            and set(bindings) == set(passwords)
+            and all(_valid_password_binding(binding) for binding in bindings.values())
+            and all(_safe_text(key) and _safe_text(value) for key, value in passwords.items())
+        )
     return (
-        set(passwords).issubset({"keycloak", "dify", "langfuse", "grafana"})
+        set(passwords).issubset({"keycloak", "langfuse", "grafana"})
         and bool(passwords)
         and all(isinstance(value, str) and value for value in passwords.values())
+    )
+
+
+def _safe_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+    )
+
+
+def _valid_password_binding(binding: object) -> bool:
+    return (
+        isinstance(binding, dict)
+        and set(binding) == {"label", "path", "field", "definition"}
+        and all(_safe_text(value) for value in binding.values())
     )
 
 

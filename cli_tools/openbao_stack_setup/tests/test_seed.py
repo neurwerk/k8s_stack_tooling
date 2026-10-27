@@ -54,10 +54,9 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         {"username": "user", "password": "password"},
         bootstrap_passwords(),
         identity(),
-        addons=("dify",),
     )
     assert report.external_records_changed == 6
-    assert report.internal_records_changed == 12
+    assert report.internal_records_changed == 11
     assert session.secrets["stack-setup/providers/smtp"].values == {
         "smtpUsername": "user",
         "smtpPassword": "password",
@@ -89,7 +88,6 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
             "postgresqlPassword"
         ],
         "studioPassword": session.secrets["frontend-studio/internal"].values["postgresqlPassword"],
-        "difyPassword": session.secrets["frontend-dify/internal"].values["postgresPassword"],
         "langfusePassword": session.secrets["monitor-langfuse/internal"].values[
             "postgresqlPassword"
         ],
@@ -100,7 +98,6 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
         {"username": "user", "password": "password"},
         {},
         identity(),
-        addons=("dify",),
     )
     assert reconciled.external_records_changed == 0
 

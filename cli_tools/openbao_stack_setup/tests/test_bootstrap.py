@@ -159,8 +159,6 @@ def test_secret_operator_policy_allows_only_managed_records() -> None:
         "secret/metadata/monitor-opensearch/external",
         "secret/data/stack-setup/providers/smtp",
         "secret/metadata/stack-setup/providers/smtp",
-        "secret/data/frontend-librechat/external",
-        "secret/metadata/frontend-librechat/external",
         "secret/data/docling/external",
         "secret/metadata/docling/external",
         "secret/data/monitor-agentgateway-extproc/external",
@@ -170,7 +168,6 @@ def test_secret_operator_policy_allows_only_managed_records() -> None:
         r'path "([^"]+)" \{\s+capabilities = (\[[^\]]+\])', policy
     ):
         if path in (
-            "secret/data/frontend-librechat/external",
             "secret/data/docling/external",
             "secret/data/monitor-agentgateway-extproc/external",
         ):

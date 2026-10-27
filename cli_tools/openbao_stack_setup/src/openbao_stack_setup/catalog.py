@@ -111,7 +111,6 @@ INFRA_AGENTGATEWAY_EXTERNAL_SECRET = ExternalSecretTarget(
 CERT_MANAGER_ISSUERS_EXTERNAL_SECRET = ExternalSecretTarget(
     "cert-manager-issuers-values", "infra-cert-manager", "cert-manager-issuers-values"
 )
-FORGEJO_SECRET_STORE = SecretStoreTarget("forgejo-openbao-secret-store", "forgejo")
 CONTEXTFORGE_SECRET_STORE = SecretStoreTarget("contextforge-openbao-secret-store", "contextforge")
 CONTEXTFORGE_EXTERNAL_SECRETS = (
     ExternalSecretTarget("contextforge-runtime", "contextforge", "contextforge-runtime"),
@@ -147,13 +146,6 @@ REJECTION_DEBUG_EXTERNAL_SECRETS = (
     ExternalSecretTarget(
         "monitor-langfuse-rejection-debug", "monitor-langfuse", "monitor-langfuse-rejection-debug"
     ),
-)
-FORGEJO_EXTERNAL_SECRETS = (
-    ExternalSecretTarget("forgejo-runtime", "forgejo", "forgejo-runtime"),
-    ExternalSecretTarget(
-        "forgejo-postgres-password", "infra-postgres-operations", "forgejo-postgres-password"
-    ),
-    ExternalSecretTarget("forgejo-oidc-values", "auth-keycloak", "forgejo-oidc-values"),
 )
 
 BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
@@ -195,146 +187,6 @@ BOOTSTRAP_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
         "monitor-pii-engine-secrets", "monitor-pii-engine", "monitor-pii-engine-secrets"
     ),
 )
-
-DIFY_EXTERNAL_SECRETS: tuple[ExternalSecretTarget, ...] = (
-    ExternalSecretTarget("dify-oidc-secret", "auth-keycloak", "dify-oidc-secret"),
-    ExternalSecretTarget(
-        "frontend-dify-postgres-password",
-        "infra-postgres-operations",
-        "frontend-dify-postgres-password",
-    ),
-    ExternalSecretTarget(
-        "frontend-dify-openbao-secret", "frontend-dify", "frontend-dify-openbao-secret"
-    ),
-    ExternalSecretTarget(
-        "frontend-dify-runtime-secret", "frontend-dify", "frontend-dify-runtime-secret"
-    ),
-    ExternalSecretTarget(
-        "dify-managed-key-verifiers",
-        "auth-keycloak-api-key-bridge",
-        "dify-managed-key-verifiers",
-    ),
-)
-DIFY_SECRET_STORE = SecretStoreTarget("frontend-dify-openbao-secret-store", "frontend-dify")
-
-
-@dataclass(frozen=True)
-class AddonCatalog:
-    """One reviewed addon selection and its credential consumers."""
-
-    configuration_key: str
-    namespace: str
-    secret_store: SecretStoreTarget
-    external_secrets: tuple[ExternalSecretTarget, ...]
-    database_release: HelmReleaseTarget | None
-    consumers: tuple[HelmReleaseTarget, ...]
-    workloads: tuple[str, ...]
-
-
-ADDONS = {
-    "open-webui": AddonCatalog(
-        "frontendOpenWebui",
-        "frontend-open-webui",
-        SecretStoreTarget("frontend-open-webui-openbao-secret-store", "frontend-open-webui"),
-        (
-            ExternalSecretTarget(
-                "frontend-open-webui-runtime-secret",
-                "frontend-open-webui",
-                "frontend-open-webui-runtime-secret",
-            ),
-            ExternalSecretTarget(
-                "open-webui-oidc-secret", "auth-keycloak", "open-webui-oidc-secret"
-            ),
-            ExternalSecretTarget(
-                "open-webui-postgres-password",
-                "infra-postgres-operations",
-                "open-webui-postgres-password",
-            ),
-        ),
-        HelmReleaseTarget("open-webui-postgres", "infra-postgres-operations"),
-        (
-            HelmReleaseTarget("keycloak-open-webui-access", "auth-keycloak"),
-            HelmReleaseTarget("keycloak-open-webui-oidc", "auth-keycloak"),
-            HelmReleaseTarget("frontend-open-webui-shared", "frontend-open-webui"),
-            HelmReleaseTarget("frontend-open-webui", "frontend-open-webui"),
-        ),
-        ("deployment/frontend-open-webui",),
-    ),
-    "librechat": AddonCatalog(
-        "frontendLibrechat",
-        "frontend-librechat",
-        SecretStoreTarget("frontend-librechat-openbao-secret-store", "frontend-librechat"),
-        (
-            ExternalSecretTarget(
-                "frontend-librechat-runtime-secret",
-                "frontend-librechat",
-                "frontend-librechat-runtime-secret",
-            ),
-            ExternalSecretTarget("librechat-oidc-secret", "auth-keycloak", "librechat-oidc-secret"),
-            ExternalSecretTarget(
-                "librechat-documentdb-password",
-                "infra-postgres-operations",
-                "librechat-documentdb-password",
-            ),
-        ),
-        HelmReleaseTarget("librechat-documentdb", "infra-postgres-operations"),
-        (
-            HelmReleaseTarget("keycloak-librechat-access", "auth-keycloak"),
-            HelmReleaseTarget("librechat-oidc-settings", "auth-keycloak"),
-            HelmReleaseTarget("keycloak-librechat-oidc", "auth-keycloak"),
-            HelmReleaseTarget("frontend-librechat-shared", "frontend-librechat"),
-        ),
-        (
-            "statefulset/frontend-librechat-valkey-stateful-set",
-            "statefulset/frontend-librechat-meilisearch-stateful-set",
-            "deployment/frontend-librechat",
-            "deployment/frontend-librechat-admin-panel",
-        ),
-    ),
-    "dify": AddonCatalog(
-        "dify",
-        "frontend-dify",
-        DIFY_SECRET_STORE,
-        DIFY_EXTERNAL_SECRETS,
-        HelmReleaseTarget("frontend-dify-postgres", "infra-postgres-operations"),
-        (
-            HelmReleaseTarget("keycloak-dify-oidc", "auth-keycloak"),
-            HelmReleaseTarget("keycloak-dify-agentgateway-oidc", "auth-keycloak"),
-            HelmReleaseTarget("frontend-dify-shared", "frontend-dify"),
-        ),
-        (
-            "statefulset/frontend-dify-redis-stateful-set",
-            "deployment/frontend-dify-plugin-daemon-deployment",
-            "deployment/frontend-dify-sandbox-deployment",
-            "deployment/frontend-dify-agent-backend-deployment",
-            "deployment/frontend-dify-agent-sandbox-deployment",
-            "deployment/frontend-dify-agent-proxy-deployment",
-            "deployment/frontend-dify-api-deployment",
-            "deployment/frontend-dify-worker-deployment",
-            "deployment/frontend-dify-beat-deployment",
-        ),
-    ),
-    "knowledge-center": AddonCatalog(
-        "forgejo",
-        "forgejo",
-        FORGEJO_SECRET_STORE,
-        FORGEJO_EXTERNAL_SECRETS,
-        HelmReleaseTarget("forgejo-postgres", "infra-postgres-operations"),
-        (
-            HelmReleaseTarget("keycloak-forgejo-oidc", "auth-keycloak"),
-            HelmReleaseTarget("forgejo", "forgejo"),
-        ),
-        ("deployment/forgejo",),
-    ),
-}
-
-
-def addon_catalogs(names: tuple[str, ...]) -> tuple[AddonCatalog, ...]:
-    """Resolve only compiled, reviewed addon entries."""
-    if len(set(names)) != len(names) or any(name not in ADDONS for name in names):
-        raise ValueError("Unknown or duplicate addon selection")
-    return tuple(ADDONS[name] for name in names)
-
 
 BOOTSTRAP_SECRET_STORES: tuple[SecretStoreTarget, ...] = (
     SecretStoreTarget("auth-keycloak-openbao-secret-store", "auth-keycloak"),
@@ -423,20 +275,6 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
         AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,
         (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,),
     ),
-    ProviderRefreshTarget(
-        "frontend-librechat/external",
-        ("sttApiKey",),
-        ExternalSecretTarget(
-            "frontend-librechat-stt-secret", "frontend-librechat", "frontend-librechat-stt-secret"
-        ),
-    ),
-    ProviderRefreshTarget(
-        "frontend-librechat/external",
-        ("ttsApiKey",),
-        ExternalSecretTarget(
-            "frontend-librechat-tts-secret", "frontend-librechat", "frontend-librechat-tts-secret"
-        ),
-    ),
 )
 
 
@@ -471,7 +309,6 @@ path "secret/metadata/contextforge/provider-apps" {
 """
     if namespace not in (
         *ROLE_NAMESPACES,
-        *(addon.namespace for addon in ADDONS.values()),
         "glitchtip",
         *DOCLING_NAMESPACES,
     ):
@@ -505,7 +342,6 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
             '["create", "read", "update"]'
             if path
             in (
-                "frontend-librechat/external",
                 "docling/external",
                 "monitor-agentgateway-extproc/external",
                 CONTEXTFORGE_PROVIDER_APPS_PATH,

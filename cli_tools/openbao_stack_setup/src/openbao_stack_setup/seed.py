@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from openbao_stack_setup.access import AccessReservation
 from openbao_stack_setup.catalog import secret_operator_policy
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, managed_credential_paths
@@ -31,11 +32,11 @@ def seed_bootstrap(
     active_directory: dict[str, str] | None = None,
     *,
     docling_enabled: bool = False,
-    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
     tailscale_enabled: bool = False,
     glitchtip_enabled: bool = False,
+    reservation: AccessReservation | None = None,
 ) -> SeedReport:
     """Converge a fresh instance and refuse unexpected external record changes."""
     if set(provider_values) != set(PROVIDERS):
@@ -73,7 +74,7 @@ def seed_bootstrap(
         identity,
         bootstrap_passwords,
         docling_enabled=docling_enabled,
-        addons=addons,
+        reservation=reservation,
         contextforge_admin_email=contextforge_admin_email,
         rejection_debug_enabled=rejection_debug_enabled,
         tailscale_enabled=tailscale_enabled,

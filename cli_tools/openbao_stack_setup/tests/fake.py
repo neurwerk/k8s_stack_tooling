@@ -89,6 +89,10 @@ class FakeSession:
         ):
             if path.startswith(prefix):
                 name = path.removeprefix(prefix)
+                if method == "GET":
+                    if name not in records:
+                        return _response(404, {"errors": ["not found"]})
+                    return _response(200, {"data": records[name]})
                 if method == "POST":
                     records[name] = body
                     return _response(204)

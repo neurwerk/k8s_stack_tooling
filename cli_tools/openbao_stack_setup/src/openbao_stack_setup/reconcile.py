@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib.metadata import version as distribution_version
 
+from openbao_stack_setup.access import (
+    AccessReader,
+    AccessReservation,
+    load_access,
+    require_reservation,
+    reserve_access,
+    validate_access_roles,
+)
 from openbao_stack_setup.catalog import (
     ACTIVE_DIRECTORY_FIELDS,
     CONTEXTFORGE_PROVIDER_APPS_PATH,
@@ -12,7 +20,6 @@ from openbao_stack_setup.catalog import (
     RECONCILIATION_STATE_PATH,
     ROLE_NAMESPACES,
     SMTP_REPLICA,
-    addon_catalogs,
     contextforge_oauth_policy,
     namespace_policy,
     secret_operator_policy,
@@ -20,7 +27,6 @@ from openbao_stack_setup.catalog import (
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError, SecretRecord
 from openbao_stack_setup.credentials import (
     BOOTSTRAP_PASSWORDS,
-    migrate_schema_2_internal_credentials,
     reconcile_internal_credentials,
 )
 from openbao_stack_setup.providers import managed_credential_paths
@@ -64,20 +70,27 @@ def reconcile_openbao(
     bootstrap_passwords: dict[str, str] | None = None,
     *,
     docling_enabled: bool = False,
-    addons: tuple[str, ...] = (),
     contextforge_admin_email: str | None = None,
     rejection_debug_enabled: bool = False,
     tailscale_enabled: bool = False,
     glitchtip_enabled: bool = False,
+    reservation: AccessReservation | None = None,
 ) -> ReconciliationReport:
     """Converge the reviewed catalog and persist its cluster-bound schema version."""
     passwords = bootstrap_passwords or {}
     client.ensure_kv_v2_mount()
-    state = _load_state(client.read_secret(RECONCILIATION_STATE_PATH), identity)
-    _require_bootstrap_passwords(client, passwords, addons=addons)
+    record = client.read_secret(RECONCILIATION_STATE_PATH)
+    state = _load_state(record, identity)
+    _require_access_operation(client, record, reservation)
+    _require_bootstrap_passwords(client, passwords)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
         raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
 
+    namespaces = ROLE_NAMESPACES
+    namespaces += ("tailscale",) if tailscale_enabled else ()
+    namespaces += DOCLING_NAMESPACES if docling_enabled else ()
+    namespaces += ("contextforge",) if contextforge_admin_email is not None else ()
+    namespaces += ("glitchtip",) if glitchtip_enabled else ()
     client.ensure_kubernetes_auth()
     client.configure_kubernetes_auth()
     if not tailscale_enabled:
@@ -85,11 +98,6 @@ def reconcile_openbao(
         # at request time, so remove their read grant before disabling new logins.
         client.delete_policy("tailscale")
         client.delete_kubernetes_role("tailscale")
-    namespaces = ROLE_NAMESPACES + tuple(item.namespace for item in addon_catalogs(addons))
-    namespaces += ("tailscale",) if tailscale_enabled else ()
-    namespaces += DOCLING_NAMESPACES if docling_enabled else ()
-    namespaces += ("contextforge",) if contextforge_admin_email is not None else ()
-    namespaces += ("glitchtip",) if glitchtip_enabled else ()
     for namespace in namespaces:
         client.write_policy(namespace, namespace_policy(namespace))
         client.write_kubernetes_role(namespace)
@@ -122,19 +130,16 @@ def reconcile_openbao(
         },
     )
     replicated = _reconcile_replica(client)
-    if state.applied_version == 2:
-        migrate_schema_2_internal_credentials(client)
     internal = reconcile_internal_credentials(
         client,
         passwords,
         docling_enabled=docling_enabled,
-        addons=addons,
         contextforge_admin_email=contextforge_admin_email,
         glitchtip_enabled=glitchtip_enabled,
     )
     debug = reconcile_rejection_debug(client, enabled=rejection_debug_enabled)
 
-    if state.applied_version < CURRENT_RECONCILIATION_VERSION:
+    if reservation is None and state.applied_version < CURRENT_RECONCILIATION_VERSION:
         client.write_secret(
             RECONCILIATION_STATE_PATH,
             _state_values(identity),
@@ -149,6 +154,16 @@ def reconcile_openbao(
     )
 
 
+def _require_access_operation(
+    client: OpenBaoClient, record: SecretRecord | None, reservation: AccessReservation | None
+) -> None:
+    if reservation is not None:
+        require_reservation(client, reservation)
+        validate_access_roles(client, reservation)
+    elif record is not None and "access" in record.values:
+        raise OpenBaoError("Selected access reconciliation requires an explicit reservation")
+
+
 def _load_state(record: SecretRecord | None, expected_identity: ReconciliationIdentity) -> _State:
     if record is None:
         return _State(expected_identity, 0, 0)
@@ -161,8 +176,12 @@ def _load_state(record: SecretRecord | None, expected_identity: ReconciliationId
         "namespaceUid",
         "packageVersion",
     }
-    if set(values) != expected_keys:
+    if set(values) not in (expected_keys, expected_keys | {"access"}):
         raise OpenBaoError("OpenBao reconciliation state has an invalid schema")
+    if "access" in values:
+        if values["access"] is None:
+            raise OpenBaoError("OpenBao reconciliation access state is invalid")
+        load_access(values["access"])
     schema_version = values["schemaVersion"]
     applied_version = values["appliedVersion"]
     package_version = values["packageVersion"]
@@ -182,7 +201,41 @@ def _load_state(record: SecretRecord | None, expected_identity: ReconciliationId
     )
     if identity != expected_identity:
         raise OpenBaoError("OpenBao reconciliation state does not belong to the selected cluster")
+    if applied_version == 2:
+        raise OpenBaoError(
+            "Retired add-on reconciliation state is unsupported; no migration is provided"
+        )
     return _State(identity, applied_version, record.version)
+
+
+def reserve_reconciliation(
+    client: OpenBaoClient,
+    identity: ReconciliationIdentity,
+    operation_id: str,
+    selection: str,
+    readers: tuple[AccessReader, ...],
+    *,
+    resume: bool = False,
+    previous_process_stopped: bool = False,
+) -> AccessReservation:
+    """Reserve the existing cluster-bound state before Base or selected access mutations."""
+    record = client.read_secret(RECONCILIATION_STATE_PATH)
+    state = _load_state(record, identity)
+    if state.applied_version > CURRENT_RECONCILIATION_VERSION:
+        raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
+    if record is None:
+        values = _state_values(identity)
+        values["appliedVersion"] = 0
+        record = SecretRecord(values, 0)
+    return reserve_access(
+        client,
+        record,
+        operation_id,
+        selection,
+        readers,
+        resume=resume,
+        previous_process_stopped=previous_process_stopped,
+    )
 
 
 def _state_values(identity: ReconciliationIdentity) -> dict[str, JsonValue]:
@@ -204,7 +257,7 @@ def _required_state_text(values: dict[str, JsonValue], field: str) -> str:
 
 
 def _require_bootstrap_passwords(
-    client: OpenBaoClient, bootstrap_passwords: dict[str, str], *, addons: tuple[str, ...] = ()
+    client: OpenBaoClient, bootstrap_passwords: dict[str, str]
 ) -> None:
     known = {password.key for password in BOOTSTRAP_PASSWORDS}
     if not set(bootstrap_passwords).issubset(known) or any(
@@ -213,8 +266,6 @@ def _require_bootstrap_passwords(
         raise OpenBaoError("Bootstrap passwords are invalid")
     records: dict[str, SecretRecord | None] = {}
     for password in BOOTSTRAP_PASSWORDS:
-        if password.key == "dify" and "dify" not in addons:
-            continue
         if password.key in bootstrap_passwords:
             continue
         record = records.setdefault(password.path, client.read_secret(password.path))
