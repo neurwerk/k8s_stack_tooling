@@ -15,6 +15,7 @@ dependencies = ["questionary>=2.1,<3"]
 
 [project.scripts]
 platform-release = "platform_release.main:main"
+release-manager = "platform_release.manager:main"
 
 [project.urls]
 Homepage = "https://github.com/neurwerk/k8s_stack_tooling/tree/main/cli_tools/platform_release"
@@ -55,6 +56,9 @@ max-complexity = 10
 "src/platform_release/commands.py" = ["S603"]
 # This module is the explicit operator-facing CLI and prints its results.
 "src/platform_release/main.py" = ["T201"]
+# These modules provide the explicit workstation release UI and validation output.
+"src/platform_release/manager.py" = ["T201"]
+"src/platform_release/python_releases.py" = ["T201"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["platform_release"]
