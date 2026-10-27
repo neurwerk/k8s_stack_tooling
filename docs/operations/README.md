@@ -13,6 +13,7 @@ Run workstation commands from their own `cli_tools/<project>/` directory with `u
 | [keycloak-users](../../cli_tools/keycloak_users/README.md) | Manage local accounts in a selected realm using a non-secret local profile and browser authentication; does not use cluster bootstrap credentials. |
 | [package-checker](../../cli_tools/package_checker/README.md) | Inspect published packages and build workflows using its configured GitHub credential; does not report deployments. |
 | [platform-release](../../cli_tools/platform_release/README.md) | Inspect, prepare, check, and publish Base releases using an explicit trusted Base repository and its release scripts. |
+| [release-manager](release-manager.md) | Target-first workstation menus for Base, Tooling and setup, using the existing `cli_tools/platform_release/` environment. |
 | [openrouter-catalog-sync](../../cli_tools/openrouter_catalog_sync/README.md) | Generate or check client model values and pricing from an explicit selection policy and OpenRouter's public model API. |
 | [inference-runtime-manager](../../cli_tools/inference_runtime_manager/README.md) | Download model artifacts and manage inference containers through explicitly selected Docker contexts, with saved workstation configuration. |
 

@@ -85,6 +85,10 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
     """Parse the platform-release command line."""
     parser = argparse.ArgumentParser(prog="platform-release")
     parser.add_argument("--base-repo", type=Path, required=True)
+    parser.add_argument(
+        "--reviewed-commit",
+        help="Optional exact reviewed SHA; publication stops if its checkout changes.",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--worktree-root", type=Path, help="Parent for isolated release checkouts.")
     parser.add_argument(
@@ -665,6 +669,20 @@ def _require_publish_preconditions(
     staging = f"release-staging/{tag}"
     if _remote_tag_exists(runner, repository, staging):
         raise ReleaseError(f"staging tag {staging} already exists; do not retry automatically")
+    _require_signing_key(runner, signing_public_key)
+    _checked(runner, ("make", "check"), cwd=repository.path, live=True)
+    _checked(runner, ("make", "release-check"), cwd=repository.path, live=True)
+    return target_commit
+
+
+def _require_signing_key(runner: CommandRunner, signing_public_key: Path) -> None:
+    """Require the approved public key and its already-loaded SSH-agent identity."""
+    if (
+        signing_public_key.suffix != ".pub"
+        or signing_public_key.expanduser().is_symlink()
+        or not signing_public_key.expanduser().is_file()
+    ):
+        raise ReleaseError("signing key must be an existing public .pub file")
     fingerprints = _checked(runner, ("ssh-add", "-l"))
     public = _checked(
         runner, ("ssh-keygen", "-lf", str(signing_public_key.expanduser()), "-E", "sha256")
@@ -675,9 +693,6 @@ def _require_publish_preconditions(
         line.split()[1] for line in fingerprints.splitlines() if len(line.split()) >= 2
     ]:
         raise ReleaseError("approved signing key is not available from ssh-agent")
-    _checked(runner, ("make", "check"), cwd=repository.path, live=True)
-    _checked(runner, ("make", "release-check"), cwd=repository.path, live=True)
-    return target_commit
 
 
 def _clean_target(
@@ -880,7 +895,23 @@ def _confirm(
 def _signed_tag_object(
     runner: CommandRunner, repository: Repository, tag: str, public_key: Path, target: str
 ) -> str:
-    """Create a signed annotated local tag and return its tag-object SHA."""
+    """Keep Base's full signed-tag verification after the shared signing operation."""
+    tag_object = _create_signed_tag(runner, repository, tag, public_key, target)
+    _checked(runner, ("make", "release-check", f"TAG={tag}"), cwd=repository.path, live=True)
+    _checked(runner, ("bash", "scripts/verify_release_tag.sh", tag, target), cwd=repository.path)
+    return tag_object
+
+
+def _create_signed_tag(
+    runner: CommandRunner,
+    repository: Repository,
+    tag: str,
+    public_key: Path,
+    target: str,
+    *,
+    message: str | None = None,
+) -> str:
+    """Create one annotated SSH-signed tag without replacing an existing ref."""
     _checked(
         runner,
         (
@@ -894,7 +925,7 @@ def _signed_tag_object(
             "-a",
             tag,
             "-m",
-            f"Platform {tag}",
+            message or f"Platform {tag}",
             target,
         ),
         cwd=repository.path,
@@ -902,8 +933,6 @@ def _signed_tag_object(
     tag_object = _checked(runner, ("git", "rev-parse", f"{tag}^{{tag}}"), cwd=repository.path)
     if SHA_PATTERN.fullmatch(tag_object) is None:
         raise ReleaseError("Git did not create an annotated tag object")
-    _checked(runner, ("make", "release-check", f"TAG={tag}"), cwd=repository.path, live=True)
-    _checked(runner, ("bash", "scripts/verify_release_tag.sh", tag, target), cwd=repository.path)
     return tag_object
 
 
@@ -1924,6 +1953,7 @@ def _execute(
     elif args.command in ("prepare", "publish"):
         for attempt in range(3):
             try:
+                _require_reviewed_commit(args, runner, repository)
                 result = (
                     prepare(runner, repository, args, prompt)
                     if args.command == "prepare"
@@ -1948,6 +1978,18 @@ def _execute(
         finish_notes(runner, repository, args, prompt)
     else:
         raise ReleaseError("unknown action; no mutation authorized")
+
+
+def _require_reviewed_commit(
+    args: argparse.Namespace, runner: CommandRunner, repository: Repository
+) -> None:
+    """Keep a caller-supplied publication target fixed across checkout preparation/retries."""
+    expected = getattr(args, "reviewed_commit", None)
+    if args.command != "publish" or expected is None:
+        return
+    actual = _checked(runner, ("git", "rev-parse", "HEAD"), cwd=repository.path)
+    if not SHA_PATTERN.fullmatch(expected) or actual != expected:
+        raise ReleaseError("publication checkout differs from the exact reviewed commit")
 
 
 def main() -> None:
