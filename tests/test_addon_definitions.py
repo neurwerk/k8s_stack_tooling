@@ -119,16 +119,6 @@ def bot_manifest():
                     "when": "gateway",
                 }
             ],
-            "lifecycle": {
-                "delivery": [
-                    {
-                        "kind": "ExternalSecret",
-                        "namespace": "gateway",
-                        "name": "verifier-{instance}",
-                        "when": "gateway",
-                    }
-                ]
-            },
         }
     )
     return data
@@ -171,7 +161,6 @@ def test_instances_select_exact_credential_shape_without_sessions_gate():
         ("verifier-public", "gateway", "verifier-public", ["public-verifier"])
     ]
     assert setup.deliveries[0].secret_store == "shared-secret-store"
-    assert [target.name for target in setup.lifecycle.delivery] == ["verifier-public"]
     with pytest.raises(ContractError, match="undeclared"):
         expand_setup(
             addon,

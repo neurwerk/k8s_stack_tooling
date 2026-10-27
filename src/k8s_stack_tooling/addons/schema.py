@@ -291,15 +291,6 @@ class InputGroup(Contract):
     fields: dict[FieldName, ValueValidation] = Field(min_length=1, max_length=100)
 
 
-class Target(Contract):
-    kind: Literal[
-        "SecretStore", "ExternalSecret", "HelmRelease", "Deployment", "StatefulSet", "Job"
-    ]
-    namespace: Name
-    name: InstanceName
-    when: Name | None = None
-
-
 class Delivery(Contract):
     namespace: Name
     name: InstanceName
@@ -324,25 +315,6 @@ class VerifierSlots(Contract):
     when: Name | None = None
 
 
-class Lifecycle(Contract):
-    delivery: list[Target] = Field(default_factory=list, max_length=100)
-    provision: list[Target] = Field(default_factory=list, max_length=100)
-    restart: list[Target] = Field(default_factory=list, max_length=100)
-    rotate: list[Target] = Field(default_factory=list, max_length=100)
-
-    @model_validator(mode="after")
-    def operation_targets(self):
-        for targets, kinds in (
-            (self.delivery, {"SecretStore", "ExternalSecret"}),
-            (self.provision, {"HelmRelease", "Job"}),
-            (self.restart, {"Deployment", "StatefulSet"}),
-        ):
-            keys = [(target.kind, target.namespace, target.name) for target in targets]
-            if len(set(keys)) != len(keys) or any(target.kind not in kinds for target in targets):
-                raise ValueError("invalid lifecycle target")
-        return self
-
-
 class Setup(Contract):
     records: list[Record] = Field(default_factory=list, max_length=100)
     readers: list[Reader] = Field(default_factory=list, max_length=100)
@@ -352,7 +324,6 @@ class Setup(Contract):
     deliveries: list[Delivery] = Field(default_factory=list, max_length=100)
     handover: list[Handover] = Field(default_factory=list, max_length=100)
     invariants: list[VerifierSlots] = Field(default_factory=list, max_length=100)
-    lifecycle: Lifecycle = Field(default_factory=Lifecycle)
 
     @model_validator(mode="after")
     def references(self):
@@ -893,16 +864,6 @@ def _conditions(
     strings.extend(
         value for d in setup.deliveries for value in (d.name, d.secret_store, d.target_secret)
     )
-    strings.extend(
-        t.name
-        for targets in (
-            setup.lifecycle.delivery,
-            setup.lifecycle.provision,
-            setup.lifecycle.restart,
-            setup.lifecycle.rotate,
-        )
-        for t in targets
-    )
     strings.extend(i.client_id for i in identities)
     if any(
         value.count("{instance}") > 1 or ("{instance}" in value and not instance_recipe)
@@ -918,10 +879,6 @@ def _conditions(
         *setup.invariants,
         *identities,
         *(field for record in setup.records for field in record.fields.values()),
-        *setup.lifecycle.delivery,
-        *setup.lifecycle.provision,
-        *setup.lifecycle.restart,
-        *setup.lifecycle.rotate,
     ]
     if any(item.when is not None and item.when not in features for item in objects):
         raise ValueError("undeclared activation feature")
@@ -1048,8 +1005,6 @@ def _active_setup(setup: Setup, features: dict[str, bool]) -> dict:
         for row in data[key]:
             row["records"] = [name for name in row["records"] if name in record_ids]
         data[key] = [row for row in data[key] if row["records"]]
-    for operation, targets in data["lifecycle"].items():
-        data["lifecycle"][operation] = [target for target in targets if active(target)]
     return data
 
 
@@ -1090,9 +1045,6 @@ def _instance_setup(data: dict, instance: str) -> dict:
     for invariant in data["invariants"]:
         for key in ("source", "primary", "secondary"):
             reference(invariant[key])
-    for targets in data["lifecycle"].values():
-        for target in targets:
-            target["name"] = substitute(target["name"])
     return data
 
 
@@ -1116,11 +1068,7 @@ def expand_setup(addon: Addon, selection: AddonSelection) -> Setup:
     for instance, recipe, features in _selected_recipes(addon, selection):
         expanded = _instance_setup(_active_setup(recipe.setup, features), instance.id)
         for key, values in expanded.items():
-            if key == "lifecycle":
-                for operation, targets in values.items():
-                    data[key][operation].extend(targets)
-            else:
-                data[key].extend(values)
+            data[key].extend(values)
     try:
         readers = {}
         for row in data["readers"]:
@@ -1134,12 +1082,6 @@ def expand_setup(addon: Addon, selection: AddonSelection) -> Setup:
                 raise ContractError("shared reader has conflicting bindings")
             previous["records"] = sorted(set(previous["records"]) | set(row["records"]))
         data["readers"] = list(readers.values())
-        for operation, targets in data["lifecycle"].items():
-            unique = []
-            for target in targets:
-                if target not in unique:
-                    unique.append(target)
-            data["lifecycle"][operation] = unique
         return Setup.model_validate(data)
     except ValidationError:
         raise ContractError(
