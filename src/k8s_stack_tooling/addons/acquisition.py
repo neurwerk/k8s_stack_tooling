@@ -35,7 +35,16 @@ def _safe_cache(root: Path) -> None:
     try:
         config.read_string((gitdir / "config").read_text())
         allowed = {
-            "core": {"repositoryformatversion", "filemode", "bare", "logallrefupdates"},
+            # Git probes the filesystem at init, including on macOS and Windows.
+            "core": {
+                "repositoryformatversion",
+                "filemode",
+                "bare",
+                "logallrefupdates",
+                "ignorecase",
+                "precomposeunicode",
+                "symlinks",
+            },
             'remote "origin"': {"url"},
         }
         if config.defaults() or any(
