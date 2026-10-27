@@ -1,4 +1,4 @@
-"""Live external input shape is checked before native execution or custody, never inferred."""
+"""Live external input shape is checked before native execution, without revealing values."""
 
 import copy
 from dataclasses import replace
@@ -41,6 +41,7 @@ def live_resource():
 
 def selected_inputs():
     snapshot = verified(native=True)
+    snapshot.addons[0].definition.spec.setup.deliveries[0].namespace = "scratch"
     snapshot.addons[0].definition.spec.inputs.append(
         Input(
             kind="Secret",
@@ -61,15 +62,8 @@ def selected_inputs():
     )
 
 
-@pytest.mark.parametrize("command", ["bootstrap", "reconcile"])
 @pytest.mark.parametrize("failure", ["missing", "namespace", "name", "type", "keys", "api-body"])
-def test_invalid_live_input_stops_cli_before_native_custody_or_root(
-    command, failure, monkeypatch, capsys
-):
-    args = cli._arguments().parse_args(arguments())
-    args.command = command
-    args.confirm = "client"
-    args.native_namespace = "scratch"
+def test_invalid_live_input_stops_native_execution(failure, capsys):
     snapshot = selected_inputs()
     target = cluster()
     value = live_resource()
@@ -87,27 +81,18 @@ def test_invalid_live_input_stops_cli_before_native_custody_or_root(
     else:
         target.core.read_namespaced_secret.return_value = value
     with (
-        patch.object(cli, "_arguments") as parser,
-        patch.object(cli, "Cluster", return_value=target),
-        patch.object(target, "identity"),
-        patch.object(selection, "source_checkouts", return_value=(MagicMock(), {})),
-        patch.object(selection, "verify_selection", return_value=snapshot),
         patch.object(selection, "prepare_native_output") as prepare,
-        patch.object(cli, "prepare_custody_paths") as custody,
-        patch.object(cli, "_openbao") as root,
-        pytest.raises(SystemExit) as error,
+        pytest.raises(ClusterError) as error,
     ):
-        parser.return_value.parse_args.return_value = args
-        cli.main()
-    assert error.value.code == 1
+        selection.prepare_native_outputs(
+            target, selection.SelectedRun(snapshot), {("sample", "native-token")}
+        )
+    assert CANARY not in str(error.value)
     assert CANARY not in capsys.readouterr().out
     prepare.assert_not_called()
-    custody.assert_not_called()
-    root.assert_not_called()
 
 
 def test_good_input_is_checked_before_native_and_only_product_approved_pull_is_attached():
-    args = cli._arguments().parse_args([*arguments(), "--native-namespace", "scratch"])
     snapshot = selected_inputs()
     target = cluster()
     events = []
@@ -131,7 +116,8 @@ def test_good_input_is_checked_before_native_and_only_product_approved_pull_is_a
         return {definition.output_key: "synthetic-token"}
 
     with patch.object(selection, "prepare_native_output", side_effect=prepare):
-        run = selection.selected_run(target, snapshot, args)
+        run = selection.SelectedRun(snapshot)
+        selection.prepare_native_outputs(target, run, {("sample", "native-token")})
     assert run.prepared == {"sample": {"native-token": "synthetic-token"}}
     assert events[-1] == "native"
     target.core.read_namespaced_secret.assert_called_once_with(
@@ -141,7 +127,7 @@ def test_good_input_is_checked_before_native_and_only_product_approved_pull_is_a
     data = selection_projection(snapshot)["data"]
     assert isinstance(data, dict)
     assert "externalInputs" in data["selection.json"]
-    assert run.fingerprint != selection.SelectedRun(verified(native=True), "").fingerprint
+    assert run.fingerprint != selection.SelectedRun(verified(native=True)).fingerprint
 
 
 @pytest.mark.parametrize("failure", ["undeclared", "namespace", "type", "keys", "owner"])
@@ -158,7 +144,6 @@ def test_native_pull_cannot_use_unapproved_or_cross_namespace_input(failure):
         product_input.keys = ["not-approved"]
     else:
         product_input.owner = "base"
-    args = cli._arguments().parse_args([*arguments(), "--native-namespace", "scratch"])
     target = cluster()
 
     def read(name, namespace, **kwargs):
@@ -173,20 +158,20 @@ def test_native_pull_cannot_use_unapproved_or_cross_namespace_input(failure):
         patch.object(selection, "prepare_native_output") as prepare,
         pytest.raises(OpenBaoError, match="exact product/client approval"),
     ):
-        selection.selected_run(target, snapshot, args)
+        selection.prepare_native_outputs(
+            target, selection.SelectedRun(snapshot), {("sample", "native-token")}
+        )
     prepare.assert_not_called()
     target.core.read_namespaced_secret.assert_not_called()
 
 
-@pytest.mark.parametrize("command", ["recovery", "secret", "addon"])
-def test_recovery_provider_update_and_other_product_refresh_do_not_read_registry_inputs(command):
+@pytest.mark.parametrize("command", ["recovery", "secret"])
+def test_recovery_provider_update_do_not_require_sources_or_registry_inputs(command):
     args = cli._arguments().parse_args(arguments())
     args.command = command
     args.confirm = "client"
     args.secret_command = "set"
     args.provider = "brave"
-    args.addon_id = "other"
-    args.addon_command = "refresh"
     snapshot = selected_inputs()
     other = verified(addon_id="other")
     snapshot = replace(
@@ -205,8 +190,7 @@ def test_recovery_provider_update_and_other_product_refresh_do_not_read_registry
     with (
         patch.object(cli, "_arguments") as parser,
         patch.object(cli, "Cluster", return_value=target),
-        patch.object(selection, "source_checkouts", return_value=(MagicMock(), {})),
-        patch.object(selection, "verify_selection", return_value=snapshot),
+        patch.object(cli, "verify_client_sources") as sources,
         patch.object(cli, "_verify_recovery") as recover,
         patch.object(cli, "_set_provider") as provider,
         patch.object(selection, "prepare_native_output") as native_prepare,
@@ -215,12 +199,11 @@ def test_recovery_provider_update_and_other_product_refresh_do_not_read_registry
         cli.main()
     actual.core.read_namespaced_secret.assert_not_called()
     native_prepare.assert_not_called()
+    sources.assert_not_called()
     if command == "recovery":
         recover.assert_called_once()
     elif command == "secret":
         provider.assert_called_once()
-    else:
-        target.force_external_secret_refresh.assert_called_once()
 
 
 @pytest.mark.parametrize("deselected", [False, True])
@@ -246,50 +229,6 @@ def test_reconcile_without_native_work_ignores_unused_external_declarations(dese
     reconcile.assert_called_once()
     prepare.assert_not_called()
     actual.core.read_namespaced_secret.assert_not_called()
-
-
-@pytest.mark.parametrize("mode", ["refresh", "provision", "restart"])
-def test_lifecycle_ignores_inputs_outside_selected_operation_targets(mode):
-    args = cli._arguments().parse_args(arguments())
-    args.addon_id = "sample"
-    args.addon_command = mode
-    args.confirm = "client"
-    snapshot = selected_inputs()  # Registry input is in scratch; these targets are in sample.
-    target = MagicMock()
-    actual = cluster()
-    actual.core.read_namespaced_secret.side_effect = ApiException(status=404)
-    target.require_external_inputs.side_effect = actual.require_external_inputs
-    with (
-        patch.object(cli, "Cluster", return_value=target),
-        patch.object(cli, "_force_helm_release"),
-        patch.object(cli, "_restart_target"),
-    ):
-        cli._addon_lifecycle(args, snapshot)
-    actual.core.read_namespaced_secret.assert_not_called()
-
-
-def test_selected_provision_input_failure_stops_only_its_consumers():
-    args = cli._arguments().parse_args(arguments())
-    args.addon_id = "sample"
-    args.addon_command = "provision"
-    args.confirm = "client"
-    snapshot = selected_inputs()
-    snapshot.addons[0].definition.spec.setup.lifecycle.provision[0].namespace = "scratch"
-    actual = cluster()
-    actual.core.read_namespaced_secret.side_effect = ApiException(status=404)
-    target = MagicMock()
-    target.require_external_inputs.side_effect = actual.require_external_inputs
-    with (
-        patch.object(cli, "Cluster", return_value=target),
-        patch.object(cli, "_force_helm_release") as provision,
-        pytest.raises(ClusterError),
-    ):
-        cli._addon_lifecycle(args, snapshot)
-    provision.assert_not_called()
-    target.force_external_secret_refresh.assert_not_called()
-    actual.core.read_namespaced_secret.assert_called_once_with(
-        "tooling-pull", "scratch", _request_timeout=(5, 30)
-    )
 
 
 def test_live_input_errors_are_redacted_without_decoding_credentials(capsys):

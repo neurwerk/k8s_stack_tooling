@@ -1,11 +1,10 @@
-"""Reserve reconciliation and retain exact add-on reader ownership in its existing record."""
+"""Reconcile exact add-on reader grants while retaining their policy ownership."""
 
 from __future__ import annotations
 
 import re
 import secrets
 from dataclasses import asdict, dataclass
-from importlib.metadata import version as distribution_version
 from typing import cast
 
 from openbao_stack_setup.catalog import (
@@ -37,89 +36,63 @@ class OwnedReader:
 
 
 @dataclass(frozen=True)
-class AccessReservation:
-    """Handle for one CAS-reserved operation; resumption invalidates previous handles."""
+class AccessPlan:
+    """Previous and selected reader grants for ordinary idempotent reconciliation."""
 
-    operation_id: str
-    selection: str
-    version: int
     previous: tuple[OwnedReader, ...]
     intended: tuple[OwnedReader, ...]
 
 
-def reserve_access(
+def plan_access(
     client: OpenBaoClient,
     record: SecretRecord,
-    operation_id: str,
-    selection: str,
     readers: tuple[AccessReader, ...],
-    *,
-    resume: bool = False,
-    previous_process_stopped: bool = False,
-) -> AccessReservation:
-    """Reserve before grants mutate; the caller first validates the cluster-bound record."""
-    if not _safe_text(operation_id) or not _safe_text(selection):
-        raise OpenBaoError("Reconciliation operation identity is invalid")
+) -> AccessPlan:
+    """Remember policy identities before writes so an interrupted run can simply retry."""
     readers = _validated_readers(readers)
-    ownership, pending = load_access(record.values.get("access"))
-    if pending is not None:
-        reservation = _resume(
-            pending, readers, operation_id, selection, resume, previous_process_stopped
+    ownership = load_access(record.values.get("access"))
+    existing = {item.reader.role: item for item in ownership}
+    intended = []
+    for reader in readers:
+        previous = existing.get(reader.role)
+        if previous is not None and _binding(previous.reader) != _binding(reader):
+            raise OpenBaoError("Active reader binding changed; remove access before reactivation")
+        policy = previous.policy if previous else f"stack-setup-addon-{secrets.token_hex(16)}"
+        intended.append(OwnedReader(reader, policy))
+    plan = AccessPlan(ownership, tuple(intended))
+    validate_access_roles(client, plan)
+    # Keep the union until obsolete grants have been removed. This is ownership,
+    # not an operation lock: retries may use the current desired selection.
+    remembered = dict(existing)
+    for item in intended:
+        previous = existing.get(item.reader.role)
+        paths = set(item.reader.records) | (set(previous.reader.records) if previous else set())
+        remembered[item.reader.role] = OwnedReader(
+            AccessReader(*_binding(item.reader), tuple(sorted(paths))), item.policy
         )
-    else:
-        if resume:
-            raise OpenBaoError("No reconciliation operation is pending")
-        existing = {item.reader.role: item for item in ownership}
-        intended = []
-        for reader in readers:
-            previous = existing.get(reader.role)
-            if previous is not None and _binding(previous.reader) != _binding(reader):
-                raise OpenBaoError(
-                    "Active reader binding changed; remove access before reactivation"
-                )
-            policy = previous.policy if previous else f"stack-setup-addon-{secrets.token_hex(16)}"
-            intended.append(OwnedReader(reader, policy))
-        reservation = AccessReservation(operation_id, selection, 0, ownership, tuple(intended))
-    validate_access_roles(client, reservation, pending_creation=pending is not None)
     values = dict(record.values)
-    values["access"] = _access_values(ownership, reservation)
+    values["access"] = {"owned": _owned_values(tuple(remembered.values()))}
     client.ensure_kv_v2_mount()
     client.write_secret(RECONCILIATION_STATE_PATH, values, record.version)
-    return AccessReservation(
-        operation_id, selection, record.version + 1, reservation.previous, reservation.intended
-    )
+    return plan
 
 
-def require_reservation(client: OpenBaoClient, reservation: AccessReservation) -> SecretRecord:
-    """Reject stale or replaced handles before any policy, role, or completion mutation."""
-    record = client.read_secret(RECONCILIATION_STATE_PATH)
-    if record is None or record.version != reservation.version:
-        raise OpenBaoError("Reconciliation reservation changed; refusing mutation")
-    _, pending = load_access(record.values.get("access"))
-    if pending != _pending_values(reservation):
-        raise OpenBaoError("Reconciliation reservation does not match pending operation")
-    return record
-
-
-def apply_access(client: OpenBaoClient, reservation: AccessReservation) -> None:
+def apply_access(client: OpenBaoClient, plan: AccessPlan) -> None:
     """Shrink all obsolete grants before changing roles; preserve records and active identities."""
-    previous = {item.reader.role: item for item in reservation.previous}
-    intended = {item.reader.role: item for item in reservation.intended}
-    require_reservation(client, reservation)
-    validate_access_roles(client, reservation)
+    previous = {item.reader.role: item for item in plan.previous}
+    intended = {item.reader.role: item for item in plan.intended}
+    validate_access_roles(client, plan, creating=True)
     for role, old in previous.items():
         current = intended.get(role)
         retained = tuple(
             path for path in old.reader.records if current and path in current.reader.records
         )
         if retained != old.reader.records:
-            require_reservation(client, reservation)
             if current is None:
                 client.delete_policy(old.policy)
             else:
                 client.write_policy(old.policy, _policy(retained))
     for role in previous.keys() - intended.keys():
-        require_reservation(client, reservation)
         old = previous[role]
         _validate_live_role(client, old, owned=True, pending_creation=True)
         base = _base_policies(old.reader)
@@ -129,10 +102,9 @@ def apply_access(client: OpenBaoClient, reservation: AccessReservation) -> None:
             client.delete_kubernetes_role(role)
     for role, current in intended.items():
         old = previous.get(role)
-        if old is None or set(current.reader.records) - set(old.reader.records):
-            require_reservation(client, reservation)
-            client.write_policy(current.policy, _policy(current.reader.records))
-        require_reservation(client, reservation)
+        # Ownership is recorded before grants: a previous attempt may have failed
+        # before creating this policy, so always apply its complete desired value.
+        client.write_policy(current.policy, _policy(current.reader.records))
         live = _validate_live_role(client, current, owned=old is not None, pending_creation=True)
         policies = (*_base_policies(current.reader), current.policy)
         if live is None or live.get("token_policies") != list(policies):
@@ -140,13 +112,13 @@ def apply_access(client: OpenBaoClient, reservation: AccessReservation) -> None:
 
 
 def validate_access_roles(
-    client: OpenBaoClient, reservation: AccessReservation, *, pending_creation: bool = True
+    client: OpenBaoClient, plan: AccessPlan, *, creating: bool = False
 ) -> None:
-    """Check all live roles before writes; only persisted intent permits resuming creation."""
-    previous = {item.reader.role: item for item in reservation.previous}
-    selected = previous | {item.reader.role: item for item in reservation.intended}
+    """Reject foreign bindings and policy attachments before changing reader grants."""
+    previous = {item.reader.role: item for item in plan.previous}
+    selected = previous | {item.reader.role: item for item in plan.intended}
     for role, item in selected.items():
-        _validate_live_role(client, item, owned=role in previous, pending_creation=pending_creation)
+        _validate_live_role(client, item, owned=role in previous, pending_creation=creating)
 
 
 def _base_policies(reader: AccessReader) -> tuple[str, ...]:
@@ -213,75 +185,28 @@ def _write_role(client: OpenBaoClient, reader: AccessReader, policies: tuple[str
     )
 
 
-def complete_access(
-    client: OpenBaoClient, reservation: AccessReservation, *, applied_version: int | None = None
-) -> None:
-    """Commit ownership after all caller-owned reconciliation work has succeeded."""
-    record = require_reservation(client, reservation)
+def complete_access(client: OpenBaoClient, plan: AccessPlan) -> None:
+    """Forget obsolete ownership only after all grant changes have succeeded."""
+    record = client.read_secret(RECONCILIATION_STATE_PATH)
+    if record is None:
+        raise OpenBaoError("Reconciliation ownership state is missing")
     values = dict(record.values)
-    values["access"] = _access_values(reservation.intended, None)
-    if applied_version is not None:
-        if type(applied_version) is not int or applied_version < 0:
-            raise OpenBaoError("Completed reconciliation version is invalid")
-        values["appliedVersion"] = applied_version
-        values["packageVersion"] = distribution_version("openbao-stack-setup")
+    values["access"] = {"owned": _owned_values(plan.intended)}
     client.write_secret(RECONCILIATION_STATE_PATH, values, record.version)
 
 
-def load_access(value: JsonValue) -> tuple[tuple[OwnedReader, ...], dict[str, JsonValue] | None]:
+def load_access(value: JsonValue) -> tuple[OwnedReader, ...]:
     """Validate only private ownership state, not product manifests or source selection."""
     if value is None:
-        return (), None
-    if not isinstance(value, dict) or set(value) != {"owned", "pending"}:
+        return ()
+    if not isinstance(value, dict) or set(value) != {"owned"}:
         raise OpenBaoError("Reconciliation access state is invalid")
-    owned = _load_owned(value["owned"])
-    pending = value["pending"]
-    if pending is not None:
-        if not isinstance(pending, dict) or set(pending) != {
-            "operationId",
-            "selection",
-            "previous",
-            "intended",
-        }:
-            raise OpenBaoError("Pending reconciliation state is invalid")
-        if not _safe_text(pending["operationId"]) or not _safe_text(pending["selection"]):
-            raise OpenBaoError("Pending reconciliation identity is invalid")
-        if _load_owned(pending["previous"]) != owned:
-            raise OpenBaoError("Pending reconciliation ownership is inconsistent")
-        intended = _load_owned(pending["intended"])
-        old = {item.reader.role: item for item in owned}
-        for item in intended:
-            previous = old.get(item.reader.role)
-            if previous is not None and (
-                previous.policy != item.policy or _binding(previous.reader) != _binding(item.reader)
-            ):
-                raise OpenBaoError("Pending reader activation identity is inconsistent")
-    return owned, pending
-
-
-def _resume(
-    pending: dict[str, JsonValue],
-    readers: tuple[AccessReader, ...],
-    operation_id: str,
-    selection: str,
-    resume: bool,
-    stopped: bool,
-) -> AccessReservation:
-    if not resume or not stopped:
-        raise OpenBaoError("Reconciliation is pending; explicit stopped-process resume is required")
-    intended = _load_owned(pending["intended"])
-    if (
-        pending["operationId"] != operation_id
-        or pending["selection"] != selection
-        or tuple(item.reader for item in intended) != readers
-    ):
-        raise OpenBaoError("Pending reconciliation operation or selection conflicts")
-    return AccessReservation(operation_id, selection, 0, _load_owned(pending["previous"]), intended)
+    return _load_owned(value["owned"])
 
 
 def _validated_readers(readers: tuple[AccessReader, ...]) -> tuple[AccessReader, ...]:
     if len({item.role for item in readers}) != len(readers):
-        raise OpenBaoError("Reader grants must be composed before reservation")
+        raise OpenBaoError("Reader grants must be composed before reconciliation")
     for reader in readers:
         _base_policies(reader)
         if any(
@@ -298,7 +223,7 @@ def _validated_readers(readers: tuple[AccessReader, ...]) -> tuple[AccessReader,
     return tuple(sorted(readers, key=lambda item: item.role))
 
 
-def _binding(reader: AccessReader) -> tuple[str, ...]:
+def _binding(reader: AccessReader) -> tuple[str, str, str, str]:
     return reader.role, reader.namespace, reader.service_account, reader.audience
 
 
@@ -360,24 +285,6 @@ def _owned_values(owned: tuple[OwnedReader, ...]) -> list[JsonValue]:
         }
         for item in owned
     ]
-
-
-def _pending_values(reservation: AccessReservation) -> dict[str, JsonValue]:
-    return {
-        "operationId": reservation.operation_id,
-        "selection": reservation.selection,
-        "previous": _owned_values(reservation.previous),
-        "intended": _owned_values(reservation.intended),
-    }
-
-
-def _access_values(
-    owned: tuple[OwnedReader, ...], reservation: AccessReservation | None
-) -> dict[str, JsonValue]:
-    return {
-        "owned": _owned_values(owned),
-        "pending": _pending_values(reservation) if reservation else None,
-    }
 
 
 def _policy(records: tuple[str, ...]) -> str:

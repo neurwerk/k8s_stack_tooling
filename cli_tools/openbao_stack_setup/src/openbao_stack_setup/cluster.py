@@ -226,21 +226,6 @@ class Cluster:
                     "identity, type, or keys"
                 ) from None
 
-    def wait_declared_job(self, name: str, namespace: str) -> None:
-        """Wait for an existing Flux-owned provisioning Job without recreating it."""
-        from k8s_stack_tooling.api.jobs import wait_for_job
-
-        batch = kubernetes.client.BatchV1Api()
-        try:
-            job = batch.read_namespaced_job(name, namespace, _request_timeout=(5, 30))
-        except ApiException as exc:
-            raise ClusterError(f"Provisioning Job is unavailable: HTTP {exc.status}") from None
-        if (
-            wait_for_job(batch, namespace=namespace, name=name, uid=job.metadata.uid, seconds=600)
-            != "complete"
-        ):
-            raise ClusterError("Provisioning Job did not complete successfully")
-
     def glitchtip_enabled(self) -> bool:
         """Read the optional GlitchTip credential-catalog selection."""
         values = self._product_values(

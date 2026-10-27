@@ -160,34 +160,6 @@ def test_interrupted_database_copy_retry_preserves_the_first_generated_password(
     }
 
 
-@pytest.mark.parametrize("selected", [False, True])
-def test_staged_convergence_delivers_generated_database_without_waiting_for_blank_inputs(selected):
-    target = MagicMock(spec=Cluster)
-    with (
-        patch("openbao_stack_setup.main._converge_bootstrap_secret_stores"),
-        patch("openbao_stack_setup.main._refresh_bootstrap_external_secrets"),
-        patch("openbao_stack_setup.main._reconcile_bootstrap_helm_releases"),
-    ):
-        cli._converge_runtime(target, False, glitchtip_enabled=selected)
-    assert target.ensure_secret_store_ready.call_args_list == (
-        [call("glitchtip-openbao-secret-store", "glitchtip")] if selected else []
-    )
-    assert target.force_external_secret_refresh.call_args_list == (
-        [
-            call(
-                "glitchtip-postgres-values",
-                "infra-postgres-operations",
-                "glitchtip-postgres-values",
-            )
-        ]
-        if selected
-        else []
-    )
-    target.token_request.assert_not_called()
-    target.wait_helm_release.assert_not_called()
-    target.glitchtip_application_pod.assert_not_called()
-
-
 @pytest.mark.parametrize(
     "order", [("glitchtip-owner", "glitchtip-smtp"), ("glitchtip-smtp", "glitchtip-owner")]
 )
@@ -306,12 +278,6 @@ def test_handoff_revokes_operator_and_preserves_concurrent_siblings_when_cas_wri
         [
             "secret",
             "import-glitchtip-dsn",
-            "--client-root",
-            "/client",
-            "--source-cache",
-            "/cache",
-            "--cluster-dir",
-            "clusters/example",
             "--context",
             "test",
             "--client",

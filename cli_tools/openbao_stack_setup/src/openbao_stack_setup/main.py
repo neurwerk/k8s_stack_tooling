@@ -20,28 +20,16 @@ from typing import Never, TextIO, override
 
 import questionary
 import requests
-from k8s_stack_tooling.addons import ContractError, Setup, VerifiedSelection, valid_value
-from k8s_stack_tooling.addons.schema import Target
+from k8s_stack_tooling.addons import ContractError, VerifiedSelection, valid_value
 from kubernetes.client.exceptions import ApiException
 
 from openbao_stack_setup.access import apply_access, complete_access
 from openbao_stack_setup.catalog import (
-    AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,
-    AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,
-    BOOTSTRAP_EXTERNAL_SECRETS,
-    BOOTSTRAP_HELM_RELEASES,
-    BOOTSTRAP_SECRET_STORES,
-    CONTEXTFORGE_EXTERNAL_SECRETS,
     CONTEXTFORGE_PROVIDER_APPS_PATH,
-    CONTEXTFORGE_SECRET_STORE,
-    DOCLING_EXTERNAL_SECRETS,
-    DOCLING_SECRET_STORES,
     GLITCHTIP_POSTGRES_EXTERNAL_SECRET,
     GLITCHTIP_SECRET_STORE,
     PROVIDER_REFRESH_TARGETS,
-    REJECTION_DEBUG_EXTERNAL_SECRETS,
     TAILSCALE_EXTERNAL_SECRET,
-    TAILSCALE_SECRET_STORE,
     HelmReleaseTarget,
 )
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError, TokenAccessorLookupError
@@ -80,10 +68,9 @@ from openbao_stack_setup.mcp import reconcile_mcp
 from openbao_stack_setup.native import NativeError
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
 from openbao_stack_setup.reconcile import (
-    CURRENT_RECONCILIATION_VERSION,
     ReconciliationIdentity,
+    plan_reconciliation_access,
     reconcile_openbao,
-    reserve_reconciliation,
 )
 from openbao_stack_setup.recovery import (
     RecoveryKit,
@@ -102,7 +89,7 @@ from openbao_stack_setup.recovery import (
 from openbao_stack_setup.seed import seed_bootstrap
 from openbao_stack_setup.selection import (
     SelectedRun,
-    approved_pull_inputs,
+    prepare_native_outputs,
     selected_run,
     verify_client_sources,
 )
@@ -113,9 +100,6 @@ _TOKEN_TIDY_ATTEMPTS = 30
 _TOKEN_TIDY_INTERVAL_SECONDS = 1
 
 
-_BOOTSTRAP_EXTERNAL_SECRETS = BOOTSTRAP_EXTERNAL_SECRETS
-_BOOTSTRAP_SECRET_STORES = BOOTSTRAP_SECRET_STORES
-_BOOTSTRAP_HELM_RELEASES = BOOTSTRAP_HELM_RELEASES
 _PROVIDER_REFRESH_TARGETS = PROVIDER_REFRESH_TARGETS
 
 
@@ -139,19 +123,19 @@ def _arguments() -> argparse.ArgumentParser:
     bootstrap = _guarded(commands.add_parser("bootstrap"))
     bootstrap.add_argument("--custody-root", type=Path)
     bootstrap.add_argument("--confirm", metavar="CLIENT")
-    _operation_arguments(bootstrap)
+    _credential_arguments(bootstrap)
     reconcile = _guarded(commands.add_parser("reconcile"))
     reconcile.add_argument("--custody-root", type=Path)
     reconcile.add_argument("--custodian-package", action="append", type=Path, required=True)
     reconcile.add_argument("--confirm", metavar="CLIENT")
-    _operation_arguments(reconcile)
+    _credential_arguments(reconcile)
     reconcile.add_argument("--rotate-contextforge-token", action="store_true")
     reconcile.add_argument(
         "--prepare-rejected-request-debug",
         action="store_true",
         help="Prepare isolated debug credentials before enabling client runtime resources.",
     )
-    status = _guarded(commands.add_parser("status"), sources=False)
+    status = _guarded(commands.add_parser("status"))
     status.add_argument("--custody-root", type=Path)
     recovery = commands.add_parser("recovery")
     recovery_commands = recovery.add_subparsers(dest="recovery_command", required=True)
@@ -167,39 +151,21 @@ def _arguments() -> argparse.ArgumentParser:
     dsn = _guarded(secret_commands.add_parser("import-glitchtip-dsn"))
     for field in ("organization", "project", "project-name", "team"):
         dsn.add_argument(f"--{field}", required=True)
-    addon = commands.add_parser("addon")
-    addon_commands = addon.add_subparsers(dest="addon_command", required=True)
-    for mode in ("refresh", "provision", "restart"):
-        operation = _guarded(addon_commands.add_parser(mode))
-        operation.add_argument("addon_id")
-        operation.add_argument("--confirm", metavar="CLIENT")
     return parser
 
 
-def _guarded(parser: argparse.ArgumentParser, *, sources: bool = True) -> argparse.ArgumentParser:
+def _guarded(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--context", required=True)
     parser.add_argument("--client", required=True)
-    if sources:
-        parser.add_argument("--client-root", type=Path, required=True)
-        parser.add_argument("--source-cache", type=Path, required=True)
-        parser.add_argument("--cluster-dir", required=True)
     return parser
 
 
-def _operation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--operation-id", required=True, help="Nonsecret ID reused only to resume this operation."
-    )
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--previous-process-stopped", action="store_true")
+def _credential_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--input-group",
         action="append",
         metavar="ADDON/GROUP",
         help="Update an enabled group; missing enabled inputs are prompted automatically.",
-    )
-    parser.add_argument(
-        "--native-namespace", help="Existing scratch namespace for declared native preparation."
     )
 
 
@@ -208,12 +174,10 @@ def main() -> None:
     args = _arguments().parse_args()
     try:
         verified = None
-        if args.command != "status":
+        if args.command in ("preflight", "bootstrap", "reconcile"):
             cluster = Cluster(args.context)
             cluster.identity(args.client)
-            verified = verify_client_sources(
-                cluster, args.client_root, args.source_cache, args.cluster_dir
-            )
+            verified = verify_client_sources(cluster)
         _dispatch(args, verified)
     except (
         ClusterError,
@@ -232,12 +196,11 @@ def _dispatch(args: argparse.Namespace, verified: VerifiedSelection | None) -> N
     if args.command == "status":
         _status(args.context, args.client, args.custody_root)
         return
-    if verified is None:
-        raise SetupError("Complete verified source selection is required")
-    SelectedRun(verified, "").require_verified()
     if args.command in ("bootstrap", "reconcile"):
+        if verified is None:
+            raise SetupError("Complete verified source selection is required")
         _confirm(args.context, args.client, "Prepare selected credentials", args.confirm)
-        run = selected_run(Cluster(args.context), verified, args)
+        run = selected_run(verified, args)
         if args.command == "bootstrap":
             _bootstrap(
                 args.context, args.client, args.custody_root, run=run, confirmation=args.client
@@ -254,11 +217,11 @@ def _dispatch(args: argparse.Namespace, verified: VerifiedSelection | None) -> N
                 run=run,
             )
     elif args.command == "preflight":
+        if verified is None:
+            raise SetupError("Complete verified source selection is required")
         _preflight(args.context, args.client, verified)
     elif args.command == "recovery":
         _verify_recovery(args.context, args.client, args.custody_root, args.custodian_package)
-    elif args.command == "addon":
-        _addon_lifecycle(args, verified)
     elif getattr(args, "secret_command", None) == "set-contextforge-oauth":
         _set_contextforge_oauth(args.context, args.client, args.integration_id)
     elif getattr(args, "secret_command", None) == "import-glitchtip-dsn":
@@ -279,7 +242,7 @@ def _confirm(context: str, client: str, action: str, confirmation: str | None = 
 
 
 def _preflight(context: str, client: str, verified: VerifiedSelection) -> None:
-    SelectedRun(verified, "").require_verified()
+    SelectedRun(verified).require_verified()
     cluster = Cluster(context)
     identity = cluster.identity(client)
     smtp_required = cluster.require_bootstrap_prerequisites()
@@ -561,10 +524,7 @@ def _reconcile(
             )
         finally:
             root.revoke_self()
-    print(
-        "Selected credentials and access prepared; temporary root revoked. "
-        "Lifecycle actions are separate."
-    )
+    print("Selected credentials and access prepared; temporary root revoked.")
 
 
 def _prepare_selected(
@@ -586,15 +546,15 @@ def _prepare_selected(
 ) -> RecoveryKit:
     run.require_verified()
     identity = ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid)
-    reservation = reserve_reconciliation(
-        root,
-        identity,
-        run.operation_id,
-        run.fingerprint,
-        compose_readers(run.setups),
-        resume=run.resume,
-        previous_process_stopped=run.previous_process_stopped,
-    )
+    access = plan_reconciliation_access(root, identity, compose_readers(run.setups))
+    needed = set()
+    for addon, setup in run.setups.items():
+        for record in setup.records:
+            existing = root.read_secret(record.path)
+            for name, field in record.fields.items():
+                if field.prepared_output and (existing is None or name not in existing.values):
+                    needed.add((addon, field.prepared_output))
+    prepare_native_outputs(cluster, run, needed)
     definitions = dict.fromkeys(run.setups, run.fingerprint)
     base_passwords = tuple(
         replace(item, definition=run.fingerprint) for item in BOOTSTRAP_PASSWORDS
@@ -618,7 +578,6 @@ def _prepare_selected(
         "rejection_debug_enabled": rejection_debug_enabled,
         "tailscale_enabled": tailscale_enabled,
         "glitchtip_enabled": glitchtip_enabled,
-        "reservation": reservation,
     }
     if initial is not None:
         providers, smtp, active_directory = initial
@@ -638,13 +597,13 @@ def _prepare_selected(
         _prepare_contextforge_token(
             root, kit.client, kit.cluster_id, kit.namespace_uid, rotate=rotate_contextforge_token
         )
-    apply_credentials(root, plan, reservation=reservation)
-    apply_access(root, reservation)
+    apply_credentials(root, plan)
+    apply_access(root, access)
     _verify_secret_operator(cluster, unauthenticated)
     _revoke_other_root_tokens(root)
     if kit.pending_bootstrap_passwords:
         kit = complete_handover(root, kit, recovery_file)
-    complete_access(root, reservation, applied_version=CURRENT_RECONCILIATION_VERSION)
+    complete_access(root, access)
     return kit
 
 
@@ -1089,100 +1048,12 @@ def _refresh_provider(cluster: Cluster, provider: Provider) -> None:
             _force_helm_release(cluster, helm_release)
 
 
-def _refresh_bootstrap_external_secrets(
-    cluster: Cluster,
-    active_directory_required: bool,
-    docling_enabled: bool = False,
-    contextforge_admin_email: str | None = None,
-    rejection_debug_enabled: bool = False,
-) -> None:
-    targets = _BOOTSTRAP_EXTERNAL_SECRETS
-    if active_directory_required:
-        targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_EXTERNAL_SECRET,)
-    if docling_enabled:
-        targets += DOCLING_EXTERNAL_SECRETS
-    if contextforge_admin_email is not None:
-        targets += CONTEXTFORGE_EXTERNAL_SECRETS
-    targets += REJECTION_DEBUG_EXTERNAL_SECRETS if rejection_debug_enabled else ()
-    total = len(targets)
-    for index, target in enumerate(targets, start=1):
-        print(f"Refreshing ExternalSecret {target.namespace}/{target.name} ({index}/{total})...")
-        cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
-
-
 def _converge_glitchtip(cluster: Cluster) -> None:
     """Verify generated database delivery without waiting for unentered private inputs."""
     store = GLITCHTIP_SECRET_STORE
     cluster.ensure_secret_store_ready(store.name, store.namespace)
     target = GLITCHTIP_POSTGRES_EXTERNAL_SECRET
     cluster.force_external_secret_refresh(target.name, target.namespace, target.target_secret)
-
-
-def _converge_runtime(
-    cluster: Cluster,
-    active_directory_required: bool,
-    docling_enabled: bool = False,
-    contextforge_admin_email: str | None = None,
-    rejection_debug_enabled: bool = False,
-    *,
-    tailscale_enabled: bool = False,
-    glitchtip_enabled: bool = False,
-) -> None:
-    """Converge catalog-owned Kubernetes consumers after privileged access is revoked."""
-    print("Converging SecretStores and ExternalSecrets; this takes approximately 2 minutes...")
-    _converge_bootstrap_secret_stores(cluster)
-    if glitchtip_enabled:
-        _converge_glitchtip(cluster)
-        print(
-            "GlitchTip generated database credential delivery verified; enter SMTP and initial "
-            "owner credentials separately with secret set glitchtip-smtp and secret set "
-            "glitchtip-owner. App provisioning and adapter DSN handoff remain separate."
-        )
-    if tailscale_enabled:
-        cluster.ensure_secret_store_ready(
-            TAILSCALE_SECRET_STORE.name, TAILSCALE_SECRET_STORE.namespace
-        )
-        print(
-            "Tailscale OAuth access prepared; use secret set tailscale-oauth to verify delivery. "
-            "Operator activation remains separate."
-        )
-    if docling_enabled:
-        for store in DOCLING_SECRET_STORES:
-            cluster.ensure_secret_store_ready(store.name, store.namespace)
-    if contextforge_admin_email is not None:
-        cluster.ensure_secret_store_ready(
-            CONTEXTFORGE_SECRET_STORE.name, CONTEXTFORGE_SECRET_STORE.namespace
-        )
-    _refresh_bootstrap_external_secrets(
-        cluster,
-        active_directory_required,
-        docling_enabled,
-        contextforge_admin_email,
-        rejection_debug_enabled,
-    )
-    print(
-        "Reconciling infrastructure releases blocked on generated Secrets; "
-        "this usually takes a few minutes. OpenSearch hooks may take 1-2 minutes; "
-        "investigate if there is no progress after 10 minutes..."
-    )
-    _reconcile_bootstrap_helm_releases(cluster, active_directory_required)
-    print("Reconciling the Flux infrastructure stage...")
-    cluster.reconcile_kustomization("infrastructure")
-
-
-def _converge_bootstrap_secret_stores(cluster: Cluster) -> None:
-    total = len(_BOOTSTRAP_SECRET_STORES)
-    for index, target in enumerate(_BOOTSTRAP_SECRET_STORES, start=1):
-        print(f"Waiting for SecretStore {target.namespace}/{target.name} ({index}/{total})...")
-        cluster.ensure_secret_store_ready(target.name, target.namespace)
-
-
-def _reconcile_bootstrap_helm_releases(cluster: Cluster, active_directory_required: bool) -> None:
-    targets = _BOOTSTRAP_HELM_RELEASES
-    if active_directory_required:
-        targets += (AUTH_KEYCLOAK_ACTIVE_DIRECTORY_HELM_RELEASE,)
-    for target in targets:
-        _force_helm_release(cluster, target)
 
 
 def _force_helm_release(cluster: Cluster, target: HelmReleaseTarget) -> None:
@@ -1193,97 +1064,6 @@ def _force_helm_release(cluster: Cluster, target: HelmReleaseTarget) -> None:
         timeout_seconds=target.timeout_seconds,
         force_token=force_token,
     )
-
-
-def _addon_lifecycle(args: argparse.Namespace, verified: VerifiedSelection) -> None:
-    run = SelectedRun(verified, "")
-    run.require_verified()
-    setup = run.setups.get(args.addon_id)
-    if setup is None:
-        raise SetupError("Add-on is not selected for this client")
-    cluster = Cluster(args.context)
-    cluster.identity(args.client)
-    targets = []
-    if args.addon_command == "provision":
-        targets = setup.lifecycle.provision
-    elif args.addon_command == "restart":
-        targets = setup.lifecycle.restart
-    product = next(
-        item.definition
-        for item in verified.addons
-        if item.definition.metadata.name == args.addon_id
-    )
-    for namespace in sorted({target.namespace for target in targets}):
-        requested = [item for item in product.spec.inputs if item.namespace == namespace]
-        cluster.require_external_inputs(list(approved_pull_inputs(requested, verified, namespace)))
-    _confirm(args.context, args.client, f"Add-on {args.addon_command}", args.confirm)
-    _deliver_selected(cluster, setup)
-    if args.addon_command == "provision":
-        for target in setup.lifecycle.provision:
-            if target.kind == "HelmRelease":
-                _force_helm_release(cluster, HelmReleaseTarget(target.name, target.namespace))
-            else:
-                cluster.wait_declared_job(target.name, target.namespace)
-    elif args.addon_command == "restart":
-        for target in setup.lifecycle.restart:
-            _restart_target(cluster, target)
-    print(f"Selected add-on {args.addon_command} completed.")
-
-
-def _deliver_selected(cluster: Cluster, setup: Setup) -> None:
-    deliveries = {(item.namespace, item.name): item for item in setup.deliveries}
-    targets = list(setup.lifecycle.delivery)
-    if not targets:
-        seen = set()
-        for delivery in setup.deliveries:
-            store = (delivery.namespace, delivery.secret_store)
-            if store not in seen:
-                targets.append(Target(kind="SecretStore", namespace=store[0], name=store[1]))
-                seen.add(store)
-            targets.append(
-                Target(kind="ExternalSecret", namespace=delivery.namespace, name=delivery.name)
-            )
-    requested = {
-        (target.namespace, target.name) for target in targets if target.kind == "ExternalSecret"
-    }
-    if requested != deliveries.keys():
-        raise SetupError("Delivery inventory must cover every selected ExternalSecret exactly")
-    for target in targets:
-        if target.kind == "SecretStore":
-            cluster.ensure_secret_store_ready(target.name, target.namespace)
-        else:
-            delivery = deliveries[(target.namespace, target.name)]
-            cluster.ensure_secret_store_ready(delivery.secret_store, delivery.namespace)
-            cluster.force_external_secret_refresh(
-                delivery.name, delivery.namespace, delivery.target_secret
-            )
-
-
-def _restart_target(cluster: Cluster, target: Target) -> None:
-    kubectl = _kubectl_executable()
-    try:
-        for action in ("restart", "status"):
-            command = [
-                kubectl,
-                "--context",
-                cluster.context,
-                "--namespace",
-                target.namespace,
-                "rollout",
-                action,
-                f"{target.kind.lower()}/{target.name}",
-            ]
-            if action == "status":
-                command.append("--timeout=10m")
-            subprocess.run(
-                command,
-                check=True,
-                timeout=660,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-    except (OSError, subprocess.SubprocessError):
-        raise SetupError("Selected workload restart or readiness check failed") from None
 
 
 def _bound_kit(path: Path, identity: StackIdentity) -> RecoveryKit:

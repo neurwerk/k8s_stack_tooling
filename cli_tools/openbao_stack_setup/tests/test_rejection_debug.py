@@ -13,7 +13,6 @@ from kubernetes.client.exceptions import ApiException
 from openbao_stack_setup.catalog import REJECTION_DEBUG_PATH, REJECTION_DEBUG_ROLE
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 from openbao_stack_setup.cluster import Cluster, ClusterError
-from openbao_stack_setup.main import _converge_runtime
 from openbao_stack_setup.rejection_debug import reconcile_rejection_debug
 
 SOURCE = "monitor-langfuse/internal"
@@ -210,33 +209,3 @@ def test_scoped_role_and_legacy_deny_protect_debug_credentials(tmp_path):
         if c.method == "POST" and c.path.startswith("secret/data/")
     )
     assert policy_index < record_index
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_retained_langfuse_cleanup_refresh_never_waits_for_removed_extproc_capture(enabled):
-    cluster = MagicMock(spec=Cluster)
-    with (
-        patch("openbao_stack_setup.main._converge_bootstrap_secret_stores"),
-        patch("openbao_stack_setup.main._reconcile_bootstrap_helm_releases"),
-    ):
-        _converge_runtime(cluster, False, rejection_debug_enabled=enabled)
-    stores = cluster.ensure_secret_store_ready.call_args_list
-    targets = cluster.force_external_secret_refresh.call_args_list
-    debug_stores = [c for c in stores if "rejection-debug" in c.args[0]]
-    debug_targets = [c for c in targets if "rejection-debug" in c.args[0]]
-    assert debug_stores == []
-    assert [target.args for target in debug_targets] == (
-        [
-            (
-                "monitor-langfuse-rejection-debug",
-                "monitor-langfuse",
-                "monitor-langfuse-rejection-debug",
-            )
-        ]
-        if enabled
-        else []
-    )
-    assert not any(
-        "monitor-agentgateway-extproc-rejection-debug" in str(c) for c in cluster.mock_calls
-    )
-    assert not any("docling" in c.args[0] for c in stores + targets)
