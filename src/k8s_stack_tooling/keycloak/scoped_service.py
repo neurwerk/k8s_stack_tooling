@@ -231,6 +231,8 @@ def reconcile() -> None:
 
     def check(enabled):
         configured = api(path)
+        # Keycloak omits this nullable flag when authorization services are disabled.
+        configured.setdefault("authorizationServicesEnabled", False)
         # Scope attachment fields are brief/optional in ClientRepresentation.
         for key, value in {**expected, "enabled": enabled}.items():
             if key not in {"defaultClientScopes", "optionalClientScopes"}:

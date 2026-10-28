@@ -61,7 +61,7 @@ def composition(tmp_path, monkeypatch):
             "status": "ready",
             "sourceName": "synthetic",
             "configurationKey": "synthetic",
-            "prerequisites": {"base": "1.0.0", "tooling": "0.15.0", "stackSetup": "0.7.0"},
+            "prerequisites": {"base": "1.0.0", "tooling": "0.15.1", "stackSetup": "0.7.0"},
             "packages": [{"name": "app", "path": "releases/app"}],
         },
     }
