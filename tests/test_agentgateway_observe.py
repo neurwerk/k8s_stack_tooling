@@ -351,11 +351,34 @@ def test_observer_consumes_routes_from_every_group(monkeypatch):
             "model": "first-model",
         }
     ]
+    # Base publishes configuration status on provider owners, not runtime health.
+    api.catalog["self-hosted-api-providers"][0]["global_credential_status"] = "disabled"
+    api.catalog["external-api-providers"][0].update(
+        provider_id="openai",
+        global_credential_status="configured",
+        destinations=[
+            {
+                "id": "second-model",
+                "kind": "model",
+                "display_name": "Second model",
+                "endpoint_ids": ["api-second"],
+                "profile_ids": [],
+                "required_permissions": ["llm:invoke", "model:second-model:invoke"],
+                "credential_modes": [
+                    {"source": "company", "required_permissions": ["provider:openai:company-use"]}
+                ],
+                "provider_id": "openai",
+            }
+        ],
+    )
     for group, endpoint_id in (
         ("external-subscription-providers", "api-subscription"),
         ("mcp-servers", "mcp-tools"),
     ):
         api.catalog[group] = [catalog_entry(endpoint_id, [catalog_route(endpoint_id)])]
+        api.catalog[group][0]["global_credential_status"] = (
+            "missing" if group == "external-subscription-providers" else None
+        )
         api.inventory.endpoints.append(
             api.inventory.endpoints[0].model_copy(update={"id": endpoint_id})
         )
@@ -384,6 +407,9 @@ def test_observer_consumes_routes_from_every_group(monkeypatch):
         "bool-version",
         "float-version",
         "extra-root",
+        "extra-entry",
+        "unknown-credential-status",
+        "invalid-credential-status-type",
         "missing-group",
         "missing-provider",
         "duplicate-api",
@@ -407,6 +433,12 @@ def test_invalid_catalog_stops_before_probing_or_publication(monkeypatch, fault)
         api.catalog["schema_version"] = 2.0
     elif fault == "extra-root":
         api.catalog["endpoints"] = []
+    elif fault == "extra-entry":
+        first["unrelated_status"] = "configured"
+    elif fault == "unknown-credential-status":
+        first["global_credential_status"] = "ready"
+    elif fault == "invalid-credential-status-type":
+        first["global_credential_status"] = True
     elif fault == "missing-group":
         del api.catalog["mcp-servers"]
     elif fault == "missing-provider":
@@ -451,6 +483,7 @@ def test_publication_never_turns_incomplete_evidence_into_current_health(monkeyp
     # deliberately unavailable and covered by the shared-provider regression below.
     monkeypatch.setattr(observe, "_route_loaded", lambda *_args: True)
     api = MemoryObserver()
+    api.catalog["external-api-providers"][0]["global_credential_status"] = "configured"
     if fault == "zero":
         api.members = observe.Membership((), "empty")
     api.change = fault == "membership"
