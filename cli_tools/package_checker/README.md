@@ -20,8 +20,8 @@ uv sync --dev
 ## Usage
 
 ```bash
-uv run package-checker
-uv run package-checker --json
+uv run package-checker --inventory /path/to/client/config/package-inventory.json
+uv run package-checker --inventory /path/to/client/config/package-inventory.json --json
 ```
 
 The default table includes the package, newest tag, the time that version was published, its
@@ -29,35 +29,19 @@ digest, and the active build status. `not building` means GitHub reported neithe
 in-progress workflow run for the mapped repository. `unknown` means the Actions check failed while
 the package lookup itself succeeded.
 
-## Repository mappings
+## Client inventory
 
-Build state is derived from these source repositories:
+The required JSON inventory selects packages and their build repositories. No packages are selected implicitly. For example:
 
-| Package | Repository |
-| --- | --- |
-| `k8s-stack-studio-api` | `neurwerk/k8s_stack_studio` |
-| `k8s-stack-studio-web` | `neurwerk/k8s_stack_studio` |
-| `k8s-stack-agentgateway-extproc` | `neurwerk/k8s_stack_agentgateway_extproc` |
-| `k8s-stack-pii-engine` | `neurwerk/k8s_stack_pii_engine` |
-| `k8s-stack-keycloak-api-key-bridge` | `neurwerk/k8s_stack_keycloak_api_key_bridge` |
-| `k8s-stack-addon-dify-api` | `neurwerk/k8s_stack_addon_dify` |
-| `k8s-stack-tooling` | `neurwerk/k8s_stack_tooling` |
-| `k8s-stack-addon-dify-web` | `neurwerk/k8s_stack_addon_dify` |
+```json
+[
+  {"package_name": "k8s-stack-pii-engine", "repository": "neurwerk/k8s_stack_pii_engine", "stable_tags_only": true}
+]
+```
 
-PII Engine is reported once as `ghcr.io/neurwerk/k8s-stack-pii-engine:<version>`.
-Only full plain stable `X.Y.Z` tags are eligible; the newest publication with such
-a tag wins. If none exists, the lookup remains an error rather than falling back
-to a suffixed tag, `latest`, or an untagged version. Other packages retain their
-existing tag selection and fallback behavior. The JSON `channel` field remains
-present as `null` for compatibility.
+`stable_tags_only` defaults to false. When true, only full plain stable `X.Y.Z` tags are eligible; missing stable versions remain errors rather than falling back to suffixed tags, `latest`, or untagged versions. The inventory is limited to 1 MiB and 1000 unique packages.
 
-The inventory tracks source packages, not the images pinned by Base charts or
-historical signed releases. Dify API and Web are separate packages owned by the
-standalone add-on; old builder images cannot verify them. Both `1.17.1-kc-v1`
-images are publicly readable and independently digest-verified. Failed package
-lookups remain errors and the command exits nonzero. A tag and digest reported by
-this checker indicate package availability, not independent provenance verification
-or approval to install it.
+The inventory tracks published source packages, not deployments. Failed lookups remain errors and the command exits nonzero. Package availability does not prove provenance or approval to install an image.
 
 Packages use `k8s-stack-*` and source repositories use `neurwerk/k8s_stack_*`.
 

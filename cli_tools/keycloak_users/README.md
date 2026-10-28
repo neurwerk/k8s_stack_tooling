@@ -10,16 +10,16 @@ tooling checkout or worktree:
 
 ```bash
 uv sync --frozen --dev
-uv run --frozen keycloak-users
-uv run --frozen keycloak-users setup
-uv run --frozen keycloak-users doctor --profile example
-uv run --frozen keycloak-users --profile example
+uv run --frozen keycloak-users --policy /path/to/client/config/onboarding.json
+uv run --frozen keycloak-users setup --policy /path/to/client/config/onboarding.json
+uv run --frozen keycloak-users doctor --profile example --policy /path/to/client/config/onboarding.json
+uv run --frozen keycloak-users --profile example --policy /path/to/client/config/onboarding.json
 ```
 
 From another directory, use an absolute project path, for example:
 
 ```bash
-uv run --project /path/to/tooling/cli_tools/keycloak_users --frozen keycloak-users
+uv run --project /path/to/tooling/cli_tools/keycloak_users --frozen keycloak-users --policy /path/to/client/config/onboarding.json
 ```
 
 `--project` paths resolve relative to the current directory, not the repository
@@ -91,8 +91,8 @@ after refresh. Fine-grained-only admin authorization is unsupported and fails cl
 Setup saves only after browser authentication, the permission gate, all read-only
 doctor probes and creation prerequisites, and a default-No confirmation. Doctor
 reads visible users, group hierarchy, required actions, realm defaults, federation
-components, and SMTP host/from readiness. Setup and doctor require the same four
-exact local groups, enabled `VERIFY_EMAIL` and `UPDATE_PASSWORD` actions, no active
+components, and SMTP host/from readiness. Setup and doctor require the client policy's
+exact default groups, enabled `VERIFY_EMAIL` and `UPDATE_PASSWORD` actions, no active
 user storage, and unique-email policy as create before reporting success or saving
 a profile. Missing SMTP does not block these checks: onboarding without email is
 allowed. SMTP configuration is only a basic readiness signal, not proof of delivery;
@@ -146,20 +146,9 @@ enrollment via `UPDATE_PASSWORD`; alternate passwordless enrollment is not suppo
 `CONFIGURE_TOTP` is recommended for privileged access when enabled. Enrollment is
 **not enforcement of MFA at login**; authentication flows control that.
 
-For **create only**, the **Normal user** preset preselects exactly these existing
-local group paths in the editable membership checkbox:
+For **create only**, the **Normal user** preset preselects the `default_groups` paths from the explicitly supplied `--policy` JSON file. Each must exist and resolve unambiguously before account-detail prompts. `disabled_groups` contains exact paths unavailable in the selector, including resume. Both fields are required lists; defaults cannot also be disabled. The file is limited to 64 KiB and each list to 1000 unique paths. There are no aliases or group creation.
 
-- `/access/neurwerk-librechat-users`
-- `/access/neurwerk-mcp-all-users`
-- `/access/neurwerk-llm-all-users`
-- `/access/neurwerk-studio-users`
-
-This is a selection preset, not a new `normal-user` group. All four exact paths
-must exist and resolve unambiguously; a missing or ambiguous required path fails
-before account-detail prompts. There are no aliases, fallback paths, or group creation.
-Operators can deselect preset memberships or select other eligible groups; other
-groups are not preselected. Dify is disabled in the onboarding selector only:
-the CLI does not disable the application or remove existing Dify memberships.
+These are client selector preferences, not permissions. They neither grant operator authority nor remove existing memberships. Operators can deselect defaults or select other eligible groups. Omitting `--policy` selects no defaults and disables no groups; use the reviewed client file to preserve its onboarding choices.
 
 Only existing local descendants of `/access` are selectable, with full paths.
 LDAP/federation-marked groups and their descendants are excluded. All groups may
@@ -217,13 +206,13 @@ outcomes before requesting another message. No local progress or PII files are s
 Email-bearing resume is refused for a disabled account before any membership change;
 the tool never enables an existing account. Group-only resume remains available.
 Resume and `send-actions-email` remain local-account-only but do not require the
-create-specific four-group preset, federation-absence check, or unique-email realm
+create-specific default-group preset, federation-absence check, or unique-email realm
 policy. The dedicated email command checks SMTP readiness before asking for an
 account; missing SMTP blocks it. Group-only resume can proceed without SMTP.
 
 ```bash
-uv run --frozen keycloak-users resume --profile example
-uv run --frozen keycloak-users send-actions-email --profile example
+uv run --frozen keycloak-users resume --profile example --policy /path/to/client/config/onboarding.json
+uv run --frozen keycloak-users send-actions-email --profile example --policy /path/to/client/config/onboarding.json
 ```
 
 ## Diagnosis
