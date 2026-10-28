@@ -122,7 +122,7 @@ def render_stage(stage: dict, root: Path) -> list[dict]:
             raise ContractError("invalid inline Flux patch target")
     confine(path, root)
     with tempfile.TemporaryDirectory(prefix="addon-flux-render-") as directory:
-        wrapper = Path(directory)
+        wrapper = Path(directory).resolve()
         (wrapper / "kustomization.yaml").write_text(
             yaml.safe_dump(
                 {

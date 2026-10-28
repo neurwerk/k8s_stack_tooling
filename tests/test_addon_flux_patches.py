@@ -1,6 +1,7 @@
 """Actual Kustomize patch semantics govern ownership and effective resource reads."""
 
 import subprocess
+import tempfile
 
 import pytest
 import yaml
@@ -213,3 +214,40 @@ def test_inline_json_patch_changes_effective_image_without_interpreting_code(tmp
     stage["spec"]["patches"] = [{"path": "../../outside.yaml"}]
     with pytest.raises(ContractError, match="inline"):
         render_stage(stage, tmp_path)
+
+
+def test_inline_patch_with_symlinked_temporary_parent(tmp_path, monkeypatch):
+    physical = tmp_path / "private" / "var" / "tmp"
+    physical.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(physical.parent, target_is_directory=True)
+    # Model macOS /var -> /private/var, including tempfile's cached directory.
+    monkeypatch.setattr(tempfile, "tempdir", str(alias / "tmp"))
+    root = physical / "repository"
+    package(
+        root / "app",
+        [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "settings"},
+                "data": {"mode": "original"},
+            }
+        ],
+    )
+    stage = {
+        "spec": {
+            "path": "app",
+            "patches": [
+                {
+                    "target": {"kind": "ConfigMap", "name": "settings"},
+                    "patch": '[{"op":"replace","path":"/data/mode","value":"patched"}]',
+                }
+            ],
+        }
+    }
+
+    result = render_stage(stage, root)
+
+    assert len(result) == 1
+    assert result[0]["data"] == {"mode": "patched"}
