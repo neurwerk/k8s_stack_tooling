@@ -19,7 +19,8 @@ from k8s_stack_tooling.addons import (
     verify_selection,
 )
 from k8s_stack_tooling.addons.acquisition import acquire_selection, source_checkouts
-from k8s_stack_tooling.addons.schema import Input
+from k8s_stack_tooling.addons.schema import Input, Version
+from pydantic import TypeAdapter, ValidationError
 
 from openbao_stack_setup.client import OpenBaoError
 from openbao_stack_setup.cluster import Cluster
@@ -35,16 +36,22 @@ class SelectedRun:
     prepared: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
 
     def require_verified(self) -> None:
-        """Require verified sources and the exact installed CLI requested by every add-on."""
+        """Require verified sources and compatible installed CLI patches for every add-on."""
         if self.verified.installable is not True or self.verified.projection_verified is not True:
             raise OpenBaoError("Setup requires installable sources and verified staged selection")
         try:
             installed = distribution_version("openbao-stack-setup")
         except PackageNotFoundError:
             raise OpenBaoError("Installed stack-setup package metadata is unavailable") from None
+        try:
+            installed = TypeAdapter(Version).validate_python(installed)
+        except ValidationError:
+            raise OpenBaoError("Installed stack-setup package version is invalid") from None
+        installed_parts = tuple(map(int, installed.split(".")))
         for item in self.verified.addons:
             required = item.declared_definition.spec.prerequisites.stack_setup
-            if required != installed:
+            required_parts = tuple(map(int, required.split(".")))
+            if installed_parts[:2] != required_parts[:2] or installed_parts[2] < required_parts[2]:
                 raise OpenBaoError(
                     f"Add-on {item.definition.metadata.name} requires stack-setup {required}; "
                     f"installed package is {installed}"
