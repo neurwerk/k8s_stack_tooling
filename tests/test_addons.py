@@ -33,7 +33,7 @@ def package(tmp_path: Path):
             "configurationKey": "example",
             "prerequisites": {
                 "base": "0.4.0",
-                "tooling": "0.15.1",
+                "tooling": "0.15.2",
                 "stackSetup": "0.7.0",
                 "baseCharts": ["charts/postgres/addon"],
             },
@@ -140,7 +140,7 @@ def test_old_baseline_is_rejected_at_validation_before_rendering(package, field,
 
 def test_installable_requires_exact_installed_sdk_not_a_future_promise(package):
     root, manifest, _, save = package
-    with patch("k8s_stack_tooling.addons.validation.distribution_version", return_value="0.15.1"):
+    with patch("k8s_stack_tooling.addons.validation.distribution_version", return_value="0.15.2"):
         check(root, installable=True)
         manifest["spec"]["prerequisites"]["tooling"] = "99.0.0"
         save()
