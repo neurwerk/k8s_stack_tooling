@@ -228,9 +228,11 @@ def test_complete_source_verifier_gets_live_projection_and_installable_mode(tmp_
         ("1.0.0", "0.7.0"),
         ("0.7.0", "0.6.6"),
         ("0.7.0", "0.8.0"),
+        ("0.8.1", "0.8.0"),
+        ("0.8.0", "0.9.0"),
     ],
 )
-def test_every_declared_setup_version_must_match_installed_before_privilege(
+def test_incompatible_setup_versions_rejected_before_privilege(
     monkeypatch, tmp_path, capsys, required, installed
 ):
     first = verified(native=True, stack_setup=installed)
@@ -281,6 +283,37 @@ def test_every_declared_setup_version_must_match_installed_before_privilege(
     custody.assert_not_called()
     openbao.assert_not_called()
     reconcile.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("required", "installed"),
+    [("0.8.0", "0.8.0"), ("0.8.0", "0.8.1"), ("0.8.9", "0.8.10")],
+)
+def test_setup_accepts_exact_or_newer_patch_for_every_selected_addon(required, installed):
+    first = verified(stack_setup=required)
+    second = verified(addon_id="other", stack_setup=installed)
+    combined = replace(
+        first,
+        addons=(*first.addons, *second.addons),
+        selection=first.selection.model_copy(
+            update={"addons": [*first.selection.addons, *second.selection.addons]}
+        ),
+    )
+    run = SelectedRun(combined)
+    fingerprint = run.fingerprint
+    with patch.object(selected, "distribution_version", return_value=installed):
+        run.require_verified()
+        assert run.fingerprint == fingerprint
+    assert run.verified == combined
+
+
+@pytest.mark.parametrize("installed", ["0.8.1rc1", "0.8.1.dev1", "0.8.1+local", "0.8", "00.8.1"])
+def test_setup_rejects_invalid_installed_version(installed):
+    with (
+        patch.object(selected, "distribution_version", return_value=installed),
+        pytest.raises(OpenBaoError, match="package version is invalid"),
+    ):
+        SelectedRun(verified(stack_setup="0.8.0")).require_verified()
 
 
 def test_setup_version_guard_also_protects_direct_native_preparation():

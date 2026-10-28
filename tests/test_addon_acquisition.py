@@ -91,6 +91,17 @@ def test_exact_commit_and_clean_cache_reuse(source):
     assert acquire(source) == result
 
 
+def test_cache_reuse_accepts_git_filesystem_probes_but_rejects_command_config(source):
+    _, _, _, destination = source
+    result = acquire(source)
+    for key in ("core.ignorecase", "core.precomposeunicode", "core.symlinks"):
+        git(destination, "config", key, "true")
+    assert acquire(source) == result
+    git(destination, "config", "core.sshCommand", "not-a-command")
+    with pytest.raises(ContractError, match="unsupported Git configuration"):
+        acquire(source)
+
+
 @pytest.fixture
 def selected_client(source, tmp_path, local_transport):
     upstream, _, template, _ = source

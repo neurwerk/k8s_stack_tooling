@@ -2,6 +2,7 @@
 
 import copy
 import subprocess
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -138,18 +139,59 @@ def test_old_baseline_is_rejected_at_validation_before_rendering(package, field,
             check(root)
 
 
-def test_installable_requires_exact_installed_sdk_not_a_future_promise(package):
+@pytest.mark.parametrize(
+    ("required", "installed"),
+    [("0.15.2", "0.15.2"), ("0.15.0", "0.15.3"), ("0.15.9", "0.15.10")],
+)
+def test_installable_accepts_same_line_sdk_patches(package, required, installed):
     root, manifest, _, save = package
-    with patch("k8s_stack_tooling.addons.validation.distribution_version", return_value="0.15.2"):
+    manifest["spec"]["prerequisites"]["tooling"] = required
+    save()
+    with patch("k8s_stack_tooling.addons.validation.distribution_version", return_value=installed):
         check(root, installable=True)
-        manifest["spec"]["prerequisites"]["tooling"] = "99.0.0"
-        save()
-        with patch(
+
+
+@pytest.mark.parametrize(
+    "installed",
+    [
+        "0.15.1",
+        "0.14.99",
+        "0.16.0",
+        "1.15.2",
+        "0.15.3rc1",
+        "0.15.3.dev1",
+        "0.15.3+local",
+        "0.15",
+        "00.15.3",
+    ],
+)
+def test_installable_rejects_incompatible_sdk_before_rendering(package, installed):
+    root, _, _, _ = package
+    with (
+        patch("k8s_stack_tooling.addons.validation.distribution_version", return_value=installed),
+        patch(
             "k8s_stack_tooling.addons.validation.render",
             side_effect=AssertionError("must reject before rendering"),
-        ):
-            with pytest.raises(ContractError, match="installed SDK version"):
-                check(root, installable=True)
+        ),
+        pytest.raises(ContractError, match="installed SDK version"),
+    ):
+        check(root, installable=True)
+
+
+def test_installable_rejects_missing_sdk_metadata_before_rendering(package):
+    root, _, _, _ = package
+    with (
+        patch(
+            "k8s_stack_tooling.addons.validation.distribution_version",
+            side_effect=PackageNotFoundError,
+        ),
+        patch(
+            "k8s_stack_tooling.addons.validation.render",
+            side_effect=AssertionError("must reject before rendering"),
+        ),
+        pytest.raises(ContractError, match="SDK metadata"),
+    ):
+        check(root, installable=True)
 
 
 @pytest.mark.parametrize("path", ["../outside", "/outside"])

@@ -13,7 +13,7 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import yaml
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from .git import run_git
 from .schema import (
@@ -24,6 +24,7 @@ from .schema import (
     ExternalInput,
     HelmOutput,
     SourceRef,
+    Version,
     _unique_json,
     load,
     load_manifest,
@@ -442,7 +443,7 @@ def check(
 
 
 def check_compatibility(addon: Addon, *, installable: bool) -> None:
-    """Enforce the clean baseline and the exact validator SDK for installation."""
+    """Enforce the baseline and same-release-line SDK patch compatibility."""
     prerequisites = addon.spec.prerequisites
     for value, floor in (
         (prerequisites.base, (0, 4, 0)),
@@ -458,8 +459,14 @@ def check_compatibility(addon: Addon, *, installable: bool) -> None:
             raise ContractError(
                 "installed SDK metadata is required for installable validation"
             ) from None
-        if prerequisites.tooling != installed:
-            raise ContractError("declared SDK does not match the installed SDK version")
+        try:
+            installed = TypeAdapter(Version).validate_python(installed)
+        except ValidationError:
+            raise ContractError("invalid installed SDK version") from None
+        required_parts = tuple(map(int, prerequisites.tooling.split(".")))
+        installed_parts = tuple(map(int, installed.split(".")))
+        if installed_parts[:2] != required_parts[:2] or installed_parts[2] < required_parts[2]:
+            raise ContractError("declared SDK is not compatible with the installed SDK version")
 
 
 def check_artifacts(addon: Addon, *, installable: bool) -> None:
