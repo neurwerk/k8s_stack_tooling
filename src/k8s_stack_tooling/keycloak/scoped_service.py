@@ -167,6 +167,7 @@ def reconcile() -> None:
                 "included.client.audience": "agentgateway",
                 "access.token.claim": "true",
                 "id.token.claim": "false",
+                "userinfo.token.claim": "false",
                 "introspection.token.claim": "false",
             },
         },
