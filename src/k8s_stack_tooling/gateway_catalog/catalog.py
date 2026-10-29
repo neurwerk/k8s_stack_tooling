@@ -26,6 +26,13 @@ class GatewayEndpoint(Document):
     caller_auth_modes: list[Literal["oidc_bearer", "neurwerk_bearer", "proxy_basic"]] = Field(
         min_length=1, max_length=3
     )
+    credential_mode_header: Literal["X-Neurwerk-Credential-Mode"] | None = None
+
+    @model_validator(mode="after")
+    def api_credential_mode_header(self) -> Self:
+        if self.entry_mode == "forward_proxy" and self.credential_mode_header is not None:
+            raise CatalogError
+        return self
 
     @field_validator("caller_auth_modes")
     @classmethod
