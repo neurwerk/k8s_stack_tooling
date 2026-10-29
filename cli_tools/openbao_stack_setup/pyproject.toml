@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbao-stack-setup"
-version = "0.8.2"
+version = "0.8.3"
 description = "Initialize and operate neurwerk OpenBao installations from a trusted workstation."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
@@ -12,7 +12,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "k8s-stack-tooling @ https://github.com/neurwerk/k8s_stack_tooling/releases/download/v0.15.5/k8s_stack_tooling-0.15.5-py3-none-any.whl",
+    "k8s-stack-tooling @ https://github.com/neurwerk/k8s_stack_tooling/releases/download/v0.15.6/k8s_stack_tooling-0.15.6-py3-none-any.whl",
     "cryptography>=50.0.0",
     "kubernetes>=36.0.3,<37",
     "PyYAML>=6.0",
