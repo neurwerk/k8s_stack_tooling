@@ -1,4 +1,4 @@
-"""Strict public catalog v2 contract consumed by gateway observation."""
+"""Strict public catalog v3 contract consumed by gateway observation."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class GatewayEndpoint(Document):
 
 
 class GatewayCredentialMode(Document):
-    source: Literal["company", "caller_supplied", "none"]
+    source: Literal["global", "override", "none"]
     required_permissions: Permissions
 
     @field_validator("required_permissions")
@@ -119,7 +119,7 @@ class GatewayEntry(Document):
 
 
 class GatewayCatalog(Document):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     catalog_revision: Identifier
     policy_revision: Identifier
     profiles: list[GatewayProfile] = Field(max_length=128)
@@ -137,7 +137,7 @@ class GatewayCatalog(Document):
     @field_validator("schema_version", mode="before")
     @classmethod
     def validate_schema(cls, value: object) -> int:
-        if type(value) is not int or value != 2:
+        if type(value) is not int or value != 3:
             raise CatalogError
         return value
 

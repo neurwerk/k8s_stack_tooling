@@ -21,7 +21,7 @@ Chart `clientApproval` values must be delivered separately from untrusted worklo
 {"clientId":"service-example","realmRoles":[],"gatewayPermissions":["llm:invoke","model:example:invoke"],"audiences":["agentgateway"]}
 ```
 
-Permission arrays must be unique and contain only `llm:invoke`, `model:<canonical-id>:invoke` or `provider:<id>:company-use`. Gateway permissions require `llm:invoke` and at least one model invocation permission. Each role must already exist and must not be composite. Reserved platform client IDs are rejected. Consumers own any additional identity naming, model-selection and approved role-catalog checks.
+Permission arrays must be unique and contain only `llm:invoke`, `model:<canonical-id>:invoke` or `provider:<id>:global-use`. Gateway permissions require `llm:invoke` and at least one model invocation permission. Each role must already exist and must not be composite. Reserved platform client IDs are rejected. Consumers own any additional identity naming, model-selection and approved role-catalog checks.
 
 ## Credentials and ownership
 

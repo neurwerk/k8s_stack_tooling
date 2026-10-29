@@ -16,7 +16,7 @@ from k8s_stack_tooling.keycloak.scoped_oidc import RESERVED_CLIENT_IDS, ScopeDri
 OWNER_ATTRIBUTE = "neurwerk.scoped-service-client"
 PERMISSION = (
     r"(?:llm:invoke|model:[A-Za-z0-9][A-Za-z0-9._/-]{0,127}:invoke|"
-    r"provider:[a-z0-9][a-z0-9-]{0,47}:company-use)"
+    r"provider:[a-z0-9][a-z0-9-]{0,47}:global-use)"
 )
 
 
