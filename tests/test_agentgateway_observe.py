@@ -320,7 +320,8 @@ class MemoryObserver(observe.KubernetesObserver):
         self.written = snapshot
 
 
-def test_observer_consumes_routes_from_every_group(monkeypatch):
+@pytest.mark.parametrize("credential_mode_header", [None, "X-Neurwerk-Credential-Mode"])
+def test_observer_consumes_routes_from_every_group(monkeypatch, credential_mode_header):
     api = MemoryObserver()
     api.catalog["profiles"] = [
         {
@@ -382,6 +383,13 @@ def test_observer_consumes_routes_from_every_group(monkeypatch):
         api.inventory.endpoints.append(
             api.inventory.endpoints[0].model_copy(update={"id": endpoint_id})
         )
+    for group in (
+        "self-hosted-api-providers",
+        "external-api-providers",
+        "external-subscription-providers",
+        "mcp-servers",
+    ):
+        api.catalog[group][0]["routes"][0]["credential_mode_header"] = credential_mode_header
     monkeypatch.setattr(observe, "_route_loaded", lambda *_args: True)
     monkeypatch.setattr(
         observe,
@@ -410,6 +418,8 @@ def test_observer_consumes_routes_from_every_group(monkeypatch):
         "extra-entry",
         "unknown-credential-status",
         "invalid-credential-status-type",
+        "invalid-credential-mode-header",
+        "proxy-credential-mode-header",
         "missing-group",
         "missing-provider",
         "duplicate-api",
@@ -439,6 +449,15 @@ def test_invalid_catalog_stops_before_probing_or_publication(monkeypatch, fault)
         first["global_credential_status"] = "ready"
     elif fault == "invalid-credential-status-type":
         first["global_credential_status"] = True
+    elif fault == "invalid-credential-mode-header":
+        first["routes"][0]["credential_mode_header"] = "x-neurwerk-credential-mode"
+    elif fault == "proxy-credential-mode-header":
+        first["routes"] = [
+            {
+                **catalog_route("forward-proxy", proxy=True),
+                "credential_mode_header": "X-Neurwerk-Credential-Mode",
+            }
+        ]
     elif fault == "missing-group":
         del api.catalog["mcp-servers"]
     elif fault == "missing-provider":

@@ -59,6 +59,56 @@ def sources(binding="cloud"):
     )
 
 
+@pytest.mark.parametrize("entry_mode", ["api", "forward_proxy"])
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_catalog_without_credential_mode_header_remains_supported(entry_mode, explicit_null):
+    raw = catalog().model_dump(by_alias=True)
+    route = raw["external-api-providers"][0]["routes"][0]
+    route["entry_mode"] = entry_mode
+    if explicit_null:
+        route["credential_mode_header"] = None
+    else:
+        route.pop("credential_mode_header")
+    parsed = GatewayCatalog.model_validate(raw)
+    endpoint = parsed.external_api_providers[0].routes[0]
+    assert endpoint.credential_mode_header is None
+    assert "credential_mode_header" not in endpoint.model_dump(exclude_none=True)
+
+
+def test_api_credential_mode_header_round_trips_without_changing_destination_modes():
+    raw = catalog().model_dump(by_alias=True)
+    raw["external-api-providers"][0]["routes"][0]["credential_mode_header"] = (
+        "X-Neurwerk-Credential-Mode"
+    )
+    parsed = GatewayCatalog.model_validate(raw)
+    assert parsed.external_api_providers[0].routes[0].credential_mode_header == (
+        "X-Neurwerk-Credential-Mode"
+    )
+    assert parsed.model_dump(by_alias=True) == raw
+    assert GatewayCatalog.model_validate_json(parsed.model_dump_json(by_alias=True)) == parsed
+
+
+@pytest.mark.parametrize(
+    "header", ["", "x-neurwerk-credential-mode", "global", True, [], {}, "X-Other"]
+)
+def test_catalog_rejects_invalid_credential_mode_header(header):
+    raw = catalog().model_dump(by_alias=True)
+    raw["external-api-providers"][0]["routes"][0]["credential_mode_header"] = header
+    with pytest.raises(ValidationError):
+        GatewayCatalog.model_validate(raw)
+
+
+def test_forward_proxy_cannot_advertise_credential_mode_header():
+    raw = catalog().model_dump(by_alias=True)
+    raw["external-api-providers"][0]["routes"][0].update(
+        entry_mode="forward_proxy",
+        caller_auth_modes=["proxy_basic"],
+        credential_mode_header="X-Neurwerk-Credential-Mode",
+    )
+    with pytest.raises(ValidationError):
+        GatewayCatalog.model_validate(raw)
+
+
 @pytest.mark.parametrize("source", ["company", "caller_supplied"])
 def test_catalog_rejects_legacy_modes_in_mixed_lists(source):
     raw = catalog().model_dump(by_alias=True)
@@ -76,7 +126,10 @@ def test_catalog_rejects_previous_version():
         GatewayCatalog.model_validate(raw)
 
 
-def test_explicit_refresh_is_independent_of_chat_profile_and_billing_mode(monkeypatch):
+@pytest.mark.parametrize("credential_mode_header", [None, "X-Neurwerk-Credential-Mode"])
+def test_explicit_refresh_is_independent_of_chat_profile_and_billing_mode(
+    monkeypatch, credential_mode_header
+):
     values = {
         "external-api-providers": [
             {
@@ -100,11 +153,14 @@ def test_explicit_refresh_is_independent_of_chat_profile_and_billing_mode(monkey
         }
     )
     monkeypatch.setattr(refresh, "fetch_json", fetch)
-    rows, counts = refresh.refresh(catalog(), values, sources())
+    raw = catalog().model_dump(by_alias=True)
+    raw["external-api-providers"][0]["routes"][0]["credential_mode_header"] = credential_mode_header
+    primary = GatewayCatalog.model_validate(raw)
+    rows, counts = refresh.refresh(primary, values, sources())
     assert [(row["binding_id"], row["public_id"]) for row in rows] == [("cloud", "cloud/model")]
     assert counts == {"selected": 1, "refreshed": 1}
     fetch.assert_called_once()
-    assert refresh.source_pairs(catalog(), refresh.RefreshSources()) == set()
+    assert refresh.source_pairs(primary, refresh.RefreshSources()) == set()
 
 
 def test_unknown_source_fails_before_provider_access(monkeypatch):
