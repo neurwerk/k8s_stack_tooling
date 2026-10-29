@@ -29,7 +29,7 @@ class Keycloak:
                 "containerId": "gateway",
                 "composite": False,
             }
-            for name in ("llm:invoke", "model:example:invoke", "provider:example:company-use")
+            for name in ("llm:invoke", "model:example:invoke", "provider:example:global-use")
         }
         self.fault = None
         self.groups = []

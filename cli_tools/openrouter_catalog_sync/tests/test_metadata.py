@@ -47,7 +47,7 @@ def values(tmp_path: Path) -> Path:
             {
                 "external-api-providers": [
                     {
-                        "id": "company-relay",
+                        "id": "global-relay",
                         "providerId": "openrouter",
                         "enabled": True,
                         "upstreamURL": "https://openrouter.ai/api/v1",
@@ -56,7 +56,7 @@ def values(tmp_path: Path) -> Path:
                         "catalogModels": ["remote/relay/chat"],
                     },
                     {
-                        "id": "personal-relay",
+                        "id": "override-relay",
                         "providerId": "openrouter",
                         "enabled": True,
                         "upstreamURL": "https://openrouter.ai/api/v1",
@@ -87,7 +87,7 @@ def test_preserves_fetched_metadata_binding_identity_and_pricing(tmp_path: Path)
     result = with_metadata(generated(), inventory(), [values(tmp_path)], *snapshot())
     rows = yaml.safe_load(result.catalog)["gatewayModelMetadata"]["models"]
     assert len(rows) == 1
-    assert rows[0]["binding_id"] == "company-relay"
+    assert rows[0]["binding_id"] == "global-relay"
     assert rows[0]["limits"] == {
         "context_tokens": 16000,
         "max_input_tokens": None,

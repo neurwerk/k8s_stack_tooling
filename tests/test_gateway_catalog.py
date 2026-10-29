@@ -11,7 +11,7 @@ from k8s_stack_tooling.gateway_catalog.metadata import MetadataError, load_json
 
 
 def catalog():
-    # PR #173's non-chat, caller-supplied case: neither policy belongs in refresh.
+    # The non-chat override case: neither policy belongs in refresh.
     def entry(name):
         return {
             "id": name,
@@ -33,7 +33,7 @@ def catalog():
                     "endpoint_ids": [name],
                     "profile_ids": [],
                     "required_permissions": [f"model:{name}/model:invoke"],
-                    "credential_modes": [{"source": "caller_supplied", "required_permissions": []}],
+                    "credential_modes": [{"source": "override", "required_permissions": []}],
                     "provider_id": "deepseek",
                 }
             ],
@@ -41,7 +41,7 @@ def catalog():
 
     return GatewayCatalog.model_validate(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "catalog_revision": "a" * 64,
             "policy_revision": "b" * 64,
             "profiles": [],
@@ -57,6 +57,23 @@ def sources(binding="cloud"):
     return refresh.RefreshSources.model_validate(
         {"bindings": {binding: {"kind": "deepseek", "source": "https://api.deepseek.com/models"}}}
     )
+
+
+@pytest.mark.parametrize("source", ["company", "caller_supplied"])
+def test_catalog_rejects_legacy_modes_in_mixed_lists(source):
+    raw = catalog().model_dump(by_alias=True)
+    raw["external-api-providers"][0]["destinations"][0]["credential_modes"].append(
+        {"source": source, "required_permissions": []}
+    )
+    with pytest.raises(ValidationError):
+        GatewayCatalog.model_validate(raw)
+
+
+def test_catalog_rejects_previous_version():
+    raw = catalog().model_dump(by_alias=True)
+    raw["schema_version"] = 2
+    with pytest.raises(ValidationError):
+        GatewayCatalog.model_validate(raw)
 
 
 def test_explicit_refresh_is_independent_of_chat_profile_and_billing_mode(monkeypatch):

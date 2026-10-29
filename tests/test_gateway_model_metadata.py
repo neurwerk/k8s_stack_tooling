@@ -46,7 +46,7 @@ def catalog():
                     "endpoint_ids": [name],
                     "profile_ids": [],
                     "required_permissions": [f"model:{name}/chat:invoke"],
-                    "credential_modes": [{"source": "caller_supplied", "required_permissions": []}],
+                    "credential_modes": [{"source": "override", "required_permissions": []}],
                     "provider_id": name,
                 }
             ],
@@ -54,7 +54,7 @@ def catalog():
 
     return GatewayCatalog.model_validate(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "catalog_revision": "a" * 64,
             "policy_revision": "b" * 64,
             "profiles": [],

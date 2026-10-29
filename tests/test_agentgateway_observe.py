@@ -286,7 +286,7 @@ class MemoryObserver(observe.KubernetesObserver):
         self.change = False
         self.inventory = inventory()
         self.catalog: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "catalog_revision": "catalog-1",
             "policy_revision": REVISION,
             "profiles": [],
@@ -365,7 +365,7 @@ def test_observer_consumes_routes_from_every_group(monkeypatch):
                 "profile_ids": [],
                 "required_permissions": ["llm:invoke", "model:second-model:invoke"],
                 "credential_modes": [
-                    {"source": "company", "required_permissions": ["provider:openai:company-use"]}
+                    {"source": "global", "required_permissions": ["provider:openai:global-use"]}
                 ],
                 "provider_id": "openai",
             }

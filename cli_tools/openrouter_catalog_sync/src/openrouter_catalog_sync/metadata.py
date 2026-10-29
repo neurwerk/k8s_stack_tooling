@@ -46,11 +46,13 @@ def with_metadata(
     inventory = {row["id"]: row for row in models if isinstance(row, dict)}
     metadata = []
     for binding in config.get("external-api-providers", []):
+        if set(binding.get("credentialSources", [])) - {"global", "override", "none"}:
+            raise CatalogSyncError("credentialSources accepts only global, override or none")
         if (
             not binding.get("enabled", False)
             or binding.get("providerId") != "openrouter"
             or binding.get("upstreamURL", "").rstrip("/") != "https://openrouter.ai/api/v1"
-            or not set(binding.get("credentialSources", [])) & {"global", "company"}
+            or "global" not in binding.get("credentialSources", [])
             or "openai-chat-completions-v1" not in binding.get("profiles", [])
         ):
             continue
