@@ -115,6 +115,8 @@ def typed_resources(resources):
 
 def test_valid_package_and_staged_release_gate(package):
     root, manifest, _, save = package
+    manifest["spec"]["prerequisites"]["base"] = "0.3.30"
+    save()
     assert check(root, installable=True).metadata.name == "example"
     manifest["spec"]["status"] = "staged"
     save()
