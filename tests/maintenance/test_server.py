@@ -201,6 +201,7 @@ def test_settings_and_server_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     assert server.cfg is not None
     assert server.cfg.bind == ["0.0.0.0:8080"]
     assert server.cfg.accesslog is None
+    assert server.cfg.control_socket_disable is True
     assert server.cfg.worker_class_str == "sync"
     assert server.cfg.limit_request_fields == 32
     assert server.cfg.limit_request_field_size == 4096

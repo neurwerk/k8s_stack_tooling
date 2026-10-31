@@ -181,6 +181,7 @@ class MaintenanceServer(BaseApplication):
             "limit_request_fields": 32,
             "limit_request_field_size": 4096,
             "accesslog": None,
+            "control_socket_disable": True,
             "logger_class": SafeLogger,
             "loglevel": "info",
             "forwarded_allow_ips": "",
