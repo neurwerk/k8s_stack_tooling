@@ -446,7 +446,7 @@ def check_compatibility(addon: Addon, *, installable: bool) -> None:
     """Enforce the baseline and same-release-line SDK patch compatibility."""
     prerequisites = addon.spec.prerequisites
     for value, floor in (
-        (prerequisites.base, (0, 4, 0)),
+        (prerequisites.base, (0, 3, 30)),
         (prerequisites.tooling, (0, 14, 0)),
         (prerequisites.stack_setup, (0, 7, 0)),
     ):
