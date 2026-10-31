@@ -64,6 +64,7 @@ from openbao_stack_setup.declarative import (
     plan_credentials,
 )
 from openbao_stack_setup.glitchtip import parse_dsn_export, provisioning_payload, store_project_dsn
+from openbao_stack_setup.librechat_preservation import preserve_librechat
 from openbao_stack_setup.mcp import reconcile_mcp
 from openbao_stack_setup.native import NativeError
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
@@ -130,6 +131,11 @@ def _arguments() -> argparse.ArgumentParser:
     reconcile.add_argument("--confirm", metavar="CLIENT")
     _credential_arguments(reconcile)
     reconcile.add_argument("--rotate-contextforge-token", action="store_true")
+    preserve = _guarded(commands.add_parser("preserve-librechat"))
+    preserve.add_argument("--custody-root", type=Path)
+    preserve.add_argument("--custodian-package", action="append", type=Path, required=True)
+    preserve.add_argument("--confirm", metavar="CLIENT")
+    preserve.set_defaults(input_group=[])
     reconcile.add_argument(
         "--prepare-rejected-request-debug",
         action="store_true",
@@ -174,7 +180,7 @@ def main() -> None:
     args = _arguments().parse_args()
     try:
         verified = None
-        if args.command in ("preflight", "bootstrap", "reconcile"):
+        if args.command in ("preflight", "bootstrap", "reconcile", "preserve-librechat"):
             cluster = Cluster(args.context)
             cluster.identity(args.client)
             verified = verify_client_sources(cluster)
@@ -196,7 +202,7 @@ def _dispatch(args: argparse.Namespace, verified: VerifiedSelection | None) -> N
     if args.command == "status":
         _status(args.context, args.client, args.custody_root)
         return
-    if args.command in ("bootstrap", "reconcile"):
+    if args.command in ("bootstrap", "reconcile", "preserve-librechat"):
         if verified is None:
             raise SetupError("Complete verified source selection is required")
         _confirm(args.context, args.client, "Prepare selected credentials", args.confirm)
@@ -212,9 +218,10 @@ def _dispatch(args: argparse.Namespace, verified: VerifiedSelection | None) -> N
                 args.custody_root,
                 args.custodian_package,
                 args.client,
-                args.rotate_contextforge_token,
-                args.prepare_rejected_request_debug,
+                getattr(args, "rotate_contextforge_token", False),
+                getattr(args, "prepare_rejected_request_debug", False),
                 run=run,
+                preserve_only=args.command == "preserve-librechat",
             )
     elif args.command == "preflight":
         if verified is None:
@@ -471,8 +478,11 @@ def _reconcile(
     prepare_rejected_request_debug: bool = False,
     *,
     run: SelectedRun,
+    preserve_only: bool = False,
 ) -> None:
     run.require_verified()
+    if preserve_only and set(run.setups) != {"librechat"}:
+        raise SetupError("Preservation requires a LibreChat-only verified selection")
     cluster = Cluster(context)
     identity = cluster.identity(client)
     tailscale_enabled = cluster.tailscale_enabled()
@@ -505,26 +515,37 @@ def _reconcile(
         token = unauthenticated.create_recovery_root_token(recovery_shares)
         root = OpenBaoClient(_ADDRESS, token, unauthenticated.ca_cert, unauthenticated.session)
         try:
-            if rotate_contextforge_token:
-                cluster.require_contextforge_stopped()
-            _prepare_selected(
-                cluster,
-                unauthenticated,
-                root,
-                kit,
-                paths.seal_file,
-                run,
-                docling_enabled=docling_enabled,
-                glitchtip_enabled=glitchtip_enabled,
-                contextforge_admin_email=contextforge_admin_email,
-                mcp_ids=mcp_ids,
-                rejection_debug_enabled=prepare_debug,
-                tailscale_enabled=tailscale_enabled,
-                rotate_contextforge_token=rotate_contextforge_token,
-            )
+            if preserve_only:
+                preserve_librechat(
+                    root,
+                    ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
+                    run.verified.addons[0].declared_definition.spec.setup,
+                    active_setup=run.setups["librechat"],
+                )
+            else:
+                if rotate_contextforge_token:
+                    cluster.require_contextforge_stopped()
+                _prepare_selected(
+                    cluster,
+                    unauthenticated,
+                    root,
+                    kit,
+                    paths.seal_file,
+                    run,
+                    docling_enabled=docling_enabled,
+                    glitchtip_enabled=glitchtip_enabled,
+                    contextforge_admin_email=contextforge_admin_email,
+                    mcp_ids=mcp_ids,
+                    rejection_debug_enabled=prepare_debug,
+                    tailscale_enabled=tailscale_enabled,
+                    rotate_contextforge_token=rotate_contextforge_token,
+                )
         finally:
             root.revoke_self()
-    print("Selected credentials and access prepared; temporary root revoked.")
+    if preserve_only:
+        print("LibreChat credentials preserved; temporary root revoked. Run reconciliation next.")
+    else:
+        print("Selected credentials and access prepared; temporary root revoked.")
 
 
 def _prepare_selected(

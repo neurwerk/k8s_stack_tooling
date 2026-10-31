@@ -212,6 +212,7 @@ def test_main_dispatches(command: str, target: str) -> None:
             False,
             False,
             run=selected_run(),
+            preserve_only=False,
         )
     else:
         operation.assert_called_once()
