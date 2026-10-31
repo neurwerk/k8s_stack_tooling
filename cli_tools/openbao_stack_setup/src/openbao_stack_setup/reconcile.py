@@ -32,6 +32,16 @@ from openbao_stack_setup.rejection_debug import reconcile_rejection_debug
 
 STATE_SCHEMA_VERSION = 1
 CURRENT_RECONCILIATION_VERSION = 4
+LIBRECHAT_PRESERVATION_PATHS = (
+    "frontend-librechat/internal",
+    "frontend-librechat/external",
+    "auth-keycloak/internal",
+    "infra-postgres-operations/internal",
+    "addons/librechat/runtime",
+    "addons/librechat/database",
+    "addons/librechat/oidc",
+    "addons/librechat/external/speech",
+)
 # Optional additive catalogs are selected on every run, including at schema 4.
 
 
@@ -77,7 +87,7 @@ def reconcile_openbao(
     passwords = bootstrap_passwords or {}
     client.ensure_kv_v2_mount()
     record = client.read_secret(RECONCILIATION_STATE_PATH)
-    state = _load_state(record, identity)
+    state = _load_state(record, identity, client=client)
     _require_bootstrap_passwords(client, passwords)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
         raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
@@ -135,10 +145,14 @@ def reconcile_openbao(
     )
     debug = reconcile_rejection_debug(client, enabled=rejection_debug_enabled)
 
-    if state.applied_version < CURRENT_RECONCILIATION_VERSION:
+    if state.applied_version < CURRENT_RECONCILIATION_VERSION or (
+        record is not None and "librechatPreserved" in record.values
+    ):
+        values = {**(record.values if record else {}), **_state_values(identity)}
+        values.pop("librechatPreserved", None)
         client.write_secret(
             RECONCILIATION_STATE_PATH,
-            {**(record.values if record else {}), **_state_values(identity)},
+            values,
             state.record_version,
         )
     return ReconciliationReport(
@@ -150,7 +164,13 @@ def reconcile_openbao(
     )
 
 
-def _load_state(record: SecretRecord | None, expected_identity: ReconciliationIdentity) -> _State:
+def _load_state(
+    record: SecretRecord | None,
+    expected_identity: ReconciliationIdentity,
+    *,
+    preserving_librechat: bool = False,
+    client: OpenBaoClient | None = None,
+) -> _State:
     if record is None:
         return _State(expected_identity, 0, 0)
     values = record.values
@@ -162,7 +182,8 @@ def _load_state(record: SecretRecord | None, expected_identity: ReconciliationId
         "namespaceUid",
         "packageVersion",
     }
-    if set(values) not in (expected_keys, expected_keys | {"access"}):
+    optional = {"access", "librechatPreserved"}
+    if not expected_keys <= set(values) or set(values) - expected_keys - optional:
         raise OpenBaoError("OpenBao reconciliation state has an invalid schema")
     if "access" in values:
         if values["access"] is None:
@@ -187,11 +208,30 @@ def _load_state(record: SecretRecord | None, expected_identity: ReconciliationId
     )
     if identity != expected_identity:
         raise OpenBaoError("OpenBao reconciliation state does not belong to the selected cluster")
-    if applied_version == 2:
+    if "librechatPreserved" in values:
+        _check_librechat_evidence(
+            values["librechatPreserved"], None if preserving_librechat else client
+        )
+        if not preserving_librechat and client is None:
+            raise OpenBaoError("LibreChat preservation evidence requires live record verification")
+    if applied_version == 2 and not preserving_librechat and not values.get("librechatPreserved"):
         raise OpenBaoError(
             "Retired add-on reconciliation state is unsupported; no migration is provided"
         )
     return _State(identity, applied_version, record.version)
+
+
+def _check_librechat_evidence(evidence: JsonValue, client: OpenBaoClient | None) -> None:
+    if not isinstance(evidence, dict) or set(evidence) != set(LIBRECHAT_PRESERVATION_PATHS):
+        raise OpenBaoError("OpenBao LibreChat preservation evidence is invalid")
+    optional = {"frontend-librechat/external", "addons/librechat/external/speech"}
+    for path, version in evidence.items():
+        if type(version) is not int or version < (0 if path in optional else 1):
+            raise OpenBaoError("OpenBao LibreChat preservation evidence is invalid")
+        if client is not None:
+            current = client.read_secret(path)
+            if (current.version if current else 0) != version:
+                raise OpenBaoError("LibreChat preservation evidence is stale; repeat preservation")
 
 
 def plan_reconciliation_access(
@@ -201,7 +241,7 @@ def plan_reconciliation_access(
 ) -> AccessPlan:
     """Validate cluster identity and remember reader ownership before grant changes."""
     record = client.read_secret(RECONCILIATION_STATE_PATH)
-    state = _load_state(record, identity)
+    state = _load_state(record, identity, client=client)
     if state.applied_version > CURRENT_RECONCILIATION_VERSION:
         raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
     if record is None:

@@ -429,3 +429,37 @@ def test_complete_fake_client_preserves_keys_and_revokes_without_lifecycle(tmp_p
     native.assert_called_once()
     cluster.force_external_secret_refresh.assert_not_called()
     cluster.force_reconcile.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_preservation_revokes_root_without_running_reconciliation(tmp_path, fails):
+    session = FakeSession()
+    api = client(tmp_path, session)
+    cluster = MagicMock()
+    cluster.identity.return_value = StackIdentity("client", "cluster", "namespace")
+    kit = with_checkpoint(with_checkpoint(initialized_kit(), "seeded"), "complete")
+    run = SelectedRun(verified(addon_id="librechat"))
+    with (
+        patch.object(cli, "Cluster", return_value=cluster),
+        patch.object(cli, "prepare_custody_paths"),
+        patch.object(cli, "_bound_kit", return_value=kit),
+        patch.object(cli, "_required_package_paths", return_value=(Path("/one"), Path("/two"))),
+        patch.object(cli, "_decrypt_custodian_packages", return_value=("share-one", "share-two")),
+        patch.object(cli, "_openbao") as opened,
+        patch.object(cli, "OpenBaoClient", return_value=api),
+        patch.object(api, "create_recovery_root_token", return_value="synthetic-root"),
+        patch.object(cli, "preserve_librechat") as preserve,
+        patch.object(cli, "_prepare_selected") as reconcile,
+    ):
+        opened.return_value.__enter__.return_value = api
+        if fails:
+            preserve.side_effect = OpenBaoError("preservation conflict")
+            with pytest.raises(OpenBaoError, match="preservation conflict"):
+                cli._reconcile(
+                    "test", "client", tmp_path, [], "client", run=run, preserve_only=True
+                )
+        else:
+            cli._reconcile("test", "client", tmp_path, [], "client", run=run, preserve_only=True)
+    preserve.assert_called_once()
+    reconcile.assert_not_called()
+    assert session.calls[-1].path == "auth/token/revoke-self"

@@ -1,0 +1,102 @@
+# Actual features/setup from LibreChat release/manifest.yaml at 0c77a44.
+# Only the unrelated deployment/artifact envelope is reduced for this setup test.
+apiVersion: addons.neurwerk.com/v1alpha2
+kind: AddonRelease
+metadata: {name: librechat}
+spec:
+  version: 0.1.8
+  status: ready
+  sourceName: librechat-addon
+  configurationKey: frontendLibrechat
+  prerequisites: {base: 0.4.0, tooling: 0.15.0, stackSetup: 0.8.0}
+  packages: [{name: app, path: releases/librechat/app}]
+  features:
+    stt-auth: false
+    tts-auth: false
+  setup:
+    records:
+      - id: runtime
+        path: addons/librechat/runtime
+        fields:
+          credsKey:
+            generate: {encoding: hex, bytes: 32}
+            validation: {format: hex, minLength: 64, maxLength: 64}
+          credsIv:
+            generate: {encoding: hex, bytes: 16}
+            validation: {format: hex, minLength: 32, maxLength: 32}
+          jwtSecret:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+          jwtRefreshSecret:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+          meiliMasterKey:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+          openidSessionSecret:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+          valkeyPassword:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+          adminPanelSessionSecret:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+          adminPanelMetricsSecret:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+      - id: database
+        path: addons/librechat/database
+        fields:
+          documentdbUser: {literal: librechat}
+          documentdbPassword:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+      - id: oidc
+        path: addons/librechat/oidc
+        fields:
+          openidClientSecret:
+            generate: {encoding: base64url, bytes: 32}
+            validation: {format: base64url, minLength: 43, maxLength: 43}
+      - id: speech
+        path: addons/librechat/external/speech
+        fields:
+          sttApiKey:
+            when: stt-auth
+            supplied: {group: stt, key: apiKey}
+          ttsApiKey:
+            when: tts-auth
+            supplied: {group: tts, key: apiKey}
+    inputGroups:
+      - id: stt
+        when: stt-auth
+        fields:
+          apiKey: {format: text, minLength: 1, maxLength: 16384}
+      - id: tts
+        when: tts-auth
+        fields:
+          apiKey: {format: text, minLength: 1, maxLength: 16384}
+    readers:
+      - role: addon-librechat-runtime
+        namespace: frontend-librechat
+        serviceAccount: frontend-librechat-external-secrets
+        audience: openbao
+        records: [runtime, database, oidc, speech]
+      - role: infra-postgres-operations
+        namespace: infra-postgres-operations
+        serviceAccount: infra-postgres-operations-external-secrets
+        audience: openbao
+        records: [database]
+      - role: auth-keycloak
+        namespace: auth-keycloak
+        serviceAccount: auth-keycloak-external-secrets
+        audience: openbao
+        records: [oidc]
+    deliveries:
+      - {namespace: frontend-librechat, name: frontend-librechat-runtime-secret, secretStore: frontend-librechat-openbao-secret-store, targetSecret: frontend-librechat-secret, records: [runtime, database, oidc]}
+      - {namespace: frontend-librechat, name: frontend-librechat-admin-panel-secret, secretStore: frontend-librechat-openbao-secret-store, targetSecret: frontend-librechat-admin-panel-secret, records: [runtime]}
+      - {namespace: infra-postgres-operations, name: librechat-documentdb-password, secretStore: infra-postgres-operations-openbao-secret-store, targetSecret: librechat-documentdb-password, records: [database]}
+      - {namespace: auth-keycloak, name: librechat-oidc-secret, secretStore: auth-keycloak-openbao-secret-store, targetSecret: librechat-oidc-secret, records: [oidc]}
+      - {namespace: frontend-librechat, name: frontend-librechat-stt-secret, secretStore: frontend-librechat-openbao-secret-store, targetSecret: frontend-librechat-stt-secret, records: [speech], when: stt-auth}
+      - {namespace: frontend-librechat, name: frontend-librechat-tts-secret, secretStore: frontend-librechat-openbao-secret-store, targetSecret: frontend-librechat-tts-secret, records: [speech], when: tts-auth}
+    handover: []
