@@ -2,6 +2,7 @@
 
 import copy
 import subprocess
+from importlib.metadata import version
 from typing import Any
 
 import pytest
@@ -61,7 +62,11 @@ def composition(tmp_path, monkeypatch):
             "status": "ready",
             "sourceName": "synthetic",
             "configurationKey": "synthetic",
-            "prerequisites": {"base": "1.0.0", "tooling": "0.15.2", "stackSetup": "0.7.0"},
+            "prerequisites": {
+                "base": "1.0.0",
+                "tooling": version("k8s-stack-tooling"),
+                "stackSetup": "0.7.0",
+            },
             "packages": [{"name": "app", "path": "releases/app"}],
         },
     }

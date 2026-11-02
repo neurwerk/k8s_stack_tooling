@@ -33,6 +33,8 @@ def catalog_route(endpoint_id, *, proxy=False):
         "url": "https://gateway.example.test/" + ("" if proxy else endpoint_id),
         "entry_mode": "forward_proxy" if proxy else "api",
         "caller_auth_modes": ["proxy_basic"] if proxy else ["oidc_bearer", "neurwerk_bearer"],
+        "identity_header": "Proxy-Authorization" if proxy else "Authorization",
+        "provider_credential_source": "override" if proxy else "none",
     }
 
 
@@ -320,8 +322,7 @@ class MemoryObserver(observe.KubernetesObserver):
         self.written = snapshot
 
 
-@pytest.mark.parametrize("credential_mode_header", [None, "X-Neurwerk-Credential-Mode"])
-def test_observer_consumes_routes_from_every_group(monkeypatch, credential_mode_header):
+def test_observer_consumes_routes_from_every_group(monkeypatch):
     api = MemoryObserver()
     api.catalog["profiles"] = [
         {
@@ -383,13 +384,6 @@ def test_observer_consumes_routes_from_every_group(monkeypatch, credential_mode_
         api.inventory.endpoints.append(
             api.inventory.endpoints[0].model_copy(update={"id": endpoint_id})
         )
-    for group in (
-        "self-hosted-api-providers",
-        "external-api-providers",
-        "external-subscription-providers",
-        "mcp-servers",
-    ):
-        api.catalog[group][0]["routes"][0]["credential_mode_header"] = credential_mode_header
     monkeypatch.setattr(observe, "_route_loaded", lambda *_args: True)
     monkeypatch.setattr(
         observe,

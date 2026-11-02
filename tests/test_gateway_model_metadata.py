@@ -36,6 +36,8 @@ def catalog():
                     "url": f"https://gateway.example.test/bindings/{name}/v1",
                     "entry_mode": "api",
                     "caller_auth_modes": ["neurwerk_bearer"],
+                    "identity_header": "Authorization",
+                    "provider_credential_source": "none",
                 }
             ],
             "destinations": [

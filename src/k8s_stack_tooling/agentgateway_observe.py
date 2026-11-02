@@ -65,7 +65,7 @@ class Route(Document):
     name: Name
     path: str = Field(min_length=1, max_length=2048, pattern=r"^/")
     models: dict[Annotated[str, Field(min_length=1, max_length=256)], list[Name]] = Field(
-        default_factory=dict, max_length=64
+        default_factory=dict, max_length=100
     )
     mcp_backend: Name | None = None
 
