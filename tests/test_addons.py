@@ -2,7 +2,7 @@
 
 import copy
 import subprocess
-from importlib.metadata import PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,7 +34,7 @@ def package(tmp_path: Path):
             "configurationKey": "example",
             "prerequisites": {
                 "base": "0.4.0",
-                "tooling": "0.15.2",
+                "tooling": version("k8s-stack-tooling"),
                 "stackSetup": "0.7.0",
                 "baseCharts": ["charts/postgres/addon"],
             },
@@ -168,7 +168,9 @@ def test_installable_accepts_same_line_sdk_patches(package, required, installed)
     ],
 )
 def test_installable_rejects_incompatible_sdk_before_rendering(package, installed):
-    root, _, _, _ = package
+    root, manifest, _, save = package
+    manifest["spec"]["prerequisites"]["tooling"] = "0.15.2"
+    save()
     with (
         patch("k8s_stack_tooling.addons.validation.distribution_version", return_value=installed),
         patch(
