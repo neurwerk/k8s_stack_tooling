@@ -62,6 +62,17 @@ def selection(scope: Scope, lower: datetime, upper: datetime) -> dict[str, Any]:
     }
 
 
+def selected(row: Any, scope: Scope, lower: datetime, upper: datetime) -> bool:
+    """The same half-open, explicit source selection for live results and export previews."""
+    source = row["_source"]
+    return (
+        lower <= utc(source["@timestamp"]) < upper
+        and source["kubernetes"]["namespace_name"] in scope.namespaces
+        and source["kubernetes"]["container_name"] in scope.containers
+        and source.get("stack_log", {}).get("failure_type") in scope.failure_types
+    )
+
+
 def brain_query(scope: Scope, lower: datetime, upper: datetime) -> str:
     clauses = [
         f"`@timestamp` >= timestamp({literal(stamp(lower))})",
@@ -137,6 +148,17 @@ class Transport:
     def window(
         self, scope: Scope, lower: datetime, upper: datetime
     ) -> tuple[list[Record], dict[str, str]]:
+        # Delivery has one authoritative population: the complete raw search.
+        # BRAIN is an optional advisory query, never a prerequisite for committing it.
+        try:
+            return self.raw_window(scope, lower, upper), {}
+        except ResponseTooLargeError:
+            raise WindowFullError("query response exceeds byte limit") from None
+
+    def brain_window(
+        self, scope: Scope, lower: datetime, upper: datetime
+    ) -> tuple[list[Record], dict[str, str]]:
+        """Read-only advisory observations; callers must never use labels as identities."""
         for _ in range(3):
             try:
                 records = self.raw_window(scope, lower, upper)
@@ -174,7 +196,7 @@ class Transport:
                     "kubernetes.namespace_name",
                     "kubernetes.container_name",
                     "kubernetes.container_image",
-                    "stack_log.failure_type",
+                    "stack_log",
                 ],
             },
         )
@@ -231,10 +253,7 @@ def parse_record(row: Any, scope: Scope, lower: datetime, upper: datetime) -> Re
         or not message
         or len(message.encode()) > MAX_MESSAGE_BYTES
         or not isinstance(timestamp, str)
-        or not lower <= utc(timestamp) < upper
-        or namespace not in scope.namespaces
-        or container not in scope.containers
-        or failure not in scope.failure_types
+        or not selected(row, scope, lower, upper)
         or not isinstance(row["_id"], str)
         or not row["_id"]
         or len(row["_id"]) > 1024
@@ -248,6 +267,9 @@ def parse_record(row: Any, scope: Scope, lower: datetime, upper: datetime) -> Re
         not isinstance(image, str) or len(image) > 200 or any(ord(c) < 32 for c in image)
     ):
         raise ValueError("invalid release metadata")
+    original_level = source["stack_log"].get("original_level", source["stack_log"].get("level"))
+    if original_level is not None and not isinstance(original_level, str):
+        raise ValueError("invalid severity metadata")
     return Record(
         row["_index"],
         row["_id"],
@@ -257,6 +279,7 @@ def parse_record(row: Any, scope: Scope, lower: datetime, upper: datetime) -> Re
         container,
         failure,
         image,
+        original_level,
     )
 
 
