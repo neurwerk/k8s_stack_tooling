@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     poll_seconds: int = Field(default=60, ge=1, le=3600)
     overlap_seconds: int = Field(default=900, ge=0, le=86400)
     settle_seconds: int = Field(default=30, ge=0, le=3600)
+    reporting_policy_file: Path | None = None
+    studio_url: str | None = None
+    metrics_port: int = Field(default=0, ge=0, le=65535)
 
     def validate_runtime(self) -> tuple[Scope, ...]:
         identifier(self.environment)
@@ -141,6 +144,20 @@ class Settings(BaseSettings):
                 raise ValueError("CA bundle must be an existing absolute file")
         if not self.state_path.is_absolute():
             raise ValueError("state path must be absolute")
+        if self.reporting_policy_file is not None and not self.reporting_policy_file.is_absolute():
+            raise ValueError("reporting policy path must be absolute")
+        if self.studio_url is not None:
+            studio = urlsplit(self.studio_url)
+            if (
+                studio.scheme != "https"
+                or not studio.hostname
+                or studio.username
+                or studio.password
+                or studio.path not in ("", "/")
+                or studio.query
+                or studio.fragment
+            ):
+                raise ValueError("Studio URL must be an HTTPS origin")
         return load_scopes(self.scopes_file)
 
 

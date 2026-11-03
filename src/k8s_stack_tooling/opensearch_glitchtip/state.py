@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .display import display_message
-from .grouping import grouping_parts
+from .policy import Policy, identity_parts
+from .reporting import log_links
 from .settings import Scope, Settings, destination, stamp
 
 
@@ -30,6 +31,7 @@ class Record:
     container: str
     failure_type: str
     image: str | None
+    original_level: str | None = None
 
 
 @contextmanager
@@ -52,6 +54,11 @@ class State:
         path = settings.state_path
         existed = path.exists()
         self.environment = settings.environment
+        self.settings = settings
+        self.scopes = tuple(scopes)
+        self.policy = Policy()
+        self.policy_valid = True
+        self.policy_rejections = 0
         self.db = sqlite3.connect(path)
         os.chmod(path, 0o600)
         try:
@@ -101,6 +108,21 @@ class State:
                     self.db.execute(
                         "CREATE INDEX pending_records ON records(delivered, next_attempt)"
                     )
+            with self.db:
+                columns = {row[1] for row in self.db.execute("PRAGMA table_info(records)")}
+                if "queued_at" not in columns:
+                    self.db.execute(
+                        "ALTER TABLE records ADD COLUMN queued_at REAL NOT NULL DEFAULT 0"
+                    )
+                    self.db.execute(
+                        "UPDATE records SET queued_at=? WHERE delivered=0", (time.time(),)
+                    )
+            saved_policy = self.db.execute(
+                "SELECT value FROM metadata WHERE name='reporting_policy'"
+            ).fetchone()
+            if saved_policy:
+                self.policy = Policy.parse(saved_policy[0])
+            self.reload_policy()
         except Exception:
             self.db.close()
             raise
@@ -119,6 +141,30 @@ class State:
     def pending_count(self) -> int:
         return self.db.execute("SELECT count(*) FROM records WHERE delivered=0").fetchone()[0]
 
+    def reload_policy(self) -> bool:
+        """Commit a complete valid policy before activation; keep the last good one on error."""
+        try:
+            candidate = (
+                Policy.load(self.settings.reporting_policy_file)
+                if self.settings.reporting_policy_file is not None
+                else Policy()
+            )
+            candidate.validate_scopes(self.environment, self.scopes)
+        except (OSError, UnicodeError, ValueError, RecursionError):
+            self.policy_valid = False
+            self.policy_rejections += 1
+            return False
+        serialized = candidate.serialize()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO metadata VALUES ('reporting_policy', ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+                (serialized,),
+            )
+        self.policy = candidate
+        self.policy_valid = True
+        return True
+
     def enqueue(
         self, scope: Scope, records: Sequence[Record], labels: dict[str, str], upper: datetime
     ) -> int:
@@ -126,37 +172,52 @@ class State:
         added = 0
         with self.db:
             for record in records:
+                source = self.digest("source", scope.id, record.index, record.id)
+                if self.db.execute("SELECT 1 FROM records WHERE source=?", (source,)).fetchone():
+                    continue
+                event_id = self.digest("event", source)[:32]
+                decision = self.policy.evaluate(self.environment, scope, record)
+                if decision.action == "log_only":
+                    # An explicit exclusion is handled, not a successful remote delivery.
+                    # Retain its occurrence identity so configuration changes cannot replay history.
+                    self.db.execute(
+                        "INSERT INTO records(source, event_id, payload, delivered) "
+                        "VALUES (?, ?, NULL, 2)",
+                        (source, event_id),
+                    )
+                    continue
                 context = (scope.id, record.namespace, record.container, record.failure_type)
-                # Legacy identities lack source context and may already bridge different
-                # bodies. New occurrences use v2; existing outbox bytes/source IDs stay intact.
-                message_digest = self.digest("message-v2", *context, record.message)
+                # Policy grouping applies only to new occurrences; fallback keeps v2.
+                # Existing outbox bytes, source IDs and historical mappings stay intact.
+                parts = identity_parts(self.environment, scope, record, decision)
+                message_digest = (
+                    self.digest("message-v2", *context, record.message)
+                    if decision.identity_parts is None
+                    else self.digest("message-policy-v1", *parts, record.message)
+                )
                 row = self.db.execute(
                     "SELECT identity FROM messages WHERE scope=? AND digest=?",
                     (scope.id, message_digest),
                 ).fetchone()
-                identity = (
-                    row[0]
-                    if row
-                    else self.digest("issue-v2", *context, *grouping_parts(record.message))
-                )
+                identity = row[0] if row else self.digest(*parts)
                 self.db.execute(
                     "INSERT OR IGNORE INTO messages VALUES (?, ?, ?)",
                     (scope.id, message_digest, identity),
                 )
                 # Retain Brain observations for comparison, not as merge authority.
-                template_digest = self.digest("template-v2", *context, labels[record.message])
-                self.db.execute(
-                    "INSERT OR IGNORE INTO templates VALUES (?, ?, ?)",
-                    (scope.id, template_digest, identity),
-                )
-                source = self.digest("source", scope.id, record.index, record.id)
-                event_id = self.digest("event", source)[:32]
+                if record.message in labels:
+                    template_digest = self.digest("template-v2", *context, labels[record.message])
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO templates VALUES (?, ?, ?)",
+                        (scope.id, template_digest, identity),
+                    )
+                matching_url, surrounding_url = log_links(self.settings.studio_url, record)
                 payload: dict[str, Any] = {
                     "event_id": event_id,
-                    "message": display_message(record.message),
+                    "message": decision.title,
                     "timestamp": record.timestamp,
                     "platform": "other",
-                    "level": "error",
+                    "level": decision.level,
                     "environment": self.environment,
                     "fingerprint": [identity],
                     "tags": {
@@ -166,13 +227,27 @@ class State:
                         "container": record.container,
                         "failure_type": record.failure_type,
                     },
+                    "extra": {
+                        "reporting": {
+                            "rule_id": decision.rule_id,
+                            "count_unit": decision.count_unit,
+                            "explanation": decision.explanation,
+                            "matching_logs_url": matching_url,
+                            "surrounding_logs_url": surrounding_url,
+                            "original_timestamp": record.timestamp,
+                        },
+                        "original_level": decision.original_level,
+                        "original_log": record.message,
+                        "diagnostics": decision.diagnostics,
+                    },
                 }
                 release = scope.release or record.image
                 if release:
                     payload["release"] = release
                 inserted = self.db.execute(
-                    "INSERT OR IGNORE INTO records(source, event_id, payload) VALUES (?, ?, ?)",
-                    (source, event_id, json.dumps(payload, ensure_ascii=False)),
+                    "INSERT OR IGNORE INTO records(source, event_id, payload, queued_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (source, event_id, json.dumps(payload, ensure_ascii=False), time.time()),
                 )
                 added += inserted.rowcount
             self.db.execute(

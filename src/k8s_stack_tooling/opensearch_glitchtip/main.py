@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 
+from .health import Health
 from .settings import MAX_PENDING, MAX_RECORDS, Settings, utc
 from .state import State, state_lock
 from .transport import AdapterError, Transport, WindowFullError
@@ -22,7 +23,11 @@ def log(message: str) -> None:
 
 
 def deliver_due(
-    state: State, transport: Transport, now: float, stop: threading.Event | None = None
+    state: State,
+    transport: Transport,
+    now: float,
+    stop: threading.Event | None = None,
+    health: Health | None = None,
 ) -> None:
     deadline = time.monotonic() + DELIVERY_CYCLE_SECONDS
     tried = 0
@@ -43,17 +48,26 @@ def deliver_due(
                 log(f"delivery_stalled attempts={attempts + 1} reason={exc}")
             else:
                 state.acknowledge(source)
+                if health is not None:
+                    health.delivery_success()
+            if health is not None:
+                health.update(state)
 
 
-def run(settings: Settings, stop: threading.Event) -> None:
+def run(settings: Settings, stop: threading.Event, health: Health | None = None) -> None:
     scopes = settings.validate_runtime()
     initial = utc(settings.initial_start_at)
-    with state_lock(settings.state_path):
+    health = health or Health(tuple(scope.id for scope in scopes))
+    with state_lock(settings.state_path), health.serve(settings.metrics_port):
         state = State(settings, scopes)
         transport: Transport | None = None
         try:
             transport = Transport(settings)
             while not stop.is_set():
+                if not state.reload_policy():
+                    log("policy_rejected reason=invalid_or_unreadable_policy_using_last_valid")
+                health.update(state)
+                deliver_due(state, transport, time.time(), stop, health)
                 for scope in scopes:
                     if stop.is_set():
                         break
@@ -88,11 +102,13 @@ def run(settings: Settings, stop: threading.Event) -> None:
                             log(f"poll_stalled reason={exc}")
                             break
                         added = state.enqueue(scope, records, labels, upper)
+                        health.poll_success(scope.id, state.cursor(scope, initial).timestamp())
+                        health.update(state)
                         log(f"window_committed occurrences={len(records)} queued={added}")
                         segments += 1
                         lower = upper
                         upper = min(target, lower + timedelta(minutes=5))
-                deliver_due(state, transport, time.time(), stop)
+                deliver_due(state, transport, time.time(), stop, health)
                 stop.wait(settings.poll_seconds)
         finally:
             if transport is not None:

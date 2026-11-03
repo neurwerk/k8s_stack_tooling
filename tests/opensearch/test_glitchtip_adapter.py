@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import re
 import socket
 import sqlite3
 import threading
@@ -14,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
@@ -21,6 +21,9 @@ from pydantic import SecretStr
 
 from k8s_stack_tooling.opensearch_glitchtip import main
 from k8s_stack_tooling.opensearch_glitchtip import transport as transport_module
+from k8s_stack_tooling.opensearch_glitchtip.health import Health
+from k8s_stack_tooling.opensearch_glitchtip.policy import Policy, identity_parts
+from k8s_stack_tooling.opensearch_glitchtip.preview import preview
 from k8s_stack_tooling.opensearch_glitchtip.settings import (
     MAX_RECORDS,
     Scope,
@@ -124,7 +127,10 @@ def search(records: list[Record]) -> dict[str, Any]:
                             "container_name": r.container,
                             "container_image": r.image,
                         },
-                        "stack_log": {"failure_type": r.failure_type},
+                        "stack_log": {
+                            "failure_type": r.failure_type,
+                            **({"level": r.original_level} if r.original_level is not None else {}),
+                        },
                     },
                 }
                 for r in records
@@ -461,7 +467,7 @@ def test_lost_ack_retry_is_immutable_and_pending_never_expires(
     # formatter. Retry must deliver these original bytes, not clean them.
     with monkeypatch.context() as legacy:
         legacy.setattr(
-            "k8s_stack_tooling.opensearch_glitchtip.state.display_message", lambda message: message
+            "k8s_stack_tooling.opensearch_glitchtip.policy.title_text", lambda message: message
         )
         state.enqueue(SCOPE, [legacy_record], {raw: "request <*> failed"}, START)
     legacy_payload = state.due(0)[0][1]
@@ -754,6 +760,34 @@ def test_query_values_and_scope_overlaps_rejected(settings: Settings) -> None:
     assert "`@timestamp` < timestamp(" in query
     with pytest.raises(ValueError):
         destination("http://public.example.test/1")
+    connection = replace(SCOPE, id="connections", failure_types=("connection_error",))
+    settings.scopes_file.write_text(json.dumps([SCOPE.binding(), connection.binding()]))
+    partitioned = load_scopes(settings.scopes_file)
+    policy = Policy.parse(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": [
+                    {"id": "connections", "match": {"failure_type": ["connection_error"]}}
+                ],
+                "products": [
+                    {
+                        "id": "inactive-product",
+                        "match": {
+                            "application": ["unselected"],
+                            "failure_type": ["unselected_failure"],
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    policy.validate_scopes("test", partitioned)
+    unrelated = replace(SCOPE, id="other", service="worker", namespaces=("other",))
+    with pytest.raises(ValueError, match="outside its source scopes"):
+        policy.validate_scopes("test", (*partitioned, unrelated))
+    with pytest.raises(ValueError, match="outside its source scopes"):
+        policy.validate_scopes("test", (SCOPE,))
 
 
 @pytest.mark.parametrize("scheme", ["http", "https"])
@@ -1024,7 +1058,7 @@ def test_native_contract_and_raw_recheck(
 
     monkeypatch.setattr(transport, "request", request)
     try:
-        actual, labels = transport.window(SCOPE, START, START + timedelta(minutes=1))
+        actual, labels = transport.brain_window(SCOPE, START, START + timedelta(minutes=1))
         assert actual == records
         assert labels == {records[0].message: "request <*> failed"}
         assert len(requests_seen) == 3
@@ -1062,7 +1096,7 @@ def test_population_races_retry_bounded_without_commit(
     monkeypatch.setattr(transport, "request", request)
     try:
         with pytest.raises(AdapterError, match="unstable after three attempts"):
-            rows, labels = transport.window(SCOPE, START, START + timedelta(minutes=1))
+            rows, labels = transport.brain_window(SCOPE, START, START + timedelta(minutes=1))
             state.enqueue(SCOPE, rows, labels, START + timedelta(minutes=1))
         assert calls == (9 if changed_ids else 6)
         assert state.pending_count() == 0
@@ -1088,7 +1122,7 @@ def test_population_race_can_settle_on_retry(
     transport = Transport(settings)
     monkeypatch.setattr(transport, "request", lambda *_: next(responses))
     try:
-        records, _ = transport.window(SCOPE, START, START + timedelta(minutes=1))
+        records, _ = transport.brain_window(SCOPE, START, START + timedelta(minutes=1))
         assert records == [initial, late]
     finally:
         transport.close()
@@ -1127,13 +1161,11 @@ def test_http_error_body_redirects_and_credentials_are_not_exposed(
         transport.close()
 
 
-@pytest.mark.parametrize("stage", ["search", "ppl"])
 @pytest.mark.parametrize("unsplittable", [False, True])
 def test_query_byte_cap_splits_complete_windows_or_stalls_without_advancing(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    stage: str,
     unsplittable: bool,
 ) -> None:
     # Scale only the wire-byte budget, not the occurrence cap, to exercise the real
@@ -1169,22 +1201,15 @@ def test_query_byte_cap_splits_complete_windows_or_stalls_without_advancing(
     def post(url: str, **kwargs: Any):
         nonlocal capped
         body = json.loads(kwargs["data"])
-        is_ppl = url.endswith("/_plugins/_ppl")
-        if is_ppl:
-            lower, upper = [
-                datetime.fromisoformat(value)
-                for value in re.findall(r"timestamp\('([^']+)'\)", body["query"])
-            ]
-        else:
-            bounds = body["query"]["bool"]["filter"][0]["range"]["@timestamp"]
-            lower, upper = (
-                datetime.fromisoformat(bounds["gte"]),
-                datetime.fromisoformat(bounds["lt"]),
-            )
+        assert not url.endswith("/_plugins/_ppl")
+        bounds = body["query"]["bool"]["filter"][0]["range"]["@timestamp"]
+        lower, upper = (
+            datetime.fromisoformat(bounds["gte"]),
+            datetime.fromisoformat(bounds["lt"]),
+        )
         rows = [r for r in occurrences if lower <= datetime.fromisoformat(r.timestamp) < upper]
-        response = ppl([r.message for r in rows]) if is_ppl else search(rows)
-        if is_ppl == (stage == "ppl"):
-            response["ignored_padding"] = "x" * (1024 * len(rows))
+        response = search(rows)
+        response["ignored_padding"] = "x" * (1024 * len(rows))
         result = Response(response)
         capped += len(result.data) > 4096
         return result
@@ -1333,4 +1358,287 @@ def test_delivery_work_budget_and_stop_checks_leave_remaining_payloads_durable(
         assert len(state.due(0)) == 3
     finally:
         transport.close()
+        state.close()
+
+
+def reporting_policy() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "defaults": [
+            {
+                "id": "dependency-failure",
+                "match": {
+                    "failure_type": ["application_error"],
+                    "json.event": ["dependency_failed"],
+                },
+                "title": "{service}: {json.target} authentication rejected ({json.code})",
+                "explanation": "The dependency rejected authentication.",
+                "drop_fields": ["timestamp", "request_id", "operation_id"],
+            },
+            {
+                "id": "successful-debug",
+                "match": {
+                    "json.event": ["operation_succeeded"],
+                    "level": ["debug"],
+                    "json.error": [None],
+                    "json.outcome.status": ["success"],
+                },
+                "action": "log_only",
+            },
+            {
+                "id": "collector-failure",
+                "match": {"json.event": ["collector_failed"]},
+                "group_by": ["level"],
+            },
+        ],
+    }
+
+
+def diagnostic(**changes: Any) -> str:
+    return json.dumps(
+        {
+            "level": "ERROR",
+            "event": "dependency_failed",
+            "message": "Dependency rejected authentication",
+            "operation": "initialize",
+            "target": "server-a",
+            "stage": "authenticate",
+            "code": 403,
+            "cause": "permission denied",
+            "error": None,
+            "cache_enabled": True,
+            "timestamp": stamp(START),
+            "request_id": "request-a",
+            "operation_id": "operation-a",
+            **changes,
+        }
+    )
+
+
+def test_reporting_synthetic_groups_preserve_diagnostics_and_conservative_fallback(
+    settings: Settings,
+) -> None:
+    settings.reporting_policy_file = settings.state_path.parent / "policy.json"
+    settings.reporting_policy_file.write_text(json.dumps(reporting_policy()))
+    state = State(settings, [SCOPE])
+    records = [
+        record(
+            str(i),
+            diagnostic(
+                request_id=f"request-{i}",
+                operation_id=f"operation-{i}",
+                timestamp=stamp(START + timedelta(seconds=i)),
+            ),
+        )
+        for i in range(100)
+    ]
+    variations = {
+        "operation": "refresh",
+        "target": "server-b",
+        "stage": "connect",
+        "code": 401,
+        "cause": "certificate expired",
+        "message": "Distinct failure detail",
+        "cache_enabled": False,
+    }
+    records += [record(field, diagnostic(**{field: value})) for field, value in variations.items()]
+    records += [
+        record(f"missing-{kind}-{i}", diagnostic(cause=cause, request_id=f"missing-{kind}-{i}"))
+        for kind, cause in enumerate((None, {}, []))
+        for i in range(2)
+    ]
+    records += [record("unknown", '{"message":"Unknown error","request_id":"unknown"}')]
+    collision = {"outcome": {"status": "failed"}, "outcome.status": "success"}
+    records += [
+        record(
+            f"ambiguous-{i}",
+            diagnostic(
+                event="operation_succeeded",
+                level="DEBUG",
+                **fields,
+            ),
+        )
+        for i, fields in enumerate((collision, dict(reversed(list(collision.items())))))
+    ]
+    collector_message = '{"event":"collector_failed","message":"Upstream failed"}'
+    records += [
+        replace(record(f"collector-{level}", collector_message), original_level=level)
+        for level in ("ERROR", "WARNING")
+    ]
+    records += [
+        record(
+            "success",
+            diagnostic(
+                event="operation_succeeded",
+                level="DEBUG",
+                outcome={"status": "success"},
+            ),
+        )
+    ]
+    try:
+        assert state.enqueue(SCOPE, records, {}, START + timedelta(minutes=5)) == len(records) - 1
+        events = [json.loads(payload) for _, payload, _ in state.due(0, 1000)]
+        first = events[0]
+        assert len({tuple(event["fingerprint"]) for event in events[:100]}) == 1
+        # All diagnostic, incomplete, ambiguous and collector-level variants stay separate.
+        assert len({tuple(event["fingerprint"]) for event in events}) == 1 + len(events) - 100
+        assert first["message"] == "api: server-a authentication rejected (403)"
+        assert first["extra"]["diagnostics"]["cache_enabled"] is True
+        assert first["extra"]["diagnostics"]["error"] is None
+        assert all(event["extra"]["reporting"]["count_unit"] == "error_events" for event in events)
+        decision = state.policy.evaluate("test", SCOPE, records[0])
+        base = identity_parts("test", SCOPE, records[0], decision)
+        assert base != identity_parts("other", SCOPE, records[0], decision)
+        assert base != identity_parts(
+            "test", replace(SCOPE, service="worker"), records[0], decision
+        )
+        untuned_document = reporting_policy()
+        del untuned_document["defaults"][0]["drop_fields"]
+        untuned = Policy.parse(json.dumps(untuned_document))
+        assert (
+            untuned.evaluate(
+                "test", SCOPE, record("duration-a", diagnostic(time=30))
+            ).identity_parts
+            != untuned.evaluate(
+                "test", SCOPE, record("duration-b", diagnostic(time=60))
+            ).identity_parts
+        )
+        rows = search(records)["hits"]["hits"]
+        rows.append(
+            search([record("outside", scope=replace(SCOPE, namespaces=("other",)))])["hits"][
+                "hits"
+            ][0]
+        )
+        result = preview(
+            rows, (SCOPE,), "test", state.policy, Policy(), START, START + timedelta(minutes=5)
+        )
+        assert result["groups"][0]["occurrences"] == 100
+        assert "json.request_id" in result["groups"][0]["differing_fields"]
+        assert {item["reason"] for item in result["exclusions"]} == {
+            "log_only",
+            "outside_scope_or_window",
+        }
+        assert result["changes"][0]["identity_changed"] is True
+    finally:
+        state.close()
+
+
+def test_reporting_overrides_last_valid_restart_and_metadata_preserve_pending(
+    settings: Settings,
+) -> None:
+    settings.reporting_policy_file = settings.state_path.parent / "policy.json"
+    settings.studio_url = "https://studio.example.test"
+    document = reporting_policy()
+    document["products"] = [{"id": "dependency-failure", "title": "Product title"}]
+    override: dict[str, Any] = {
+        "id": "dependency-failure",
+        "title": "Client title",
+        "level": "warning",
+    }
+    document["overrides"] = [override]
+    settings.reporting_policy_file.write_text(json.dumps(document))
+    state = State(settings, [SCOPE])
+    first = record("original", diagnostic())
+    state.enqueue(SCOPE, [first], {}, START)
+    pending = state.due(0)[0]
+    key = state.key
+    event = json.loads(pending[1])
+    assert event["message"] == "Client title"
+    assert event["level"] == "warning"
+    assert event["extra"]["original_level"] == "ERROR"
+    reporting = event["extra"]["reporting"]
+    assert reporting["original_timestamp"] == event["timestamp"] == stamp(START)
+    matching = parse_qs(urlsplit(reporting["matching_logs_url"]).query)
+    surrounding = parse_qs(urlsplit(reporting["surrounding_logs_url"]).query)
+    assert matching["namespace"] == surrounding["namespace"] == ["chat"]
+    assert matching["start"] == surrounding["start"] == [stamp(START - timedelta(minutes=10))]
+    assert matching["end"] == surrounding["end"] == [stamp(START + timedelta(minutes=5))]
+    assert '_id:"original"' in matching["q"][0]
+    assert surrounding["q"] == ['kubernetes.container_name.keyword:"api"']
+    document["overrides"][0].update(
+        title="Reworded\n\x1b[31mnotice\x1b[0m",
+        explanation="Updated wording",
+        level="error",
+        group_by=["json.cause", "json.code", "json.stage", "json.target", "json.operation"],
+    )
+    settings.reporting_policy_file.write_text(json.dumps(document))
+    assert state.reload_policy()
+    second = record("second", diagnostic(request_id="second"))
+    state.enqueue(SCOPE, [second], {}, START)
+    assert state.due(0)[0] == pending
+    updated = payloads(state)[1]
+    assert updated["message"] == "Reworded notice"
+    assert updated["fingerprint"] == event["fingerprint"]
+    # Reject a dimension that normalization would remove, keeping immutable pending events.
+    override["group_by"] = ["json.request_id"]
+    settings.reporting_policy_file.write_text(json.dumps(document))
+    assert not state.reload_policy()
+    assert state.due(0)[0] == pending
+    override["group_by"] = ["level"]
+    settings.reporting_policy_file.write_text(json.dumps(document))
+    assert state.reload_policy()
+    transitioned = record("grouping-transition", diagnostic(request_id="transition"))
+    state.enqueue(SCOPE, [transitioned], {}, START)
+    assert payloads(state)[2]["fingerprint"] != event["fingerprint"]
+    override.pop("group_by")
+    settings.reporting_policy_file.write_text(json.dumps(document))
+    assert state.reload_policy()
+    # Reject an attempted blanket diagnostic removal and retain the last valid policy on disk.
+    override["drop_fields"] = ["cause", "cache_enabled"]
+    settings.reporting_policy_file.write_text(json.dumps(document))
+    assert not state.reload_policy()
+    state.close()
+    state = State(settings, [SCOPE])
+    try:
+        assert state.key == key and not state.policy_valid
+        assert state.due(0)[0] == pending
+        assert state.enqueue(SCOPE, [first], {}, START) == 0
+        third = record("late", diagnostic(request_id="late"))
+        state.enqueue(SCOPE, [third], {}, START + timedelta(days=1))
+        late = payloads(state)[3]
+        assert late["message"] == "Reworded notice"
+        assert late["fingerprint"] == event["fingerprint"]
+        assert late["timestamp"] == late["extra"]["reporting"]["original_timestamp"] == stamp(START)
+        health = Health((SCOPE.id,))
+        health.update(state)
+        assert b"reporting_adapter_policy_valid 0" in health.render()
+        assert b"reporting_adapter_pending_events 4" in health.render()
+    finally:
+        state.close()
+
+
+def test_brain_unavailable_still_polls_commits_and_delivers(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = Transport(settings)
+    stop = threading.Event()
+    health = Health((SCOPE.id,))
+    sent: list[dict[str, Any]] = []
+
+    def request(_session: requests.Session, url: str, body: Any) -> dict[str, Any]:
+        if url.endswith("/_plugins/_ppl"):
+            raise AdapterError("BRAIN unavailable")
+        if url.endswith("/store/"):
+            event = json.loads(body)
+            sent.append(event)
+            return {"event_id": event["event_id"]}
+        return search([record("one")])
+
+    monkeypatch.setattr(transport, "request", request)
+    monkeypatch.setattr(main, "Transport", lambda _: transport)
+    monkeypatch.setattr(stop, "wait", lambda _: stop.set())
+    # Advisory failure is real, but cannot enter the worker's critical path.
+    with pytest.raises(AdapterError, match="BRAIN unavailable"):
+        transport.brain_window(SCOPE, START, START + timedelta(minutes=1))
+    main.run(settings, stop, health)
+    state = State(settings, [SCOPE])
+    try:
+        assert len(sent) == 1
+        assert state.pending_count() == 0
+        assert state.cursor(SCOPE, START) == START + timedelta(minutes=5)
+        assert state.db.execute("SELECT delivered FROM records").fetchone() == (1,)
+        assert health.values[f'last_poll_success_timestamp_seconds{{scope="{SCOPE.id}"}}'] > 0
+        assert health.values["last_delivery_success_timestamp_seconds"] > 0
+    finally:
         state.close()
