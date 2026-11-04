@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import importlib.util
 import io
+import logging
 import os
 import re
 import sys
@@ -37,6 +38,11 @@ _lock = threading.Lock()
 # StreamingResponse may finalize its iterator from a different ASGI task.
 # A semaphore allows that task to release the request slot safely.
 _request_lock = anyio.Semaphore(1)
+logger = logging.getLogger("uvicorn.error")
+
+
+class NoSpeakableText(ValueError):
+    """Normalization or phonemization left no material for the speech model."""
 
 
 class SpeechRequest(BaseModel):
@@ -99,24 +105,41 @@ def split_sentences(text: str) -> list[str]:
         part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", normalized) if part.strip()
     ]
     if not sentences:
-        raise ValueError("Input contains no speakable text")
+        raise NoSpeakableText("Input contains no speakable text")
     return sentences
 
 
-def sentence_audio(sentence: str, speed: float) -> np.ndarray:
+def prepare_speech(text: str) -> list[str]:
+    """Check phonemes before starting a response; never synthesize an empty batch."""
+    if _tts is None:
+        raise RuntimeError("Kokoro is not ready")
+    with _lock:
+        phonemes = [
+            value
+            for sentence in split_sentences(text)
+            if (value := _tts.tokenizer.phonemize(sentence, "de").strip())
+        ]
+    if not phonemes:
+        raise NoSpeakableText("Input contains no speakable text")
+    return phonemes
+
+
+def sentence_audio(phonemes: str, speed: float) -> np.ndarray:
     if _tts is None:
         raise RuntimeError("Kokoro is not ready")
     # The worker owns this lock: cancelling its caller cannot stop ONNX or
     # release exclusivity while create() is still running.
     with _lock:
-        samples, sample_rate = _tts.create(text=sentence, voice="martin", speed=speed, lang="de")
+        samples, sample_rate = _tts.create(
+            text=phonemes, voice="martin", speed=speed, lang="de", is_phonemes=True
+        )
     if sample_rate != SAMPLE_RATE:
         raise RuntimeError(f"Unexpected sample rate: {sample_rate}")
     return np.asarray(samples, dtype=np.float32)
 
 
 def synthesize(text: str, speed: float) -> bytes:
-    sentences = split_sentences(text)
+    sentences = prepare_speech(text)
     audio: list[np.ndarray] = []
     for index, sentence in enumerate(sentences):
         audio.append(sentence_audio(sentence, speed))
@@ -125,22 +148,64 @@ def synthesize(text: str, speed: float) -> bytes:
     return wav_bytes(np.concatenate(audio))
 
 
-async def stream_pcm(sentences: list[str], speed: float) -> AsyncGenerator[bytes, None]:
-    async with _request_lock:
-        for index, sentence in enumerate(sentences):
-            await anyio.lowlevel.checkpoint()
-            # Do not abandon a running native call on disconnect. The request
-            # lock stays held until it finishes, then cancellation discards it.
-            samples = await anyio.to_thread.run_sync(sentence_audio, sentence, speed)
-            await anyio.lowlevel.checkpoint()
-            yield pcm_bytes(samples)
-            if index < len(sentences) - 1:
-                yield b"\0" * (SAMPLE_RATE // 4 * 2)
+async def stream_pcm(
+    sentences: list[str], speed: float, *, started: float | None = None, preparation_ms: float = 0
+) -> AsyncGenerator[bytes, None]:
+    queued = time.monotonic()
+    started = queued if started is None else started
+    queue_ms = None
+    first_audio_ms = None
+    synthesis_ms = 0.0
+    audio_bytes = 0
+    outcome = "failed"
+    try:
+        async with _request_lock:
+            queue_ms = round((time.monotonic() - queued) * 1000)
+            for index, sentence in enumerate(sentences):
+                await anyio.lowlevel.checkpoint()
+                # Do not abandon a running native call on disconnect. The request
+                # lock stays held until it finishes, then cancellation discards it.
+                synthesis_started = time.monotonic()
+                samples = await anyio.to_thread.run_sync(sentence_audio, sentence, speed)
+                synthesis_ms += (time.monotonic() - synthesis_started) * 1000
+                await anyio.lowlevel.checkpoint()
+                audio = pcm_bytes(samples)
+                if first_audio_ms is None:
+                    first_audio_ms = round((time.monotonic() - started) * 1000)
+                audio_bytes += len(audio)
+                yield audio
+                if index < len(sentences) - 1:
+                    silence = b"\0" * (SAMPLE_RATE // 4 * 2)
+                    audio_bytes += len(silence)
+                    yield silence
+            outcome = "complete"
+    except (GeneratorExit, anyio.get_cancelled_exc_class()):
+        outcome = "interrupted"
+        raise
+    finally:
+        logger.info(
+            "Kokoro PCM outcome=%s preparation_ms=%s queue_ms=%s synthesis_ms=%s "
+            "first_audio_ms=%s elapsed_ms=%s audio_bytes=%s",
+            outcome,
+            round(preparation_ms),
+            queue_ms,
+            round(synthesis_ms),
+            first_audio_ms,
+            round((time.monotonic() - started) * 1000),
+            audio_bytes,
+        )
 
 
 class PCMResponse(StreamingResponse):
-    def __init__(self, sentences: list[str], speed: float) -> None:
-        self.stream = stream_pcm(sentences, speed)
+    def __init__(
+        self,
+        sentences: list[str],
+        speed: float,
+        *,
+        started: float | None = None,
+        preparation_ms: float = 0,
+    ) -> None:
+        self.stream = stream_pcm(sentences, speed, started=started, preparation_ms=preparation_ms)
         super().__init__(self.stream, media_type="audio/pcm")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -198,12 +263,23 @@ async def speech(request: SpeechRequest) -> Response:
     started = time.monotonic()
     try:
         if request.response_format == "pcm":
-            sentences = split_sentences(request.input)
-            return PCMResponse(sentences, request.speed)
+            sentences = await run_in_threadpool(prepare_speech, request.input)
+            return PCMResponse(
+                sentences,
+                request.speed,
+                started=started,
+                preparation_ms=(time.monotonic() - started) * 1000,
+            )
         async with _request_lock:
             audio = await run_in_threadpool(synthesize, request.input, request.speed)
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except NoSpeakableText:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "no_speakable_text", "message": "Input contains no speakable text"},
+        ) from None
+    except (RuntimeError, ValueError):
+        logger.error("Kokoro synthesis failed; payload omitted")
+        raise HTTPException(status_code=500, detail="Speech synthesis failed") from None
     return Response(
         audio,
         media_type="audio/wav",
