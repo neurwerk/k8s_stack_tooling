@@ -729,7 +729,7 @@ wheels = [
 
 [[package]]
 name = "k8s-stack-tooling"
-version = "0.17.0"
+version = "0.18.0"
 source = { directory = "../../" }
 dependencies = [
     { name = "cryptography" },
