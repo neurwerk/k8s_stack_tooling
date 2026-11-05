@@ -143,9 +143,15 @@ def test_old_baseline_is_rejected_at_validation_before_rendering(package, field,
 
 @pytest.mark.parametrize(
     ("required", "installed"),
-    [("0.15.2", "0.15.2"), ("0.15.0", "0.15.3"), ("0.15.9", "0.15.10")],
+    [
+        ("0.15.2", "0.15.2"),
+        ("0.15.0", "0.15.3"),
+        ("0.15.9", "0.15.10"),
+        ("0.15.2", "0.16.0"),
+        ("0.15.2", "1.0.0"),
+    ],
 )
-def test_installable_accepts_same_line_sdk_patches(package, required, installed):
+def test_installable_accepts_sdk_at_or_above_minimum(package, required, installed):
     root, manifest, _, save = package
     manifest["spec"]["prerequisites"]["tooling"] = required
     save()
@@ -158,8 +164,6 @@ def test_installable_accepts_same_line_sdk_patches(package, required, installed)
     [
         "0.15.1",
         "0.14.99",
-        "0.16.0",
-        "1.15.2",
         "0.15.3rc1",
         "0.15.3.dev1",
         "0.15.3+local",
@@ -167,7 +171,7 @@ def test_installable_accepts_same_line_sdk_patches(package, required, installed)
         "00.15.3",
     ],
 )
-def test_installable_rejects_incompatible_sdk_before_rendering(package, installed):
+def test_installable_rejects_older_or_invalid_sdk_before_rendering(package, installed):
     root, manifest, _, save = package
     manifest["spec"]["prerequisites"]["tooling"] = "0.15.2"
     save()
@@ -178,6 +182,21 @@ def test_installable_rejects_incompatible_sdk_before_rendering(package, installe
             side_effect=AssertionError("must reject before rendering"),
         ),
         pytest.raises(ContractError, match="installed SDK version"),
+    ):
+        check(root, installable=True)
+
+
+def test_installable_rejects_older_numeric_sdk_patch_before_rendering(package):
+    root, manifest, _, save = package
+    manifest["spec"]["prerequisites"]["tooling"] = "0.15.10"
+    save()
+    with (
+        patch("k8s_stack_tooling.addons.validation.distribution_version", return_value="0.15.9"),
+        patch(
+            "k8s_stack_tooling.addons.validation.render",
+            side_effect=AssertionError("must reject before rendering"),
+        ),
+        pytest.raises(ContractError, match="minimum prerequisite"),
     ):
         check(root, installable=True)
 
@@ -358,7 +377,7 @@ def test_incompatible_base(package, tmp_path):
     base = tmp_path / "base"
     (base / "release").mkdir(parents=True)
     (base / "release/manifest.yaml").write_text("spec:\n  version: 0.1.0\n")
-    with pytest.raises(ContractError, match="reviewed prerequisite"):
+    with pytest.raises(ContractError, match="minimum prerequisite"):
         check(root, base=base)
 
 
@@ -379,7 +398,9 @@ def test_invalid_base_chart_version_prerequisites(package, versions):
         check(root)
 
 
-@pytest.mark.parametrize("selection", ["tag", "commit", "branch", "unresolved", "missing-base"])
+@pytest.mark.parametrize(
+    "selection", ["tag", "newer-tag", "commit", "branch", "unresolved", "missing-base"]
+)
 def test_chart_versions_check_selected_base_revision_not_candidate_tree(
     package, tmp_path, selection
 ):
@@ -422,7 +443,9 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
     with pytest.raises(ContractError, match="Base chart version"):
         check(root, base=base)
     chart.write_text("version: 0.1.4\n")
+    (base / "release/manifest.yaml").write_text("spec: {version: 0.4.1}\n")
     reviewed = commit(base)
+    git(base, "tag", "v0.4.1")
     addon = check(root, base=base)
     git(root, "init", "-b", "main")
     addon_revision = commit(root)
@@ -432,6 +455,7 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
     save_selection(client)
     ref = {
         "tag": {"tag": "v0.4.0"},
+        "newer-tag": {"tag": "v0.4.1"},
         "commit": {"commit": reviewed},
         "branch": {"branch": "reviewed"},
         "unresolved": {"commit": "a" * 40},
@@ -464,7 +488,7 @@ def test_chart_versions_check_selected_base_revision_not_candidate_tree(
             typed_resources(resources) if path.name == "prod-eu-1" else documents[path.name]
         ),
     ):
-        if selection in ("commit", "branch"):
+        if selection in ("newer-tag", "commit", "branch"):
             check_client([(root, addon)], client, base=base, installable=True)
         else:
             error = {
@@ -539,15 +563,6 @@ def test_client_requires_dependency_and_single_owner(package, tmp_path):
         resources[-1]["spec"]["dependsOn"] = [{"name": "secrets"}]
         with pytest.raises(ContractError, match="complete selection"):
             check_client([(root, addon), (root, addon)], client, base=tmp_path)
-        resources.append(
-            {
-                "kind": "GitRepository",
-                "metadata": {"name": "k8s-stack", "namespace": "flux-system"},
-                "spec": {"ref": {"tag": "v0.1.0"}},
-            }
-        )
-        with pytest.raises(ContractError, match="client Base release"):
-            check_client([(root, addon)], client, base=tmp_path)
 
 
 def authentication():
