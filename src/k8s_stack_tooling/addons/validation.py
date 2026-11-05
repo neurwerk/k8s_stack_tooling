@@ -443,7 +443,7 @@ def check(
 
 
 def check_compatibility(addon: Addon, *, installable: bool) -> None:
-    """Enforce the baseline and same-release-line SDK patch compatibility."""
+    """Enforce the supported baseline and minimum installed SDK version."""
     prerequisites = addon.spec.prerequisites
     for value, floor in (
         (prerequisites.base, (0, 3, 30)),
@@ -465,8 +465,8 @@ def check_compatibility(addon: Addon, *, installable: bool) -> None:
             raise ContractError("invalid installed SDK version") from None
         required_parts = tuple(map(int, prerequisites.tooling.split(".")))
         installed_parts = tuple(map(int, installed.split(".")))
-        if installed_parts[:2] != required_parts[:2] or installed_parts[2] < required_parts[2]:
-            raise ContractError("declared SDK is not compatible with the installed SDK version")
+        if installed_parts < required_parts:
+            raise ContractError("installed SDK version is below the minimum prerequisite")
 
 
 def check_artifacts(addon: Addon, *, installable: bool) -> None:
@@ -969,8 +969,16 @@ def check_base(addon: Addon, base: Path, revision: str | None = None) -> None:
             raise ContractError("invalid Base prerequisite YAML") from None
 
     prerequisites = addon.spec.prerequisites
-    if document("release/manifest.yaml")["spec"]["version"] != prerequisites.base:
-        raise ContractError("Base revision is not the reviewed prerequisite")
+    try:
+        selected_version = TypeAdapter(Version).validate_python(
+            document("release/manifest.yaml")["spec"]["version"]
+        )
+    except (KeyError, TypeError, ValidationError):
+        raise ContractError("selected Base manifest requires a stable release version") from None
+    if tuple(map(int, selected_version.split("."))) < tuple(
+        map(int, prerequisites.base.split("."))
+    ):
+        raise ContractError("Base revision is below the minimum prerequisite")
     for path in prerequisites.base_charts:
         chart = document(f"{path}/Chart.yaml")
         if path in prerequisites.base_chart_versions and (
@@ -1175,12 +1183,6 @@ def check_client(
         platform_ref = (
             sources.get((base_ref.namespace, base_ref.name), {}).get("spec", {}).get("ref", {})
         )
-        if (
-            base_candidate is None
-            and "tag" in platform_ref
-            and platform_ref["tag"] != "v" + addon.spec.prerequisites.base
-        ):
-            raise ContractError("client Base release is not the reviewed prerequisite")
         if base is None:
             raise ContractError("selected Base validation requires --base with --client")
         check_base(

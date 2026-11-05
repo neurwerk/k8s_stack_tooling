@@ -17,7 +17,7 @@ from k8s_stack_tooling.addons import (
 from k8s_stack_tooling.addons.git import run_git
 from k8s_stack_tooling.addons.schema import MAX_DOCUMENT_BYTES, load_selection, parse_yaml
 from k8s_stack_tooling.addons.sources import projection_main, validate_selection_images
-from k8s_stack_tooling.addons.validation import base_revision, confine
+from k8s_stack_tooling.addons.validation import base_revision, check_base, confine
 
 
 def write(path, value):
@@ -263,14 +263,69 @@ def test_candidate_is_explicit_and_projection_cannot_authorize_installable(compo
         verify(staged_projection=selection_projection(candidate))
 
 
-def test_exact_base_checked_without_chart_versions(composition):
+@pytest.mark.parametrize(
+    ("selected", "working", "compatible"),
+    [("2.0.0", "0.9.0", True), ("0.9.0", "2.0.0", False)],
+)
+def test_minimum_base_checks_selected_revision_not_working_tree(
+    composition, selected, working, compatible
+):
     _, _, base, _, _, sources, _, verify = composition
-    write(base / "release/manifest.yaml", {"spec": {"version": "2.0.0"}})
+    write(base / "release/manifest.yaml", {"spec": {"version": selected}})
     revision = repository(base, "base")
     sources[0]["spec"]["ref"]["commit"] = revision
-    write(base / "release/manifest.yaml", {"spec": {"version": "1.0.0"}})
-    with pytest.raises(ContractError, match="reviewed prerequisite"):
-        verify(installable=False)
+    write(base / "release/manifest.yaml", {"spec": {"version": working}})
+    if compatible:
+        assert verify(installable=False).base.revision == revision
+    else:
+        with pytest.raises(ContractError, match="minimum prerequisite"):
+            verify(installable=False)
+
+
+@pytest.mark.parametrize(
+    ("required", "selected", "compatible"),
+    [("0.4.9", "0.4.9", True), ("0.4.9", "0.4.10", True), ("0.4.10", "0.4.9", False)],
+)
+def test_base_minimum_compares_numeric_versions(composition, required, selected, compatible):
+    _, addon, base, manifest, _, _, _, _ = composition
+    manifest["spec"]["prerequisites"]["base"] = required
+    write(addon / "release/manifest.yaml", manifest)
+    write(base / "release/manifest.yaml", {"spec": {"version": selected}})
+    definition = load_manifest(addon / "release/manifest.yaml")
+    if compatible:
+        check_base(definition, base)
+    else:
+        with pytest.raises(ContractError, match="minimum prerequisite"):
+            check_base(definition, base)
+
+
+@pytest.mark.parametrize("version", [None, 1, "1.0", "01.0.0", "1.0.0-rc.1"])
+def test_base_minimum_rejects_invalid_selected_versions(composition, version):
+    _, addon, base, _, _, _, _, _ = composition
+    write(base / "release/manifest.yaml", {"spec": {"version": version}})
+    with pytest.raises(ContractError, match="stable release version"):
+        check_base(load_manifest(addon / "release/manifest.yaml"), base)
+
+
+def test_newer_base_still_requires_exact_chart_interface(composition):
+    _, addon, base, manifest, _, _, _, _ = composition
+    chart = "charts/postgres/addon"
+    manifest["spec"]["prerequisites"].update(baseCharts=[chart], baseChartVersions={chart: "1.0.0"})
+    write(addon / "release/manifest.yaml", manifest)
+    write(base / "release/manifest.yaml", {"spec": {"version": "2.0.0"}})
+    definition = load_manifest(addon / "release/manifest.yaml")
+    write(base / chart / "Chart.yaml", {"version": "1.0.0"})
+    check_base(definition, base)
+    write(base / chart / "Chart.yaml", {"version": "1.0.1"})
+    with pytest.raises(ContractError, match="Base chart version"):
+        check_base(definition, base)
+
+
+def test_base_minimum_rejects_missing_selected_version(composition):
+    _, addon, base, _, _, _, _, _ = composition
+    write(base / "release/manifest.yaml", {"spec": {}})
+    with pytest.raises(ContractError, match="stable release version"):
+        check_base(load_manifest(addon / "release/manifest.yaml"), base)
 
 
 def test_working_base_candidate_is_explicit_and_never_installable(composition):
@@ -278,7 +333,7 @@ def test_working_base_candidate_is_explicit_and_never_installable(composition):
     manifest["spec"]["prerequisites"]["base"] = "2.0.0"
     write(addon / "release/manifest.yaml", manifest)
     write(base / "release/manifest.yaml", {"spec": {"version": "2.0.0"}})
-    with pytest.raises(ContractError, match="reviewed prerequisite"):
+    with pytest.raises(ContractError, match="minimum prerequisite"):
         verify(installable=False)
     candidate = verify(installable=False, base_candidate=base)
     assert candidate.working_base and not candidate.installable

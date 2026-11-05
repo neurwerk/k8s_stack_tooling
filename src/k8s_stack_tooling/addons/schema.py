@@ -52,8 +52,10 @@ class Contract(BaseModel):
 
 
 class Prerequisites(Contract):
-    base: Version
-    tooling: Version
+    base: Version = Field(
+        description="Minimum supported Base release; required chart versions remain exact"
+    )
+    tooling: Version = Field(description="Minimum supported k8s_stack_tooling SDK version")
     stack_setup: Version = Field(alias="stackSetup")
     base_charts: list[str] = Field(default_factory=list, alias="baseCharts", max_length=100)
     base_chart_versions: dict[str, str] = Field(default_factory=dict, alias="baseChartVersions")
