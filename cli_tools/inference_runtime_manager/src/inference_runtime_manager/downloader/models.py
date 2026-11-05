@@ -99,6 +99,8 @@ class ModelVariant(BaseModel):
             "chatterbox",
             "kokoro-onnx",
             "kokoro-onnx-cuda",
+            "nemotron-diarization-cpu",
+            "nemotron-diarization-cuda",
             "kserve",
             "gliner",
         ]

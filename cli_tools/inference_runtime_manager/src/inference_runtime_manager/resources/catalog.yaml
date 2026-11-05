@@ -1,5 +1,39 @@
 schemaVersion: 1
 models:
+  - id: nemotron-3-diarization
+    category: diarization
+    displayName: Nemotron 3 Diarization
+    description: Eight-speaker streaming activity, including overlapping speech, without transcription.
+    source: nvidia/Nemotron-3-Diarization
+    revision: f667ed73aee57d40cc39428eb768b4fd87a0a29e
+    license:
+      name: OpenMDW-1.1
+      url: https://openmdw.ai/license/1-1/
+      commercialUse: true
+      noticeRequired: true
+      notes: Retain the pinned model card and OpenMDW 1.1 license notice with distributed model artifacts.
+    metadata:
+      architecture: Nemotron3DiarizationForAudioFrameClassification
+      parameterCount: 100M
+      languages: [multilingual]
+      intendedUse: streaming-speaker-activity
+    variants:
+      - id: transformers-cpu
+        format: safetensors
+        precision: fp32
+        runtimes: [nemotron-diarization-cpu]
+        estimatedDownloadBytes: 420000000
+        include: [config.json, processor_config.json, model.safetensors, README.md]
+        compatibilityNotes: CPU fp32 requires measured validation before claiming real-time support.
+        runtimeNotes: Uses system RAM; 320 ms input buffering is separate from compute time.
+      - id: transformers-cuda
+        format: safetensors
+        precision: fp32
+        runtimes: [nemotron-diarization-cuda]
+        estimatedDownloadBytes: 420000000
+        include: [config.json, processor_config.json, model.safetensors, README.md]
+        compatibilityNotes: NVIDIA GPU required; fp32 on Turing avoids unsupported bf16.
+        runtimeNotes: Uses GPU VRAM plus system RAM; no CPU fallback.
   - id: silero-vad
     category: vad
     displayName: Silero VAD (ONNX)

@@ -24,6 +24,8 @@ class RuntimeSettingsTests(TestCase):
                     "NER_ENGLISH_DTYPE": "float32",
                     "NER_GERMAN_DTYPE": "float16",
                     "VLLM_GRANITE_GPU_MEMORY_UTILIZATION": "0.25",
+                    "LLM_CONTEXT_TOKENS": "4096",
+                    "LLM_KV_CACHE_TYPE": "f16",
                 },
             ),
         ):
@@ -33,6 +35,8 @@ class RuntimeSettingsTests(TestCase):
                     runtime=RuntimeConfig(
                         ner_english_dtype="float16",
                         vllm_granite_gpu_memory_utilization=0.18,
+                        llm_context_tokens=8192,
+                        llm_kv_cache_type="q8_0",
                     ),
                 )
             )
@@ -40,6 +44,8 @@ class RuntimeSettingsTests(TestCase):
             self.assertEqual(docker.environment["NER_ENGLISH_DTYPE"], "float16")
             self.assertEqual(docker.environment["NER_GERMAN_DTYPE"], "float16")
             self.assertEqual(docker.environment["VLLM_GRANITE_GPU_MEMORY_UTILIZATION"], "0.18")
+            self.assertEqual(docker.settings.llm_context_tokens, 8192)
+            self.assertEqual(docker.settings.llm_kv_cache_type, "q8_0")
             with patch("subprocess.run") as run:
                 run.return_value.stdout = '["--dtype=float32"]'
                 self.assertFalse(docker.runtime_settings_match("ner-english"))

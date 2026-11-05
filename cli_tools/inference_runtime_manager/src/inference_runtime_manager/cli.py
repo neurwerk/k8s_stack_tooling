@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from inference_runtime_manager.configuration import management_state
 from inference_runtime_manager.downloader.config import Settings
-from inference_runtime_manager.downloader.errors import StorageUnavailableError
 from inference_runtime_manager.downloader.main import main as downloads
 from inference_runtime_manager.installer.api_tests import manual_menu as manual_tests
 from inference_runtime_manager.installer.api_tests import menu as api_tests
@@ -106,6 +105,8 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
 
 
 def menu() -> None:
+    from inference_runtime_manager import workflow
+
     while True:
         choices = [
             questionary.Separator("── Guided Setup ──"),
@@ -113,15 +114,20 @@ def menu() -> None:
             questionary.Separator(" "),
             questionary.Choice("2. Test endpoints manually", value="manual-tests"),
             questionary.Choice("3. Live deployment status", value="live"),
-            questionary.Choice("4. Configuration", value="configuration"),
             questionary.Separator(" "),
-            questionary.Choice("Advanced operations", value="advanced"),
+            questionary.Choice("5. Advanced operations", value="advanced"),
+            questionary.Choice("6. Setup", value="setup"),
             *(
                 [questionary.Choice("Record and provision default TTS voice", value="voice")]
                 if voice_cloning_available()
                 else []
             ),
             questionary.Separator(" "),
+            *(
+                [questionary.Choice([("fg:ansigreen", "Apply saved changes")], value="apply")]
+                if workflow.pending_changes()
+                else []
+            ),
             questionary.Choice("Exit", value="exit"),
         ]
         action = questionary.select("Inference Runtime Manager", choices=choices).ask()
@@ -138,40 +144,54 @@ def menu() -> None:
                 workflow.configuration_menu()
             elif action == "advanced":
                 advanced_menu()
+            elif action == "setup":
+                from inference_runtime_manager import workflow
+
+                workflow.configuration_menu()
             else:
                 execute(action)
-        except (OSError, ValueError, StorageUnavailableError, subprocess.CalledProcessError) as exc:
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
             # Pydantic validation can include input values. Never print it here.
             print(
-                "Invalid or incomplete settings; use Configuration."
+                "Invalid or incomplete settings; use Setup."
                 if isinstance(exc, ValidationError)
                 else f"Failed: {exc}"
             )
 
 
 def advanced_menu() -> None:
-    choices = [
-        questionary.Choice("Browse catalog / edit download queue", value="select"),
-        questionary.Choice("Download queued models", value="download"),
-        questionary.Choice("Upload downloaded models only", value="stage"),
-        questionary.Choice("Assign an uploaded model", value="assign"),
-        questionary.Choice("Enable / disable a service", value="toggle"),
-        questionary.Choice("Review / apply assignments", value="apply"),
-        questionary.Choice("Prepare or update runtime images", value="runtimes"),
-        questionary.Choice("Deployment table (offline)", value="plan"),
-        questionary.Choice("Verify remote model files (full SHA-256)", value="remote"),
-        questionary.Choice("Download queue", value="queue"),
-        questionary.Choice("Downloaded inventory", value="inventory"),
-        questionary.Choice("Hugging Face login", value="login"),
-        questionary.Choice("Storage status", value="storage"),
-        questionary.Choice("Server status", value="status"),
-        questionary.Choice("Back", value="back"),
-    ]
     while True:
-        action = questionary.select("Advanced operations", choices=choices).ask()
+        action = questionary.select(
+            "Advanced operations",
+            choices=[
+                questionary.Choice("Manage downloads", value="manage-downloads"),
+                questionary.Choice("Downloaded inventory", value="inventory"),
+                questionary.Choice("Enable / disable a service", value="toggle"),
+                questionary.Choice("Prepare or update runtime images", value="runtimes"),
+                questionary.Choice("Verify remote model files (full SHA-256)", value="remote"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
         if action in (None, "back"):
             return
-        execute(action)
+        if action != "manage-downloads":
+            execute(action)
+            continue
+        while True:
+            action = questionary.select(
+                "Manage downloads",
+                choices=[
+                    questionary.Choice("View download queue", value="queue"),
+                    questionary.Choice("Edit download queue", value="select"),
+                    questionary.Choice("Download queued models", value="download"),
+                    questionary.Choice("Back", value="back"),
+                ],
+            ).ask()
+            if action is None:
+                return
+            if action == "back":
+                break
+            execute(action)
 
 
 def main() -> None:
@@ -225,9 +245,9 @@ def main() -> None:
             menu()
     except KeyboardInterrupt:
         raise SystemExit(130) from None
-    except (OSError, ValueError, StorageUnavailableError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(
-            "Invalid or incomplete settings; use Configuration."
+            "Invalid or incomplete settings; use Setup."
             if isinstance(exc, ValidationError)
             else f"Failed: {exc}"
         )

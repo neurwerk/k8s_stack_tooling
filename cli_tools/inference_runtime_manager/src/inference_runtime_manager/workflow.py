@@ -60,6 +60,13 @@ from inference_runtime_manager.installer.images import (
     local_images_ready,
     prepare_local_images,
 )
+from inference_runtime_manager.installer.pending import (
+    mark_unconfirmed,
+    pending_aliases,
+    record_applied,
+    remember_before_edit,
+    snapshots,
+)
 from inference_runtime_manager.installer.upload import (
     prepare_artifact,
     prepare_recipe,
@@ -88,6 +95,13 @@ def state() -> Path:
     return management_state(settings.storage_root)
 
 
+SERVICE_CATEGORIES = {
+    "Text": ("llm",),
+    "PII": ("ner", "ner-english", "ner-multilingual"),
+    "Audio": ("asr", "tts", "vad", "diarization"),
+    "Images & documents": ("vlm", "image-ocr", "document-parsing", "image-generation"),
+}
+
 CATEGORY_GUIDES = {
     "image-ocr": (
         "Image OCR",
@@ -105,6 +119,11 @@ CATEGORY_GUIDES = {
         "Voice activity detection",
         "Finds the parts of an audio recording that contain speech.",
         "vad-general",
+    ),
+    "diarization": (
+        "Speaker diarization",
+        "Reports who spoke when, including overlapping speakers.",
+        "diarization-general",
     ),
     "llm": (
         "Language models",
@@ -304,6 +323,7 @@ def show_current_category_status(
 
     target_service = "Target unavailable"
     active_model = "Unknown"
+    llm_command = None
     manual_test_ready = False
     try:
         docker = Docker(docker_settings)
@@ -317,6 +337,8 @@ def show_current_category_status(
             active_model = "Ambiguous"
         elif running:
             running_preset = running[0]
+            if alias == "llm-general":
+                llm_command = docker.service_command(running_preset["service"])
             _, health, _ = states[running_preset["service"]]
             running_runtime = RUNTIME_NAMES.get(
                 runtime_family(running_preset["runtime"]), running_preset["runtime"]
@@ -362,7 +384,18 @@ def show_current_category_status(
             ["Workstation runtime image", runtime_image],
             [f"Target ({docker_settings.docker_context})", target_service],
             ["Active target model", active_model],
-        ],
+        ]
+        + (
+            llm_settings_rows(
+                docker_settings,
+                preset["model_id"]
+                if preset
+                else deployment_services(state_root)[alias]["model_id"],
+                llm_command,
+            )
+            if alias == "llm-general"
+            else []
+        ),
     )
     return manual_test_ready
 
@@ -375,25 +408,45 @@ def guided_models() -> None:
     catalog = load_catalog()
     available_groups = {model.browse_group for model in catalog.models}
     deployable_aliases = set(service_recipes())
-    group = questionary.select(
-        "Which service alias would you like to configure?",
-        choices=[
-            questionary.Choice(
-                f"{CATEGORY_GUIDES[key][2]} — {CATEGORY_GUIDES[key][0]}",
-                value=key,
-                description=CATEGORY_GUIDES[key][1],
-                disabled=(
-                    None
-                    if CATEGORY_GUIDES[key][2] in deployable_aliases
-                    else "No deployable runtime is configured"
-                ),
-            )
-            for key in CATEGORY_GUIDES
-            if key in available_groups or (key.startswith("ner-") and "ner" in available_groups)
-        ],
-    ).ask()
-    if group is None:
-        return
+    available_tasks = {
+        key
+        for key in CATEGORY_GUIDES
+        if key in available_groups or (key.startswith("ner-") and "ner" in available_groups)
+    }
+    while True:
+        category = questionary.select(
+            "Which category would you like to configure?",
+            choices=[
+                questionary.Choice(label, value=label)
+                for label, tasks in SERVICE_CATEGORIES.items()
+                if available_tasks.intersection(tasks)
+            ]
+            + [questionary.Choice("Back", value="back")],
+        ).ask()
+        if category in (None, "back"):
+            return
+        group = questionary.select(
+            f"{category} — which task would you like to configure?",
+            choices=[
+                questionary.Choice(
+                    f"{CATEGORY_GUIDES[key][0]} — {CATEGORY_GUIDES[key][2]}",
+                    value=key,
+                    description=CATEGORY_GUIDES[key][1],
+                    disabled=(
+                        None
+                        if CATEGORY_GUIDES[key][2] in deployable_aliases
+                        else "No deployable runtime is configured"
+                    ),
+                )
+                for key in SERVICE_CATEGORIES[category]
+                if key in available_tasks
+            ]
+            + [questionary.Choice("Back", value="back")],
+        ).ask()
+        if group is None:
+            return
+        if group != "back":
+            break
     title, description, alias = CATEGORY_GUIDES[group]
     print(f"\n{title}: {description}")
     if alias not in deployable_aliases:
@@ -414,6 +467,11 @@ def guided_models() -> None:
         "What would you like to do?",
         choices=[
             questionary.Choice("Change model or runtime", value="change"),
+            *(
+                [questionary.Choice("Context tokens and KV cache", value="llm-settings")]
+                if alias == "llm-general"
+                else []
+            ),
             questionary.Choice(
                 "Run manual endpoint test",
                 value="test",
@@ -422,6 +480,9 @@ def guided_models() -> None:
             questionary.Choice("Back", value="back"),
         ],
     ).ask()
+    if action == "llm-settings":
+        llm_configuration()
+        return
     if action == "test":
         from inference_runtime_manager.installer.api_tests import test_individual
 
@@ -434,6 +495,8 @@ def guided_models() -> None:
     if preset is None:
         return
     model = catalog.model(preset["model_id"])
+    if alias == "llm-general":
+        docker_settings.validate_llm_context(model.id)
     variant = model.variant(preset["variant_id"])
     selection = Selection(modelId=model.id, variantId=variant.id)
     storage_ready = configured_storage(settings)
@@ -512,6 +575,7 @@ def guided_models() -> None:
     )
     try:
         prepare_recipe(settings.storage_root, alias, preset)
+        remember_before_edit(state_root, docker_settings, [alias])
         save_deployment(state_root, deployment)
         docker.install(settings, runtime_images)
         provision(docker, settings.storage_root, state_root, [alias])
@@ -561,6 +625,9 @@ def runtime_updates() -> None:
         if choice.enabled
         and runtime_family(recipe(alias, choice.model_id, choice.variant_id)["runtime"]) == family
     ]
+    for alias, preset in affected:
+        if alias == "llm-general":
+            docker_settings.validate_llm_context(preset["model_id"])
     if not questionary.confirm(
         f"Stream these images to offline target {docker_settings.docker_context}?", default=False
     ).ask():
@@ -599,6 +666,7 @@ def runtime_updates() -> None:
         )
     updated = []
     current = None
+    desired = snapshots(state_root, docker_settings)
     try:
         for current in recreate:
             alias, preset, _, _ = current
@@ -626,6 +694,7 @@ def runtime_updates() -> None:
                     f"{repository}:rollback-{previous_image.removeprefix('sha256:')[:16]}"
                 )
                 docker.tag_image(previous_image, rollback_tag)
+                mark_unconfirmed(state_root, docker_settings.docker_context, alias)
                 docker.run_with_image(
                     preset["runtime"],
                     rollback_tag,
@@ -640,12 +709,19 @@ def runtime_updates() -> None:
                     "300",
                     preset["service"],
                 )
+                # Image rollback uses this operation's unchanged runtime options.
+                record_applied(state_root, docker_settings.docker_context, {alias: desired[alias]})
                 print(f"{alias}: previous runtime restored.")
         except (OSError, subprocess.SubprocessError, ValueError) as rollback_exc:
             raise RuntimeError("Runtime update and rollback failed") from rollback_exc
         if isinstance(exc, KeyboardInterrupt):
             raise
         raise RuntimeError("Runtime update failed; previous services restored") from exc
+    record_applied(
+        state_root,
+        docker_settings.docker_context,
+        {alias: desired[alias] for alias, _, _, _ in updated},
+    )
 
 
 def configuration_menu() -> None:
@@ -670,7 +746,7 @@ def configuration_menu() -> None:
             deployment.docker_context if deployment is not None else None
         )
         table(
-            "Configuration",
+            "Setup",
             ["Setting", "Value"],
             [
                 ["Target Docker context", target_context or "Not configured"],
@@ -681,17 +757,24 @@ def configuration_menu() -> None:
             ],
         )
         action = questionary.select(
-            "Configuration",
+            "Setup",
             choices=[
                 questionary.Choice("Select model staging storage", value="storage"),
+                questionary.Choice("Storage status", value="storage-status"),
                 questionary.Choice("Set target Docker context", value="target"),
                 questionary.Choice("Set workstation Docker context", value="build"),
-                questionary.Choice("NER precision / Docling GPU memory", value="runtime"),
+                questionary.Choice("Runtime options", value="runtime"),
+                questionary.Choice("Hugging Face login", value="login"),
                 questionary.Choice("Back", value="back"),
             ],
         ).ask()
         if action in (None, "back"):
             return
+        if action in {"login", "storage-status"}:
+            from inference_runtime_manager.downloader.main import main as downloads
+
+            downloads("authentication" if action == "login" else "storage_status")
+            continue
         if action == "runtime":
             runtime_configuration()
             continue
@@ -727,6 +810,141 @@ def configuration_menu() -> None:
         print("Configuration saved.")
 
 
+def llm_settings_rows(
+    settings: DeploymentSettings, model_id: str, command: list[str] | None
+) -> list[list[str]]:
+    model = load_catalog().model(model_id)
+
+    def running_value(flag: str, default: str) -> str:
+        if command is None:
+            return "Not running / unavailable"
+        try:
+            return command[command.index(flag) + 1] if flag in command else default
+        except IndexError:
+            return "Unknown"
+
+    return [
+        ["Configured context tokens", str(settings.llm_context_tokens)],
+        ["Running context tokens (launch setting)", running_value("--ctx-size", "Model default")],
+        [
+            f"Model context limit ({model.display_name}; catalog)",
+            str(model.metadata.context_length or "Unknown"),
+        ],
+        ["Configured KV cache (K and V)", settings.llm_kv_cache_type],
+        ["Running K cache", running_value("--cache-type-k", "f16")],
+        ["Running V cache", running_value("--cache-type-v", "f16")],
+    ]
+
+
+def llm_configuration() -> None:
+    configured = load_workstation_config()
+    settings = DeploymentSettings()
+    root = workstation_state_root()
+    previous = snapshots(root, settings)
+    deployment = load_deployment(root, settings.docker_context)
+    preset = deployment_services(root)["llm-general"]
+    model = load_catalog().model(preset["model_id"])
+    command = None
+    docker = Docker(settings)
+    try:
+        if docker.service_status().get(preset["service"], ("", "", ""))[0] == "running":
+            command = docker.service_command(preset["service"])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    table(
+        "LLM context and cache",
+        ["Setting", "Value"],
+        llm_settings_rows(settings, model.id, command),
+    )
+    print("Context tokens cover the prompt, conversation history and generated reply together.")
+    print("The catalog limit describes the model; usable context also depends on available memory.")
+    action = questionary.select(
+        "LLM runtime option",
+        choices=[
+            questionary.Choice("Context size (tokens)", value="context"),
+            questionary.Choice("KV-cache precision (K and V)", value="cache"),
+            questionary.Choice("Back", value="back"),
+        ],
+    ).ask()
+    if action in (None, "back"):
+        return
+    if action == "context":
+        limit = model.metadata.context_length
+        if limit is None:
+            print("This model has no reviewed context limit in the catalog.")
+            return
+        value = questionary.text(
+            f"Context tokens (256–{limit}):",
+            default=str(settings.llm_context_tokens),
+            validate=lambda text: (
+                True
+                if text.isascii() and text.isdigit() and 256 <= int(text) <= limit
+                else f"Enter a whole number between 256 and {limit}."
+            ),
+        ).ask()
+        if value is None:
+            return
+        configured.runtime.llm_context_tokens = int(value)
+    else:
+        cache = questionary.select(
+            "KV-cache precision",
+            choices=[
+                questionary.Choice(
+                    "F16 — unquantized 16-bit cache; most memory (default)", value="f16"
+                ),
+                questionary.Choice(
+                    "Q8_0 — about half the cache memory; small quality tradeoff", value="q8_0"
+                ),
+                questionary.Choice("Q4_0 — about a quarter; larger quality tradeoff", value="q4_0"),
+            ],
+            default=settings.llm_kv_cache_type,
+        ).ask()
+        if cache is None:
+            return
+        configured.runtime.llm_kv_cache_type = cache
+    validated = WorkstationConfig.model_validate(configured.model_dump())
+    effective = settings.model_copy(update=validated.runtime.model_dump(exclude_none=True))
+    effective.validate_llm_context(model.id)
+    remember_before_edit(root, settings, ["llm-general"])
+    save_workstation_config(validated)
+    print("LLM settings saved. Quantized K/V caches enable llama.cpp Flash Attention.")
+    choice = deployment.assignments.get("llm-general")
+    if choice is not None and choice.enabled and "llm-general" in pending_changes():
+        if questionary.confirm(
+            "Apply LLM settings now? This restarts llm-general and interrupts its requests.",
+            default=False,
+        ).ask():
+            try:
+                provision(
+                    Docker(DeploymentSettings()), Settings().storage_root, root, ["llm-general"]
+                )
+            except BaseException:
+                if command is not None:
+                    mark_unconfirmed(root, settings.docker_context, "llm-general")
+                    docker.run(
+                        "up",
+                        "--pull",
+                        "never",
+                        "-d",
+                        "--no-deps",
+                        "--force-recreate",
+                        "--wait",
+                        "--wait-timeout",
+                        "300",
+                        preset["service"],
+                    )
+                    record_applied(
+                        root, settings.docker_context, {"llm-general": previous["llm-general"]}
+                    )
+                raise
+        else:
+            print("Choose Apply saved changes at the bottom of the main menu when ready.")
+    elif choice is None or not choice.enabled:
+        print(
+            "These settings will apply when you activate the LLM through Choose and configure a model."
+        )
+
+
 def runtime_configuration() -> None:
     configured = load_workstation_config()
     settings = DeploymentSettings()
@@ -747,10 +965,14 @@ def runtime_configuration() -> None:
     print("The GPU fraction is a vLLM allocation target, not a hard memory limit.")
     name = questionary.select(
         "Change a runtime setting",
-        choices=[questionary.Choice(label, value=name) for name, (label, _) in options.items()]
+        choices=[questionary.Choice("LLM context tokens and KV cache", value="llm")]
+        + [questionary.Choice(label, value=name) for name, (label, _) in options.items()]
         + [questionary.Choice("Back", value="back")],
     ).ask()
     if name in (None, "back"):
+        return
+    if name == "llm":
+        llm_configuration()
         return
     if name.endswith("dtype"):
         value = questionary.select(
@@ -780,17 +1002,15 @@ def runtime_configuration() -> None:
         ).ask()
     if value is None:
         return
-    previous = configured.model_copy(deep=True)
+    root = state()
+    previous = snapshots(root, settings)
     draft = configured.runtime.model_dump()
     draft[name] = value
     configured.runtime = RuntimeConfig.model_validate(draft)
+    remember_before_edit(root, settings)
     save_workstation_config(configured)
     print("Runtime setting saved. Only services using this setting need a restart.")
     alias = options[name][1]
-    if not questionary.confirm(f"Apply {alias} now (brief downtime)?", default=False).ask():
-        print("Choose Review / apply assignments later to apply the saved setting.")
-        return
-    root = state()
     assignments = load_deployment(root, settings.docker_context).assignments
     targets = (
         [alias]
@@ -801,18 +1021,22 @@ def runtime_configuration() -> None:
             if assignment.runtime == "gliner" and assignment.enabled
         ]
     )
-    targets = [name for name in targets if name in assignments and assignments[name].enabled]
+    pending = pending_changes()
+    targets = [name for name in targets if name in pending and assignments[name].enabled]
     if not targets:
-        print("Service is not enabled; the saved setting will be used when activated.")
+        print("No enabled service needs this change; saved settings apply on activation.")
+        return
+    if not questionary.confirm(f"Apply {alias} now (brief downtime)?", default=False).ask():
+        print("Choose Apply saved changes at the bottom of the main menu when ready.")
         return
     model_root = storage()
     try:
         provision(Docker(DeploymentSettings()), model_root, root, targets)
     except BaseException:
-        save_workstation_config(previous)
         for target in targets:
             assignment = assignments[target]
             preset = recipe(target, assignment.model_id, assignment.variant_id)
+            mark_unconfirmed(root, settings.docker_context, target)
             Docker(settings).run(
                 "up",
                 "--pull",
@@ -825,7 +1049,8 @@ def runtime_configuration() -> None:
                 "300",
                 preset["service"],
             )
-        print("Previous runtime setting restored.")
+            record_applied(root, settings.docker_context, {target: previous[target]})
+        print("Previous runtime restored; saved changes remain pending.")
         raise
 
 
@@ -944,7 +1169,7 @@ def select_models() -> None:
         return
     _confirm_gated(catalog, draft.selected)
     write_queue(queue_path, draft)
-    print(f"Saved {len(draft.selected)} variants. Choose Download selected models next.")
+    print(f"Saved {len(draft.selected)} variants. Choose Download queued models next.")
 
 
 def upload_models() -> None:
@@ -1019,6 +1244,7 @@ def assign_models() -> None:
         enabled=enabled,
         runtime=runtime,
     )
+    remember_before_edit(state_root, DeploymentSettings(), [alias])
     save_deployment(state_root, deployment)
     print(f"Saved {alias} locally for {target}.")
     if questionary.confirm(f"Apply {alias} to {target} now?", default=False).ask():
@@ -1026,7 +1252,7 @@ def assign_models() -> None:
 
         provision(Docker(DeploymentSettings()), root, state_root, [alias])
     else:
-        print("Choose Review / apply assignments when ready to update the server.")
+        print("Choose Apply saved changes at the bottom of the main menu when ready.")
 
 
 def deployment_status(remote: bool = False, verify_remote: bool = False) -> None:
@@ -1171,6 +1397,7 @@ def toggle_service() -> None:
     if enabled is None or enabled == choice.enabled:
         return
     choice.enabled = enabled
+    remember_before_edit(state_root, settings, [alias])
     save_deployment(state_root, deployment)
     if questionary.confirm("Apply this service state now?", default=False).ask():
         from inference_runtime_manager.installer.upload import provision
@@ -1198,20 +1425,25 @@ def warn_vram(state_root: Path) -> None:
         )
 
 
+def pending_changes() -> list[str]:
+    """Read local change tracking only; an unavailable target is not a change."""
+    try:
+        return pending_aliases(workstation_state_root(), DeploymentSettings())
+    except (OSError, ValueError):
+        return []
+
+
 def apply_assignments() -> None:
-    root = storage()
     state_root = state()
-    deployment = load_deployment(state_root, DeploymentSettings().docker_context)
-    if not deployment.assignments:
-        print(
-            "Assign uploaded models first. Bundled defaults are suggestions, not saved assignments."
-        )
+    settings = DeploymentSettings()
+    pending = pending_aliases(state_root, settings)
+    if not pending:
+        print("No saved deployment changes to apply.")
         return
-    deployment_status(remote=True)
+    print(f"Changed services: {', '.join(pending)}")
     if questionary.confirm(
-        "Apply saved assignments and recreate affected services?", default=False
+        "Apply saved changes to these services (brief downtime)?", default=False
     ).ask():
         from inference_runtime_manager.installer.upload import provision
 
-        provision(Docker(DeploymentSettings()), root, state_root, list(deployment.assignments))
-        save_deployment(state_root, deployment)
+        provision(Docker(settings), Settings().storage_root, state_root, pending)

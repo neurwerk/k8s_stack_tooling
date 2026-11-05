@@ -227,6 +227,8 @@ def provision(
     aliases: list[str],
     dry_run: bool = False,
 ) -> None:
+    from inference_runtime_manager.installer.pending import record_applied, snapshots
+
     if docker is not None:
         load_deployment(state_root, docker.settings.docker_context)
     configured = deployment_services(state_root)
@@ -234,6 +236,9 @@ def provision(
         raise ValueError("Unknown inference service")
     enabled = [alias for alias in aliases if configured[alias]["enabled"]]
     disabled = [alias for alias in aliases if not configured[alias]["enabled"]]
+    if docker is not None and "llm-general" in enabled:
+        docker.settings.validate_llm_context(configured["llm-general"]["model_id"])
+    desired = snapshots(state_root, docker.settings) if docker is not None and not dry_run else {}
     states = docker.service_status() if docker is not None and not dry_run else {}
     unchanged = []
     changed = []
@@ -287,6 +292,15 @@ def provision(
         return
     if docker is None:
         raise ValueError("A Docker target is required for publication")
+    record_applied(
+        state_root,
+        docker.settings.docker_context,
+        {
+            alias: desired[alias]
+            for alias in aliases
+            if alias in desired and alias not in changed and alias not in disabled
+        },
+    )
     for source, manifest, application in prepared:
         print(f"{application['alias']}: checking remote bundle...", flush=True)
         started = time.monotonic()
@@ -294,7 +308,12 @@ def provision(
         print(f"Remote bundle check/upload: {time.monotonic() - started:.1f}s")
     for _, _, application in prepared:
         activate_with_rollback(docker, application, states)
+        alias = application["alias"]
+        if alias in desired:
+            record_applied(state_root, docker.settings.docker_context, {alias: desired[alias]})
     for alias in disabled:
         docker.run("stop", *compose_services(alias))
+        if alias in desired:
+            record_applied(state_root, docker.settings.docker_context, {alias: desired[alias]})
     if not prepared and not disabled:
         print("Remote deployment already matches the saved assignments.")

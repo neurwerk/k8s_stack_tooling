@@ -127,6 +127,8 @@ jobs:
           CHATTERBOX_IMAGE: chatterbox
           KOKORO_IMAGE: kokoro
           KOKORO_CUDA_IMAGE: kokoro-cuda
+          NEMOTRON_DIARIZATION_CPU_IMAGE: nemotron-diarization-cpu
+          NEMOTRON_DIARIZATION_CUDA_IMAGE: nemotron-diarization-cuda
           KSERVE_IMAGE: kserve
           GLINER_IMAGE: gliner
         run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
@@ -159,9 +161,25 @@ jobs:
       - run: uv sync --frozen
       - run: uv run --frozen python -m unittest discover -s tests
 
+  nemotron_adapter:
+    name: Nemotron diarization protocol (Python 3.11, CPU)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli_tools/inference_runtime_manager/src/inference_runtime_manager/resources/nemotron_diarization/cpu
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - run: echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/nemotron-adapter-venv" >> "$GITHUB_ENV"
+      - run: uv python install 3.11
+      - run: uv lock --check
+      - run: uv lock --project ../cuda --check
+      - run: uv sync --frozen
+      - run: PYTHONPATH=.. uv run --frozen python -m unittest discover -s ../tests
+
   required_ci:
     name: Required CI
-    needs: [quality, kokoro_adapter]
+    needs: [quality, kokoro_adapter, nemotron_adapter]
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     steps:
@@ -169,9 +187,10 @@ jobs:
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
           KOKORO_RESULT: ${{ needs.kokoro_adapter.result }}
+          NEMOTRON_RESULT: ${{ needs.nemotron_adapter.result }}
         run: |
-          if [[ "$QUALITY_RESULT" != "success" || "$KOKORO_RESULT" != "success" ]]; then
-            printf 'CLI quality result: %s; Kokoro adapter result: %s; expected success.\n' \
-              "$QUALITY_RESULT" "$KOKORO_RESULT" >&2
+          if [[ "$QUALITY_RESULT" != "success" || "$KOKORO_RESULT" != "success" || "$NEMOTRON_RESULT" != "success" ]]; then
+            printf 'CLI quality result: %s; Kokoro adapter result: %s; Nemotron adapter result: %s; expected success.\n' \
+              "$QUALITY_RESULT" "$KOKORO_RESULT" "$NEMOTRON_RESULT" >&2
             exit 1
           fi

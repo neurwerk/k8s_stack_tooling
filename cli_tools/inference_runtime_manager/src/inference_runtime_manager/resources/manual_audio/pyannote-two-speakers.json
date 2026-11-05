@@ -1,0 +1,14 @@
+{
+  "source": "https://raw.githubusercontent.com/pyannote/pyannote-audio/cc679dc7d661f130369f99e5771dc79883d4fd79/src/pyannote/audio/sample/sample.wav",
+  "reference": "https://raw.githubusercontent.com/pyannote/pyannote-audio/cc679dc7d661f130369f99e5771dc79883d4fd79/src/pyannote/audio/sample/sample.rttm",
+  "license_source": "https://raw.githubusercontent.com/pyannote/pyannote-audio/cc679dc7d661f130369f99e5771dc79883d4fd79/LICENSE",
+  "license": "MIT",
+  "sha256": "c319b4abca767b124e41432d364fd7df006cb26bb79d09326c487d606a134e6e",
+  "duration_seconds": 30,
+  "sample_rate_hz": 16000,
+  "channels": 1,
+  "encoding": "pcm_s16le",
+  "expected_speakers": 2,
+  "contains_overlap": true,
+  "synthetic": false
+}

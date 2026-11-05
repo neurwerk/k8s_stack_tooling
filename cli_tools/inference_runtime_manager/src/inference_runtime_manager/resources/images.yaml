@@ -21,6 +21,12 @@ kokoro:
 kokoro-cuda:
   build: kokoro_onnx
   dockerfile: cuda.Dockerfile
+nemotron-diarization-cpu:
+  build: nemotron_diarization
+  dockerfile: cpu.Dockerfile
+nemotron-diarization-cuda:
+  build: nemotron_diarization
+  dockerfile: cuda.Dockerfile
 # kserve/huggingfaceserver:v0.16.0-gpu, verified Linux/AMD64 manifest (CUDA 12.8).
 kserve: kserve/huggingfaceserver@sha256:c84aefd18daf9055aa649fba519751c22818834bf0783ebf5e5032613848914f
 gliner:

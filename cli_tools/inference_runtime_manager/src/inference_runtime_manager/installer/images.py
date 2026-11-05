@@ -116,6 +116,8 @@ RUNTIME_IMAGES = {
     "chatterbox": "chatterbox",
     "kokoro-onnx": "kokoro",
     "kokoro-onnx-cuda": "kokoro-cuda",
+    "nemotron-diarization-cpu": "nemotron-diarization-cpu",
+    "nemotron-diarization-cuda": "nemotron-diarization-cuda",
     "kserve": "kserve",
     "gliner": "gliner",
 }
