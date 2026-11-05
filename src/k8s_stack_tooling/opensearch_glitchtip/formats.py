@@ -53,6 +53,8 @@ _NOISE_IDENTITIES = {
     "jwt.sub",
     "neurwerk.app_id",
     "neurwerk.binding_id",
+    "neurwerk.credential_id",
+    "neurwerk.credential_kind",
     "neurwerk.matched_route",
     "neurwerk.policy_revision",
     "neurwerk.request_id",
@@ -128,6 +130,13 @@ def stateless_get_noise(fields: dict[str, str]) -> bool:
     namespace = fields["gateway"].split("/")[0]
     return (
         fields.keys() <= _CORE | _NOISE_IDENTITIES | _NOISE_METADATA.keys()
+        and (
+            fields.keys().isdisjoint({"neurwerk.credential_id", "neurwerk.credential_kind"})
+            or (
+                bool(fields.get("neurwerk.credential_id"))
+                and fields.get("neurwerk.credential_kind") in {"personal", "managed"}
+            )
+        )
         and fields["http.method"] == "GET"
         and fields["http.status"] == "405"
         and fields["protocol"] == "mcp"

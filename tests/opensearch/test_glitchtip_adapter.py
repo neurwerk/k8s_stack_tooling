@@ -1842,6 +1842,55 @@ def test_reviewed_gateway_opt_in_persistence_and_preview(settings: Settings) -> 
     assert result["exclusions"][0]["reason"] == "log_only"
 
 
+@pytest.mark.parametrize("kind", ["personal", "managed"])
+def test_reviewed_gateway_credential_identity_noise(kind: str) -> None:
+    credentials = {"neurwerk.credential_id": "key-example", "neurwerk.credential_kind": kind}
+    policy = gateway_policy()
+    assert (
+        policy.evaluate("test", SCOPE, record("noise", gateway_noise(**credentials))).action
+        == "log_only"
+    )
+    for changes in ({"http.method": "POST"}, {"future.error": "upstream unavailable"}):
+        assert (
+            policy.evaluate(
+                "test", SCOPE, record("failure", gateway_noise(**{**credentials, **changes}))
+            ).action
+            == "report"
+        )
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"neurwerk.credential_id": "key-example"},
+        {"neurwerk.credential_kind": "personal"},
+        {"neurwerk.credential_id": "key-example", "neurwerk.credential_kind": "unknown"},
+    ],
+)
+def test_reviewed_gateway_unrecognized_credentials_report(credentials: dict[str, str]) -> None:
+    assert (
+        gateway_policy()
+        .evaluate("test", SCOPE, record("sample", gateway_noise(**credentials)))
+        .action
+        == "report"
+    )
+
+
+def test_reviewed_gateway_authorization_preserves_credentials() -> None:
+    policy = gateway_policy()
+    credentials = {"neurwerk.credential_id": "key-example", "neurwerk.credential_kind": "personal"}
+    first = record("first", gateway_message(**credentials))
+    original = identity_parts("test", SCOPE, first, policy.evaluate("test", SCOPE, first))
+    for changes in (
+        {"neurwerk.credential_id": "other-key"},
+        {"neurwerk.credential_kind": "managed"},
+    ):
+        other = record("other", gateway_message(**{**credentials, **changes}))
+        decision = policy.evaluate("test", SCOPE, other)
+        assert decision.action == "report"
+        assert identity_parts("test", SCOPE, other, decision) != original
+
+
 def test_brain_unavailable_still_polls_commits_and_delivers(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
