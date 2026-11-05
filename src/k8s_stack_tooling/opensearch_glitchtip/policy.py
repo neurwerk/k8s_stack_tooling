@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .display import display_message
+from .formats import gateway_identity, gateway_mcp, stateless_get_noise
 from .grouping import grouping_parts
 from .settings import Scope
 
@@ -80,6 +81,7 @@ class Rule(BaseModel):
 
     id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
     enabled: bool = True
+    source_format: Literal["json", "agentgateway-mcp-v1"] = "json"
     priority: int = Field(default=0, ge=-1000, le=1000)
     match: dict[str, list[Scalar]] = Field(min_length=1, max_length=32)
     action: Literal["report", "log_only"] = "report"
@@ -260,7 +262,22 @@ class Policy:
                 # Ambiguous paths cannot authorize exclusions or grouping. Keep the
                 # complete diagnostics, but evaluate no rules or partially flattened fields.
                 rules = ()
+        base_fields = {k: v for k, v in fields.items() if k in CONTEXT_FIELDS}
+        json_diagnostics, json_fields = diagnostics, fields
+        gateway = (
+            gateway_mcp(record.message)
+            if any(r.enabled and r.source_format == "agentgateway-mcp-v1" for r in rules)
+            else None
+        )
         for rule in rules:
+            diagnostics, fields = json_diagnostics, json_fields
+            if rule.source_format == "agentgateway-mcp-v1":
+                if gateway is None:
+                    continue
+                diagnostics = dict(gateway)
+                fields = {**base_fields, **flatten(diagnostics, "json")}
+                if rule.action == "log_only" and not stateless_get_noise(gateway):
+                    continue
             if not rule.enabled or not all(
                 path in fields
                 and any(canonical(fields[path]) == canonical(choice) for choice in choices)
@@ -274,11 +291,19 @@ class Policy:
                 for path in rule.group_by
             )
             parts = None
+            if rule.source_format != "json" and rule.action == "log_only" and not complete:
+                continue
             if complete:
-                normalized = {k: v for k, v in diagnostics.items() if k not in rule.drop_fields}
+                source = (
+                    gateway_identity(gateway)
+                    if rule.source_format == "agentgateway-mcp-v1" and gateway is not None
+                    else diagnostics
+                )
+                normalized = {k: v for k, v in source.items() if k not in rule.drop_fields}
                 # Retain every diagnostic field, including unknown and non-error fields.
                 dimensions = {path: fields[path] for path in rule.group_by}
-                parts = ("structured-v1", canonical(dimensions), canonical(normalized))
+                recipe = "structured-v1" if rule.source_format == "json" else rule.source_format
+                parts = (recipe, canonical(dimensions), canonical(normalized))
             title = (
                 title_text(render(rule.title, fields))
                 if rule.title
@@ -299,6 +324,7 @@ class Policy:
                 diagnostics,
                 fields,
             )
+        diagnostics, fields = json_diagnostics, json_fields
         return Decision(
             "fallback-exact-v2",
             "report",
