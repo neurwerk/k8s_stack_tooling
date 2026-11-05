@@ -1607,6 +1607,241 @@ def test_reporting_overrides_last_valid_restart_and_metadata_preserve_pending(
         state.close()
 
 
+def gateway_message(**changes: str | None) -> str:
+    fields = {
+        "gateway": "gateway/gateway",
+        "listener": "api-bindings",
+        "route": "gateway/mcp-tools-route",
+        "src.addr": "192.0.2.1:12345",
+        "http.method": "POST",
+        "http.host": "tools.example.test:443",
+        "http.path": "/mcp/tools",
+        "http.version": "HTTP/1.1",
+        "http.status": "403",
+        "trace.id": "a" * 32,
+        "span.id": "b" * 16,
+        "jwt.sub": "caller-a",
+        "protocol": "http",
+        "error": "authorization failed",
+        "reason": "Authorization",
+        "duration": "1ms",
+        "neurwerk.request_id": "00000000-0000-0000-0000-000000000001",
+        **changes,
+    }
+    timestamp = fields.pop("timestamp", "2026-01-01T00:00:00Z")
+    return f"{timestamp}\terror\trequest " + " ".join(
+        f"{k}={json.dumps(v) if ' ' in v else v}" for k, v in fields.items() if v is not None
+    )
+
+
+def gateway_noise(**changes: str | None) -> str:
+    return gateway_message(
+        **{
+            "http.method": "GET",
+            "http.status": "405",
+            "protocol": "mcp",
+            "reason": "MCP",
+            "error": "mcp: method not allowed; must be GET, POST, or DELETE",
+            "neurwerk.billing_classification": "unknown",
+            "neurwerk.cost_known": "false",
+            "neurwerk.credential_mode": "none",
+            "neurwerk.destination_kind": "mcp",
+            "neurwerk.dispatch_attempted": "true",
+            "neurwerk.entry_mode": "api",
+            "neurwerk.ignored_proxy_credential_headers": "[]",
+            "neurwerk.operation_id": "exchange",
+            "neurwerk.protocol_profile": "mcp-streamable-http-v1",
+            "neurwerk.provider_credential_source": "none",
+            "neurwerk.request_outcome": "gateway_error",
+            "neurwerk.request_text_inspection": "unknown",
+            "neurwerk.stripped_credential_headers": "[]",
+            "neurwerk.target_credential_mode": "unknown",
+            "neurwerk.token_usage_known": "false",
+            **changes,
+        }
+    )
+
+
+def gateway_policy() -> Policy:
+    return Policy.parse(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": [
+                    {
+                        "id": "noise",
+                        "priority": 100,
+                        "source_format": "agentgateway-mcp-v1",
+                        "match": {"json.http.status": ["405"]},
+                        "group_by": ["json.http.path"],
+                        "action": "log_only",
+                    },
+                    {
+                        "id": "auth",
+                        "source_format": "agentgateway-mcp-v1",
+                        "match": {"json.http.status": ["403"]},
+                        "group_by": [
+                            "json.jwt.sub",
+                            "json.http.path",
+                            "json.route",
+                            "json.http.host",
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+
+
+def test_reviewed_gateway_grouping_boundaries() -> None:
+    policy = gateway_policy()
+
+    def signature(message: str) -> tuple[str, ...]:
+        item = record("sample", message)
+        return identity_parts("test", SCOPE, item, policy.evaluate("test", SCOPE, item))
+
+    original = signature(gateway_message())
+    assert signature(gateway_message(**{"src.addr": "[2001:db8::1]:12345"})) == signature(
+        gateway_message(**{"src.addr": "[2001:db8::1]:54321"})
+    )
+    assert (
+        signature(
+            gateway_message(
+                **{
+                    "timestamp": "2026-01-02T00:00:00Z",
+                    "trace.id": "c" * 32,
+                    "span.id": "d" * 16,
+                    "duration": "123ms",
+                    "src.addr": "192.0.2.1:54321",
+                    "neurwerk.request_id": "00000000-0000-0000-0000-000000000002",
+                }
+            )
+        )
+        == original
+    )
+    for field, value in {
+        "jwt.sub": "caller-b",
+        "http.path": "/mcp/other",
+        "route": "gateway/other-route",
+        "http.host": "tools.example.test:8443",
+        "http.status": "401",
+        "reason": "Other",
+        "error": "other authorization error",
+        "src.addr": "192.0.2.2:12345",
+        "future.diagnostic": "new cause",
+        "http.method": "DELETE",
+        "neurwerk.operation_id": "tools/call",
+    }.items():
+        assert signature(gateway_message(**{field: value})) != original, field
+    assert signature(gateway_message(**{"future.diagnostic": "a"})) != signature(
+        gateway_message(**{"future.diagnostic": "b"})
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        gateway_noise() + " reason=MCP",
+        gateway_noise() + " trailing-garbage",
+        gateway_noise() + ' extra="unfinished',
+        gateway_noise() + " http=collision",
+        gateway_noise(**{"timestamp": "2026-99-99T00:00:00Z"}),
+        gateway_noise(**{"trace.id": "invalid"}),
+        gateway_noise(**{"span.id": "invalid"}),
+        gateway_noise(**{"src.addr": "192.0.2.1:99999"}),
+        gateway_noise(**{"src.addr": "[192.0.2.1]:12345"}),
+        gateway_noise(**{"src.addr": "[2001:db8::1:12345"}),
+        gateway_noise(**{"duration": "soon"}),
+        gateway_noise(**{"http.host": None}),
+        gateway_noise() + "\x1b[31m",
+        gateway_noise(**{"neurwerk.request_id": "invalid"}),
+    ],
+)
+def test_reviewed_gateway_invalid_input_never_excludes(message: str) -> None:
+    item = record("sample", message)
+    decision = gateway_policy().evaluate("test", SCOPE, item)
+    assert decision.action == "report" and decision.identity_parts is None
+    assert identity_parts("test", SCOPE, item, decision) == identity_parts(
+        "test", SCOPE, item, Policy().evaluate("test", SCOPE, item)
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"http.method": "POST"},
+        {"http.method": "DELETE"},
+        {"http.status": "500"},
+        {"reason": "Authorization"},
+        {"protocol": "http"},
+        {"error": "upstream unavailable"},
+        {"listener": "other"},
+        {"route": "gateway/mcp-other-route"},
+        {"future.error": "upstream unavailable"},
+        {"neurwerk.dispatch_attempted": "false"},
+        {"neurwerk.protocol_profile": None},
+        {"neurwerk.token_usage_known": None},
+    ],
+)
+def test_reviewed_gateway_get_near_misses_report(changes: dict[str, str | None]) -> None:
+    assert (
+        gateway_policy().evaluate("test", SCOPE, record("sample", gateway_noise(**changes))).action
+        == "report"
+    )
+
+
+def test_reviewed_gateway_opt_in_persistence_and_preview(settings: Settings) -> None:
+    policy = gateway_policy()
+    first = record("first", gateway_message())
+    second = record("second", gateway_message(duration="5ms"))
+    noise = record("noise", gateway_noise())
+    assert policy.evaluate("test", SCOPE, noise).action == "log_only"
+    disabled = Policy.parse(policy.serialize().replace('"enabled":true', '"enabled":false'))
+    for candidate in (Policy(), disabled):
+        assert candidate.evaluate("test", SCOPE, first).identity_parts is None
+        assert candidate.evaluate("test", SCOPE, noise).action == "report"
+    assert (
+        policy.evaluate("test", SCOPE, record("json", '{"http.status":"405"}')).action == "report"
+    )
+    settings.reporting_policy_file = settings.state_path.parent / "policy.json"
+    settings.reporting_policy_file.write_text(policy.serialize())
+    state = State(settings, [SCOPE])
+    try:
+        assert state.enqueue(SCOPE, [first, second, noise], {}, START) == 2
+        pending = state.due(0)
+        events = [json.loads(row[1]) for row in pending]
+        assert events[0]["fingerprint"] == events[1]["fingerprint"]
+        assert events[0]["event_id"] != events[1]["event_id"]
+        assert events[0]["extra"]["diagnostics"]["duration"] == "1ms"
+        settings.reporting_policy_file.write_text(
+            policy.serialize().replace("agentgateway-mcp-v1", "unknown-format")
+        )
+        assert not state.reload_policy()
+    finally:
+        state.close()
+    state = State(settings, [SCOPE])
+    try:
+        assert not state.policy_valid and state.due(0) == pending
+        settings.reporting_policy_file.write_text(Policy().serialize())
+        assert state.reload_policy()
+        assert state.enqueue(SCOPE, [noise], {}, START) == 0
+        assert state.due(0) == pending
+    finally:
+        state.close()
+    result = preview(
+        search([first, second, noise])["hits"]["hits"],
+        (SCOPE,),
+        "test",
+        policy,
+        Policy(),
+        START,
+        START + timedelta(minutes=5),
+    )
+    assert result["groups"][0]["occurrences"] == 2
+    assert "json.duration" in result["groups"][0]["differing_fields"]
+    assert result["exclusions"][0]["reason"] == "log_only"
+
+
 def test_brain_unavailable_still_polls_commits_and_delivers(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
