@@ -88,12 +88,30 @@ stt-general:
 tts-german:
   recipes:
     - runtime: kokoro-onnx
+      device: CPU
       service: tts-german-kokoro
       model_id: kokoro-german-martin
       variant_id: onnx
       enabled: true
       default: true
       estimated_vram_gib: 0
+      internal_port: 8881
+      health_path: /health
+      transport: python
+      capabilities: []
+      required_files:
+        - kokoro-martin.onnx
+        - voices-martin.npz
+        - german_text_rules.py
+        - onnx-docker/tts_normalizer.py
+    - runtime: kokoro-onnx-cuda
+      device: CUDA GPU
+      service: tts-german-kokoro-cuda
+      model_id: kokoro-german-martin
+      variant_id: onnx-cuda
+      enabled: true
+      default: false
+      estimated_vram_gib: 2
       internal_port: 8881
       health_path: /health
       transport: python

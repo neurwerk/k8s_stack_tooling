@@ -98,6 +98,7 @@ class ModelVariant(BaseModel):
             "speaches",
             "chatterbox",
             "kokoro-onnx",
+            "kokoro-onnx-cuda",
             "kserve",
             "gliner",
         ]

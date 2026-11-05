@@ -157,9 +157,16 @@ def runtime_family(runtime: str) -> str:
         return "vllm"
     if runtime.startswith("llama.cpp"):
         return "llama.cpp"
-    if runtime == "kokoro-onnx":
+    if runtime.startswith("kokoro-onnx"):
         return "kokoro"
     return runtime
+
+
+def memory_label(preset: dict[str, Any]) -> str:
+    vram = float(preset.get("estimated_vram_gib", 0))
+    if vram == 0:
+        return "CPU · system RAM only · 0 GiB VRAM"
+    return f"{preset.get('device', 'GPU')} · ~{vram:g} GiB VRAM + system RAM"
 
 
 def configured_storage(settings: Settings) -> bool:
@@ -235,7 +242,7 @@ def select_recipe(alias: str, catalog: Any) -> dict[str, Any] | None:
         "Variant",
         choices=[
             questionary.Choice(
-                item["variant_id"],
+                f"{item['variant_id']} — {memory_label(item)}",
                 value=item["variant_id"],
                 description=catalog.model(model_id).variant(item["variant_id"]).runtime_notes,
             )
@@ -349,6 +356,7 @@ def show_current_category_status(
             ["Saved model", model_name],
             ["Saved variant", variant],
             ["Saved runtime", runtime],
+            ["Memory estimate", memory_label(preset) if preset else "—"],
             ["Desired service state", desired],
             ["Model files", model_files],
             ["Workstation runtime image", runtime_image],
@@ -1110,6 +1118,7 @@ def deployment_status(remote: bool = False, verify_remote: bool = False) -> None
             [
                 alias,
                 desired,
+                memory_label(preset) if preset else "—",
                 active,
                 f"{service} / {health}" if docker else "Not checked",
                 files,
@@ -1120,6 +1129,7 @@ def deployment_status(remote: bool = False, verify_remote: bool = False) -> None
         [
             "Alias",
             "Desired assignment",
+            "Memory estimate",
             "Active model files",
             "Service / health",
             "Files",
@@ -1131,18 +1141,18 @@ def deployment_status(remote: bool = False, verify_remote: bool = False) -> None
         for service, (state, _, image) in states.items():
             if state == "running":
                 print(f"Running image for {service}: {image or 'unknown'}")
-        if (
-            "tts-german" in deployment.assignments
-            and configured["tts-german"]["runtime"] == "kokoro-onnx"
-        ):
+        if "tts-german" in deployment.assignments and configured["tts-german"][
+            "runtime"
+        ].startswith("kokoro-onnx"):
             print(
-                "Packaged Kokoro setup: CPUExecutionProvider, 4 intra-op / 1 inter-op threads; "
+                f"Packaged Kokoro setup: {memory_label(configured['tts-german'])}; "
                 f"host {docker.settings.bind_address}:{docker.settings.tts_german_port}, "
-                "24 kHz mono PCM WAV output."
+                "24 kHz mono PCM/WAV output."
             )
     print(
         "Active files and container health do not prove inference; use Test endpoints to check it."
     )
+    warn_vram(state_root)
 
 
 def toggle_service() -> None:
@@ -1176,6 +1186,11 @@ def warn_vram(state_root: Path) -> None:
         if choice.enabled
     ]
     total = sum(float(preset.get("estimated_vram_gib", 0)) for preset in enabled)
+    print(
+        f"Enabled assignments: ~{total:g} GiB estimated GPU VRAM. "
+        "CPU system RAM and downloaded model file sizes do not count toward GPU VRAM. "
+        "Estimates are not reservations; measure actual GPU usage under load."
+    )
     if total > 14:
         print(
             f"Warning: enabled GPU services estimate {total:g} GiB VRAM. "
@@ -1193,7 +1208,6 @@ def apply_assignments() -> None:
         )
         return
     deployment_status(remote=True)
-    warn_vram(state_root)
     if questionary.confirm(
         "Apply saved assignments and recreate affected services?", default=False
     ).ask():

@@ -126,6 +126,7 @@ jobs:
           SPEACHES_IMAGE: speaches
           CHATTERBOX_IMAGE: chatterbox
           KOKORO_IMAGE: kokoro
+          KOKORO_CUDA_IMAGE: kokoro-cuda
           KSERVE_IMAGE: kserve
           GLINER_IMAGE: gliner
         run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
@@ -154,6 +155,7 @@ jobs:
         run: echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/kokoro-adapter-venv" >> "$GITHUB_ENV"
       - run: uv python install 3.11
       - run: uv lock --check
+      - run: uv lock --project cuda --check
       - run: uv sync --frozen
       - run: uv run --frozen python -m unittest discover -s tests
 

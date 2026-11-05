@@ -18,6 +18,9 @@ chatterbox: ghcr.io/devnen/chatterbox-tts-server@sha256:7bf0fcb39203fc18b20548b1
 # Package-owned model-free runtime, built locally for Linux/AMD64.
 kokoro:
   build: kokoro_onnx
+kokoro-cuda:
+  build: kokoro_onnx
+  dockerfile: cuda.Dockerfile
 # kserve/huggingfaceserver:v0.16.0-gpu, verified Linux/AMD64 manifest (CUDA 12.8).
 kserve: kserve/huggingfaceserver@sha256:c84aefd18daf9055aa649fba519751c22818834bf0783ebf5e5032613848914f
 gliner:

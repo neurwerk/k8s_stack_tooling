@@ -811,7 +811,7 @@ def streaming_menu(alias: str = "llm-general") -> None:
     )
     if preset is None:
         raise ValueError(f"{alias} has no saved assignment")
-    if alias == "tts-german" and preset["runtime"] != "kokoro-onnx":
+    if alias == "tts-german" and not preset["runtime"].startswith("kokoro-onnx"):
         raise ValueError("PCM streaming is supported only by the Kokoro adapter, not Chatterbox")
     describe_assignment(docker, alias, preset)
     if not questionary.confirm("Send this streaming request now?", default=False).ask():

@@ -193,6 +193,7 @@ class Docker:
             "SPEACHES_IMAGE": images["speaches"],
             "CHATTERBOX_IMAGE": images["chatterbox"],
             "KOKORO_IMAGE": images["kokoro"],
+            "KOKORO_CUDA_IMAGE": images["kokoro-cuda"],
             "KSERVE_IMAGE": images["kserve"],
             "GLINER_IMAGE": images["gliner"],
         }
@@ -280,6 +281,7 @@ class Docker:
             "speaches": "SPEACHES_IMAGE",
             "chatterbox": "CHATTERBOX_IMAGE",
             "kokoro-onnx": "KOKORO_IMAGE",
+            "kokoro-onnx-cuda": "KOKORO_CUDA_IMAGE",
             "kserve": "KSERVE_IMAGE",
             "gliner": "GLINER_IMAGE",
         }[runtime]

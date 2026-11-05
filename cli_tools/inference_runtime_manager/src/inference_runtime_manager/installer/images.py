@@ -115,6 +115,7 @@ RUNTIME_IMAGES = {
     "speaches": "speaches",
     "chatterbox": "chatterbox",
     "kokoro-onnx": "kokoro",
+    "kokoro-onnx-cuda": "kokoro-cuda",
     "kserve": "kserve",
     "gliner": "gliner",
 }

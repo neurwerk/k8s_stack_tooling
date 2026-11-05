@@ -334,6 +334,7 @@ services:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${TTS_GERMAN_PORT:-8004}:8881"
     environment:
       KOKORO_MODEL_ROOT: /models/active/tts-german
+      KOKORO_DEVICE: cpu
       API_KEY: ${TTS_GERMAN_API_KEY-}
       KOKORO_ONNX_INTRA_OP_THREADS: "4"
       KOKORO_ONNX_INTER_OP_THREADS: "1"
@@ -343,6 +344,29 @@ services:
       NUMEXPR_NUM_THREADS: "4"
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8881/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+
+  tts-german-kokoro-cuda:
+    <<: [*common, *gpu]
+    image: ${KOKORO_CUDA_IMAGE:?Run inference-runtime-manager images and install first}
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${TTS_GERMAN_PORT:-8004}:8881"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      KOKORO_MODEL_ROOT: /models/active/tts-german
+      KOKORO_DEVICE: cuda
+      API_KEY: ${TTS_GERMAN_API_KEY-}
+      KOKORO_ONNX_INTRA_OP_THREADS: "4"
+      KOKORO_ONNX_INTER_OP_THREADS: "1"
+      OMP_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      NUMEXPR_NUM_THREADS: "4"
+    healthcheck:
+      test: [CMD, python, -c, "import json, urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8881/health', timeout=5))['device'] == 'cuda'"]
       interval: 10s
       timeout: 5s
       start_period: 60s
