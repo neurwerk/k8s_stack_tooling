@@ -88,12 +88,30 @@ stt-general:
 tts-german:
   recipes:
     - runtime: kokoro-onnx
+      device: CPU
       service: tts-german-kokoro
       model_id: kokoro-german-martin
       variant_id: onnx
       enabled: true
       default: true
       estimated_vram_gib: 0
+      internal_port: 8881
+      health_path: /health
+      transport: python
+      capabilities: []
+      required_files:
+        - kokoro-martin.onnx
+        - voices-martin.npz
+        - german_text_rules.py
+        - onnx-docker/tts_normalizer.py
+    - runtime: kokoro-onnx-cuda
+      device: CUDA GPU
+      service: tts-german-kokoro-cuda
+      model_id: kokoro-german-martin
+      variant_id: onnx-cuda
+      enabled: true
+      default: false
+      estimated_vram_gib: 2
       internal_port: 8881
       health_path: /health
       transport: python
@@ -126,6 +144,32 @@ vad-general:
   internal_port: 8000
   health_path: /health
   transport: python
+diarization-general:
+  recipes:
+    - runtime: nemotron-diarization-cpu
+      device: CPU
+      service: diarization-general-cpu
+      model_id: nemotron-3-diarization
+      variant_id: transformers-cpu
+      enabled: false
+      default: true
+      estimated_vram_gib: 0
+      internal_port: 8010
+      health_path: /health
+      transport: python
+      required_files: [config.json, processor_config.json, model.safetensors, README.md]
+    - runtime: nemotron-diarization-cuda
+      device: CUDA GPU
+      service: diarization-general-cuda
+      model_id: nemotron-3-diarization
+      variant_id: transformers-cuda
+      enabled: false
+      default: false
+      estimated_vram_gib: 3
+      internal_port: 8010
+      health_path: /health
+      transport: python
+      required_files: [config.json, processor_config.json, model.safetensors, README.md]
 ner-german:
   recipes:
     - default: true

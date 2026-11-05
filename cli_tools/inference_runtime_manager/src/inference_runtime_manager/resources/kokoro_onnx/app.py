@@ -66,6 +66,14 @@ def load_normalizer() -> Callable[[str], str]:
 
 
 def load_tts() -> Kokoro:
+    device = os.environ.get("KOKORO_DEVICE", "cpu")
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("KOKORO_DEVICE must be cpu or cuda")
+    provider = "CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider"
+    if device == "cuda":
+        ort.preload_dlls(directory="")
+    if provider not in ort.get_available_providers():
+        raise RuntimeError(f"Required execution provider unavailable: {provider}")
     options = ort.SessionOptions()
     options.intra_op_num_threads = max(1, int(os.environ.get("KOKORO_ONNX_INTRA_OP_THREADS", "4")))
     options.inter_op_num_threads = max(1, int(os.environ.get("KOKORO_ONNX_INTER_OP_THREADS", "1")))
@@ -74,8 +82,25 @@ def load_tts() -> Kokoro:
     options.add_session_config_entry("session.intra_op.allow_spinning", "0")
     options.add_session_config_entry("session.inter_op.allow_spinning", "0")
     session = ort.InferenceSession(
-        str(MODEL_PATH), sess_options=options, providers=["CPUExecutionProvider"]
+        str(MODEL_PATH),
+        sess_options=options,
+        providers=[provider],
+        provider_options=[
+            {
+                # Avoid exhaustive per-shape searches and excessive cuDNN workspace
+                # on a GPU shared with other inference services.
+                "cudnn_conv_algo_search": "HEURISTIC",
+                "cudnn_conv_use_max_workspace": "0",
+                "arena_extend_strategy": "kSameAsRequested",
+            }
+        ]
+        if device == "cuda"
+        else None,
     )
+    if provider not in session.get_providers():
+        raise RuntimeError(f"Required execution provider failed to initialize: {provider}")
+    session.disable_fallback()
+    logger.info("Kokoro device=%s provider=%s", device, provider)
     return Kokoro.from_session(session, str(VOICES_PATH))
 
 
@@ -250,7 +275,7 @@ async def authenticate(request: Request, call_next):
 def health() -> dict[str, str]:
     if _tts is None:
         raise HTTPException(status_code=503, detail="Kokoro is not ready")
-    return {"status": "ready"}
+    return {"status": "ready", "device": os.environ.get("KOKORO_DEVICE", "cpu")}
 
 
 @app.get("/v1/audio/voices")

@@ -39,6 +39,12 @@ class DeploymentSettings(BaseSettings):
     stt_general_api_key: SecretStr | None = Field(default=None, alias="STT_GENERAL_API_KEY")
     tts_german_api_key: SecretStr | None = Field(default=None, alias="TTS_GERMAN_API_KEY")
     vad_general_api_key: SecretStr | None = Field(default=None, alias="VAD_GENERAL_API_KEY")
+    diarization_general_api_key: SecretStr | None = Field(
+        default=None, alias="DIARIZATION_GENERAL_API_KEY"
+    )
+    diarization_general_api_key_file: Path | None = Field(
+        default=None, alias="DIARIZATION_GENERAL_API_KEY_FILE"
+    )
     ner_german_api_key: SecretStr | None = Field(default=None, alias="NER_GERMAN_API_KEY")
     ner_english_api_key: SecretStr | None = Field(default=None, alias="NER_ENGLISH_API_KEY")
     ner_multilingual_api_key: SecretStr | None = Field(
@@ -53,10 +59,17 @@ class DeploymentSettings(BaseSettings):
     )
     vlm_documents_port: int = Field(default=8000, ge=1, le=65535, alias="VLM_DOCUMENTS_PORT")
     llm_general_port: int = Field(default=8001, ge=1, le=65535, alias="LLM_GENERAL_PORT")
+    llm_context_tokens: int = Field(default=4096, ge=256, le=2147483647, alias="LLM_CONTEXT_TOKENS")
+    llm_kv_cache_type: Literal["f16", "q8_0", "q4_0"] = Field(
+        default="f16", alias="LLM_KV_CACHE_TYPE"
+    )
     vlm_general_port: int = Field(default=8002, ge=1, le=65535, alias="VLM_GENERAL_PORT")
     stt_general_port: int = Field(default=8003, ge=1, le=65535, alias="STT_GENERAL_PORT")
     tts_german_port: int = Field(default=8004, ge=1, le=65535, alias="TTS_GERMAN_PORT")
     vad_general_port: int = Field(default=8005, ge=1, le=65535, alias="VAD_GENERAL_PORT")
+    diarization_general_port: int = Field(
+        default=8010, ge=1, le=65535, alias="DIARIZATION_GENERAL_PORT"
+    )
     ner_german_port: int = Field(default=8006, ge=1, le=65535, alias="NER_GERMAN_PORT")
     ner_english_port: int = Field(default=8008, ge=1, le=65535, alias="NER_ENGLISH_PORT")
     ner_multilingual_port: int = Field(default=8009, ge=1, le=65535, alias="NER_MULTILINGUAL_PORT")
@@ -111,7 +124,30 @@ class DeploymentSettings(BaseSettings):
     def api_key_for(self, alias: str) -> str | None:
         """Return the independently configured key for one stable service alias."""
         value = cast(SecretStr | None, getattr(self, alias.replace("-", "_") + "_api_key"))
-        return value.get_secret_value() if value is not None else None
+        if value is not None:
+            return value.get_secret_value()
+        if alias == "diarization-general" and self.diarization_general_api_key_file is not None:
+            try:
+                key = self.diarization_general_api_key_file.expanduser().read_text().strip()
+            except OSError:
+                raise ValueError(
+                    "Cannot read the configured diarization service key file"
+                ) from None
+            if not key:
+                raise ValueError("The configured diarization service key file is empty")
+            return key
+        return None
+
+    def validate_llm_context(self, model_id: str) -> None:
+        from inference_runtime_manager.downloader.catalog import load_catalog
+
+        model = load_catalog().model(model_id)
+        limit = model.metadata.context_length
+        if limit is None or self.llm_context_tokens > limit:
+            raise ValueError(
+                f"{model.display_name}: context must not exceed the catalog limit "
+                f"({limit if limit is not None else 'unknown'} tokens). Check LLM runtime options."
+            )
 
 
 def resource(name: str) -> str:
@@ -164,10 +200,14 @@ class Docker:
             "INFERENCE_BIND_ADDRESS": settings.bind_address,
             "VLM_DOCUMENTS_PORT": str(settings.vlm_documents_port),
             "LLM_GENERAL_PORT": str(settings.llm_general_port),
+            "LLM_CONTEXT_TOKENS": str(settings.llm_context_tokens),
+            "LLM_KV_CACHE_TYPE": settings.llm_kv_cache_type,
+            "LLM_FLASH_ATTENTION": "auto" if settings.llm_kv_cache_type == "f16" else "on",
             "VLM_GENERAL_PORT": str(settings.vlm_general_port),
             "STT_GENERAL_PORT": str(settings.stt_general_port),
             "TTS_GERMAN_PORT": str(settings.tts_german_port),
             "VAD_GENERAL_PORT": str(settings.vad_general_port),
+            "DIARIZATION_GENERAL_PORT": str(settings.diarization_general_port),
             "NER_GERMAN_PORT": str(settings.ner_german_port),
             "NER_ENGLISH_PORT": str(settings.ner_english_port),
             "NER_MULTILINGUAL_PORT": str(settings.ner_multilingual_port),
@@ -193,6 +233,9 @@ class Docker:
             "SPEACHES_IMAGE": images["speaches"],
             "CHATTERBOX_IMAGE": images["chatterbox"],
             "KOKORO_IMAGE": images["kokoro"],
+            "KOKORO_CUDA_IMAGE": images["kokoro-cuda"],
+            "NEMOTRON_DIARIZATION_CPU_IMAGE": images["nemotron-diarization-cpu"],
+            "NEMOTRON_DIARIZATION_CUDA_IMAGE": images["nemotron-diarization-cuda"],
             "KSERVE_IMAGE": images["kserve"],
             "GLINER_IMAGE": images["gliner"],
         }
@@ -280,6 +323,9 @@ class Docker:
             "speaches": "SPEACHES_IMAGE",
             "chatterbox": "CHATTERBOX_IMAGE",
             "kokoro-onnx": "KOKORO_IMAGE",
+            "kokoro-onnx-cuda": "KOKORO_CUDA_IMAGE",
+            "nemotron-diarization-cpu": "NEMOTRON_DIARIZATION_CPU_IMAGE",
+            "nemotron-diarization-cuda": "NEMOTRON_DIARIZATION_CUDA_IMAGE",
             "kserve": "KSERVE_IMAGE",
             "gliner": "GLINER_IMAGE",
         }[runtime]
@@ -318,8 +364,24 @@ class Docker:
             check=True,
         )
 
+    def service_command(self, service: str) -> list[str]:
+        command = json.loads(
+            subprocess.run(
+                self.docker_command
+                + ["inspect", f"local-ai-{service}-1", "--format", "{{json .Config.Cmd}}"],
+                env=self.environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=15,
+            ).stdout
+        )
+        if not isinstance(command, list) or any(not isinstance(value, str) for value in command):
+            raise ValueError("Container command is not an argument list")
+        return cast(list[str], command)
+
     def runtime_settings_match(self, service: str) -> bool:
-        """Do not skip application when a saved NER/Docling setting changed."""
+        """Do not skip application when saved runtime settings changed."""
         if service in {"ner-german-gliner", "ner-english-gliner", "ner-multilingual-gliner"}:
             values = json.loads(
                 subprocess.run(
@@ -338,18 +400,25 @@ class Docker:
                 and environment.get("GLINER_THRESHOLD") == self.environment["GLINER_THRESHOLD"]
                 and environment.get("GLINER_LABELS") == self.environment["GLINER_LABELS"]
             )
-        if service not in {"ner-german", "ner-english", "vlm-documents"}:
+        if service not in {"ner-german", "ner-english", "vlm-documents", "llm-general"}:
             return True
-        command = json.loads(
-            subprocess.run(
-                self.docker_command
-                + ["inspect", f"local-ai-{service}-1", "--format", "{{json .Config.Cmd}}"],
-                env=self.environment,
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-        )
+        command = self.service_command(service)
+        if service == "llm-general":
+            expected = {
+                "--ctx-size": str(self.settings.llm_context_tokens),
+                "--cache-type-k": self.settings.llm_kv_cache_type,
+                "--cache-type-v": self.settings.llm_kv_cache_type,
+                "--flash-attn": self.environment["LLM_FLASH_ATTENTION"],
+            }
+            defaults = {"--cache-type-k": "f16", "--cache-type-v": "f16", "--flash-attn": "auto"}
+            try:
+                return all(
+                    (command[command.index(flag) + 1] if flag in command else defaults.get(flag))
+                    == value
+                    for flag, value in expected.items()
+                )
+            except (ValueError, IndexError, TypeError):
+                return False
         if service.startswith("ner-"):
             dtype = getattr(self.settings, service.replace("-", "_") + "_dtype")
             return f"--dtype={dtype}" in command

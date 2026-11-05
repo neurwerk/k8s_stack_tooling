@@ -21,6 +21,7 @@ CATEGORY_NAMES = {
     "image-ocr": "Private image OCR / attachment inspection",
     "image-generation": "Image generation",
     "vad": "Voice activity detection",
+    "diarization": "Speaker diarization",
     "asr": "Speech recognition",
     "llm": "Language models",
     "ner": "Named-entity recognition",

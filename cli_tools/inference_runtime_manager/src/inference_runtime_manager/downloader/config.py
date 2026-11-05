@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     """Load model storage and Hugging Face cache paths from `.env`.
 
     Args:
-        storage_root: Existing directory on an external volume or under ~/.storage.
+        storage_root: Existing directory on a volume, under ~/.storage or ~/Downloads.
         hf_home: Hugging Face cache and authenticated-user configuration directory.
     """
 
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
 
 
 def validate_storage(settings: Settings) -> None:
-    """Require writable model storage on a mount or in the user's ~/.storage.
+    """Require writable model storage on a mount or in a dedicated local subdirectory.
 
     Args:
         settings: Local application configuration.
@@ -92,11 +92,11 @@ def validate_storage(settings: Settings) -> None:
         )
     storage_boundary = _mount_root(root)
     if storage_boundary == Path("/"):
-        local_storage = (Path.home() / ".storage").resolve()
-        if root == local_storage or not root.is_relative_to(local_storage):
+        local_parents = [(Path.home() / name).resolve() for name in (".storage", "Downloads")]
+        if not any(root != parent and root.is_relative_to(parent) for parent in local_parents):
             raise StorageUnavailableError(
                 f"Configured storage root must be on a non-root mounted volume "
-                f"or inside ~/.storage: {root}"
+                f"or in a subdirectory of ~/.storage or ~/Downloads: {root}"
             )
         # Keep the Hugging Face cache beneath this root, not elsewhere on the system disk.
         storage_boundary = root

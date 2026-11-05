@@ -24,6 +24,7 @@ ALIAS_CATEGORIES = {
     "ner-multilingual": "ner",
     "image-generation-general": "image-generation",
     "vad-general": "vad",
+    "diarization-general": "diarization",
 }
 
 

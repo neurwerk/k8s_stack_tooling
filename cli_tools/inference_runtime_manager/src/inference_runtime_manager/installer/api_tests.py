@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -13,6 +14,7 @@ import wave
 import zlib
 from contextlib import closing
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
 from struct import pack
 from typing import Any
@@ -30,6 +32,7 @@ from inference_runtime_manager.installer.streaming import chat_tokens, request_s
 LIMIT = 16 * 1024 * 1024
 MAX_OCR_PROMPT_CHARS = 4096
 SENTENCE = "Guten Tag. Dies ist ein kurzer Test."
+DIARIZATION_SAMPLE_SHA256 = "c319b4abca767b124e41432d364fd7df006cb26bb79d09326c487d606a134e6e"
 
 ORDER = [
     "vlm-documents",
@@ -39,6 +42,7 @@ ORDER = [
     "tts-german",
     "stt-general",
     "vad-general",
+    "diarization-general",
     "ner-german",
     "ner-english",
     "ner-multilingual",
@@ -417,6 +421,222 @@ def validate_wav(data: bytes) -> None:
             raise ValueError("TTS returned empty audio")
 
 
+def diarization_pcm(data: bytes) -> bytes:
+    """Validate locally before sending private audio to the selected service."""
+    try:
+        with wave.open(io.BytesIO(data)) as wav:
+            if (
+                wav.getnchannels(),
+                wav.getsampwidth(),
+                wav.getframerate(),
+                wav.getcomptype(),
+            ) != (1, 2, 16000, "NONE"):
+                raise ValueError("Diarization requires 16 kHz mono PCM16 uncompressed WAV")
+            frames = wav.getnframes()
+            pcm = bytes(wav.readframes(frames))
+    except (wave.Error, EOFError):
+        raise ValueError("Diarization requires 16 kHz mono PCM16 uncompressed WAV") from None
+    if not frames or len(pcm) != frames * 2 or len(data) > LIMIT:
+        raise ValueError("Choose a complete, nonempty WAV of at most 16 MiB")
+    return pcm
+
+
+def diarization_sample() -> bytes:
+    """Pinned public pyannote sample; source, RTTM and MIT notice accompany it."""
+    sample = (
+        files("inference_runtime_manager.resources")
+        .joinpath("manual_audio", "pyannote-two-speakers.wav")
+        .read_bytes()
+    )
+    if hashlib.sha256(sample).hexdigest() != DIARIZATION_SAMPLE_SHA256:
+        raise ValueError("Bundled diarization sample checksum mismatch")
+    return sample
+
+
+def diarization_check(docker: Docker, preset: dict[str, Any], speech: bytes) -> dict[str, Any]:
+    """Stream in memory, retaining every speaker interval, then delete the session."""
+    pcm = diarization_pcm(speech)
+    reference = hashlib.sha256(speech).hexdigest() == DIARIZATION_SAMPLE_SHA256
+    if reference:
+        print("Public pyannote reference: 30 seconds, 2 speakers, including overlapping speech.")
+    check = r"""
+import json, os, struct, sys, time
+from collections import defaultdict
+from websockets.sync.client import connect
+
+pcm = sys.stdin.buffer.read()
+total = len(pcm) // 2
+intervals = defaultdict(list)
+compute = []
+events = 0
+last_seq = 0
+buffer_ms = None
+first_activity_ms = None
+started_at = time.monotonic()
+failure = 'invalid_response'
+
+def require(condition, reason='invalid_response'):
+    global failure
+    if not condition:
+        failure = reason
+        raise ValueError('Invalid diarization response')
+
+def receive(ws, wanted):
+    global events, last_seq, buffer_ms, first_activity_ms
+    while True:
+        msg = json.loads(ws.recv(timeout=30))
+        kind = msg.get('type')
+        if kind == 'error':
+            code = msg.get('code')
+            require(False, code if code in {'buffer_limit', 'session_expired',
+                    'offset_mismatch', 'session_limit'} else 'server_error')
+        if kind == 'activity':
+            left, right = msg['start_sample'], msg['end_sample']
+            speaker = msg['speaker_id']
+            require(0 <= left < right <= total and msg['state'] == 'final')
+            require(msg['seq'] == last_seq + 1 and msg['session_id'] == session_id)
+            require(isinstance(speaker, str) and speaker.startswith('speaker_'))
+            last_seq = msg['seq']
+            events += 1
+            if first_activity_ms is None:
+                first_activity_ms = round((time.monotonic() - started_at) * 1000)
+            spans = intervals[speaker]
+            if spans and left <= spans[-1][1]:
+                spans[-1][1] = max(right, spans[-1][1])
+            else:
+                spans.append([left, right])
+        elif kind == 'progress':
+            require(0 <= msg['finalized_through_sample'] <= msg['accepted_through_sample'] <= total)
+            buffer_ms = msg['input_buffer_ms']
+            if 'inference_ms' in msg:
+                compute.append(msg['inference_ms'])
+        if kind == wanted:
+            return msg
+
+try:
+    with connect(
+        'ws://127.0.0.1:' + sys.argv[1] + '/v1/diarization/stream',
+        additional_headers={'Authorization': 'Bearer ' + os.environ['API_KEY']},
+        open_timeout=15,
+        close_timeout=5,
+    ) as ws:
+        ws.send(json.dumps({'type': 'start', 'version': 1, 'encoding': 'pcm_s16le',
+                            'sample_rate_hz': 16000, 'channels': 1}))
+        opening = json.loads(ws.recv(timeout=30))
+        require(opening['type'] == 'started' and opening['next_sample'] == 0)
+        session_id = opening['session_id']
+        complete = False
+        try:
+            offset = 0
+            for index in range(0, len(pcm), 10240):
+                chunk = pcm[index:index + 10240]
+                ws.send(struct.pack('<Q', offset) + chunk)
+                offset += len(chunk) // 2
+                require(receive(ws, 'ack')['next_sample'] == offset)
+            ws.send(json.dumps({'type': 'flush', 'through_sample': offset,
+                                'request_id': 'manual-test'}))
+            final = receive(ws, 'flushed')
+            require(final['next_sample'] == final['finalized_through_sample'] == total)
+            elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            complete = True
+        finally:
+            try:
+                ws.send(json.dumps({'type': 'delete'}))
+                require(receive(ws, 'deleted')['session_id'] == session_id)
+            except Exception:
+                if complete:
+                    raise
+    edges = defaultdict(int)
+    for spans in intervals.values():
+        for left, right in spans:
+            edges[left] += 1
+            edges[right] -= 1
+    overlap_samples = 0
+    active = 0
+    previous = 0
+    for sample, change in sorted(edges.items()):
+        if active > 1:
+            overlap_samples += sample - previous
+        active += change
+        previous = sample
+    print(json.dumps({'activity_intervals': events, 'samples': total,
+                      'speakers': dict(intervals), 'overlap_samples': overlap_samples,
+                      'inference_ms': compute, 'input_buffer_ms': buffer_ms,
+                      'first_activity_ms': first_activity_ms, 'elapsed_ms': elapsed_ms,
+                      'session_deleted': True}))
+except Exception as error:
+    # Never emit request data, session IDs, credentials or server error payloads.
+    sys.exit('Diarization stream failed: ' + failure)
+"""
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            docker.command
+            + [
+                "exec",
+                "-T",
+                preset["service"],
+                "python",
+                "-c",
+                check,
+                str(preset["internal_port"]),
+            ],
+            env=docker.environment,
+            input=pcm,
+            capture_output=True,
+            check=False,
+            timeout=max(120, len(pcm) / 32000 * 4 + 30),
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            "Diarization test timed out; session cleanup could not be confirmed"
+        ) from None
+    if result.returncode:
+        for code in ("buffer_limit", "session_expired", "offset_mismatch", "session_limit"):
+            if result.stderr.strip() == f"Diarization stream failed: {code}".encode():
+                raise ValueError(
+                    f"Diarization stream failed: {code}; private request and logs omitted"
+                )
+        raise ValueError("Diarization stream failed; private request and logs omitted")
+    report = json.loads(result.stdout)
+    speakers = report["speakers"]
+    duration = report["samples"] / 16000
+    compute = report["inference_ms"]
+    print(
+        f"Diarization: {duration:.2f}s audio; {len(speakers)} detected speaker IDs; "
+        f"{report['activity_intervals']} activity intervals; "
+        f"{report['overlap_samples'] / 16000:.2f}s detected overlap"
+    )
+    for speaker, spans in sorted(speakers.items()):
+        timing = ", ".join(f"{left / 16000:.2f}–{right / 16000:.2f}s" for left, right in spans[:12])
+        suffix = f" (+{len(spans) - 12} more intervals)" if len(spans) > 12 else ""
+        print(f"  {speaker}: {timing}{suffix}")
+    print(
+        f"Burst stream + flush: {report['elapsed_ms']} ms; "
+        f"Docker roundtrip: {(time.monotonic() - started) * 1000:.0f} ms; "
+        f"input buffering: {report['input_buffer_ms']} ms"
+    )
+    if compute:
+        print(
+            f"Reported inference (includes model-lock wait): {sum(compute)} ms total, "
+            f"{min(compute)}–{max(compute)} ms/chunk; "
+            f"burst real-time factor: {report['elapsed_ms'] / (duration * 1000):.2f}"
+        )
+    print("Burst timing is not microphone-to-result latency. Test session deleted.")
+    if not speakers:
+        raise ValueError("No speaker activity detected; diarization quality not demonstrated")
+    if reference and len(speakers) != 2:
+        raise ValueError(f"Reference has 2 speakers; model detected {len(speakers)} speaker IDs")
+    if reference and not report["overlap_samples"]:
+        print("Reference contains overlapping speech, but the model detected no overlap.")
+    print(
+        "PASS diarization stream contract"
+        + (" and two-speaker count" if reference else "")
+        + "; review speaker separation and timing manually."
+    )
+    return report
+
+
 def play_saved_wav(path: Path) -> None:
     print(f"Playing {path} locally (Ctrl+C skips playback)...")
     started = time.monotonic()
@@ -569,6 +789,11 @@ def _test_service(
         value = json.loads(request(docker, alias, "/v1/audio/transcriptions", audio=speech))
         if not isinstance(value.get("text"), str) or not value["text"].strip():
             raise ValueError("Transcription response has no text")
+    elif alias == "diarization-general":
+        if speech is None:
+            raise ValueError("No speech sample is available")
+        diarization_check(docker, preset, speech)
+        return speech
     elif alias == "vad-general":
         if speech is None:
             raise ValueError("No speech sample is available")
@@ -663,7 +888,7 @@ def test_service(
     try:
         return _test_service(docker, alias, speech, running, image=image, prompt=prompt)
     except (OSError, ValueError, wave.Error, subprocess.SubprocessError):
-        if preset is not None:
+        if preset is not None and alias != "diarization-general":
             show_failure_logs(docker, preset["service"])
         raise
 
@@ -684,7 +909,31 @@ def test_individual(alias: str) -> None:
     speech = None
     image = None
     prompt = None
-    if alias in {"stt-general", "vad-general"}:
+    if alias == "diarization-general":
+        choice = questionary.select(
+            "Diarization WAV test",
+            choices=[
+                questionary.Choice("Bundled two-speaker sample (30 seconds)", value="sample"),
+                questionary.Choice("Use your own local WAV", value="local"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+        if choice in (None, "back"):
+            return
+        if choice == "sample":
+            speech = diarization_sample()
+        else:
+            sample = questionary.path("Local WAV (16 kHz, mono, PCM16; at most 16 MiB):").ask()
+            if sample is None:
+                return
+            if not sample:
+                raise ValueError("A local WAV is required")
+            try:
+                speech = read_sample(sample)
+            except OSError:
+                raise ValueError("Could not read the selected local WAV") from None
+        diarization_pcm(speech)
+    elif alias in {"stt-general", "vad-general"}:
         sample = questionary.path("Local WAV to test:").ask()
         if sample is None:
             return
@@ -811,7 +1060,7 @@ def streaming_menu(alias: str = "llm-general") -> None:
     )
     if preset is None:
         raise ValueError(f"{alias} has no saved assignment")
-    if alias == "tts-german" and preset["runtime"] != "kokoro-onnx":
+    if alias == "tts-german" and not preset["runtime"].startswith("kokoro-onnx"):
         raise ValueError("PCM streaming is supported only by the Kokoro adapter, not Chatterbox")
     describe_assignment(docker, alias, preset)
     if not questionary.confirm("Send this streaming request now?", default=False).ask():
@@ -924,7 +1173,10 @@ def menu() -> None:
             raise ValueError(f"{alias} has no saved assignment")
         identity = f"{alias} — assigned model: {model_label(preset)}"
         try:
-            speech = test_service(docker, alias, speech, running)
+            if alias == "diarization-general":
+                test_service(docker, alias, diarization_sample(), running)
+            else:
+                speech = test_service(docker, alias, speech, running)
             results.append(f"PASS {identity}")
         except (OSError, ValueError, wave.Error, subprocess.SubprocessError) as exc:
             results.append(f"FAIL {identity}: {exc}")

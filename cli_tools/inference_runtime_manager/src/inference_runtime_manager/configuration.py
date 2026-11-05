@@ -16,6 +16,10 @@ class RuntimeConfig(BaseModel):
     """Saved overrides; unset values retain environment settings and defaults."""
 
     model_config = ConfigDict(extra="forbid")
+    bind_address: str | None = None
+    diarization_general_api_key_file: Path | None = None
+    llm_context_tokens: int | None = Field(default=None, ge=256, le=2147483647)
+    llm_kv_cache_type: Literal["f16", "q8_0", "q4_0"] | None = None
     ner_german_dtype: Literal["float32", "float16"] | None = None
     ner_english_dtype: Literal["float32", "float16"] | None = None
     ner_multilingual_dtype: Literal["float32", "float16"] | None = None
