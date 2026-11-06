@@ -16,6 +16,7 @@ dependencies = [
     "cryptography>=50.0.0",
     "kubernetes>=36.0.3,<37",
     "PyYAML>=6.0",
+    "pydantic>=2.10,<3",
     "questionary>=2.1",
     "requests>=2.31",
 ]
