@@ -29,6 +29,7 @@ class HttpSession(Protocol):
         json: JsonValue | None,
         timeout: tuple[float, float],
         verify: str,
+        allow_redirects: bool,
     ) -> requests.Response:
         """Send one HTTPS request."""
         ...
@@ -399,6 +400,8 @@ class OpenBaoClient:
                 json=body,
                 timeout=timeout,
                 verify=self._ca_cert,
+                # Redirects can forward both the token header and sensitive request bodies.
+                allow_redirects=False,
             )
         except requests.exceptions.RequestException:
             if method == "POST" and path == "sys/init":

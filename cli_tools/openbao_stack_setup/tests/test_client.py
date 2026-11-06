@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import json as json_module
 from pathlib import Path
+from typing import override
 
 import pytest
 import requests
+from requests.adapters import BaseAdapter
 
 from openbao_stack_setup.client import JsonValue, OpenBaoClient, OpenBaoError
 
@@ -24,6 +26,7 @@ class QueueSession:
         json: JsonValue | None,
         timeout: tuple[float, float],
         verify: str,
+        allow_redirects: bool,
     ) -> requests.Response:
         self.calls.append((method, url, json, timeout))
         item = self.items.pop(0)
@@ -44,6 +47,177 @@ def response(
     else:
         result._content = b""
     return result
+
+
+class RecordingAdapter(BaseAdapter):
+    def __init__(self) -> None:
+        self.responses: list[requests.Response] = []
+        self.calls: list[requests.PreparedRequest] = []
+        self.settings: list[dict[str, object]] = []
+
+    @override
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        self.calls.append(request)
+        self.settings.append({"timeout": timeout, "verify": verify})
+        result = self.responses.pop(0)
+        result.request = request
+        assert request.url is not None
+        result.url = request.url
+        return result
+
+    @override
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def transport():
+    with requests.Session() as session:
+        session.trust_env = False
+        adapter = RecordingAdapter()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        yield session, adapter
+
+
+def redirect_response(status: int, location: str) -> requests.Response:
+    result = response(status, body={"errors": ["synthetic-response-secret"]})
+    result.headers["Location"] = location + "?secret=synthetic-location-secret"
+    return result
+
+
+@pytest.mark.parametrize(
+    ("status", "location"),
+    [
+        (301, "https://other.test/v1/secret/data/path"),
+        (302, "https://other.test/v1/secret/data/path"),
+        (303, "https://other.test/v1/secret/data/path"),
+        (307, "https://other.test/v1/secret/data/path"),
+        (308, "https://other.test/v1/secret/data/path"),
+        (307, "http://other.test/v1/secret/data/path"),
+        (307, "/v1/secret/data/other"),
+    ],
+)
+def test_redirects_never_forward_token_or_secret_body(tmp_path, transport, status, location):
+    session, adapter = transport
+    adapter.responses = [redirect_response(status, location), response(204)]
+    api = OpenBaoClient("https://bao.test", "synthetic-token", tmp_path / "ca.crt", session)
+
+    with pytest.raises(OpenBaoError) as captured:
+        api.write_secret("path", {"key": "synthetic-secret"}, 3)
+
+    assert len(adapter.calls) == 1
+    sent = adapter.calls[0]
+    assert (sent.method, sent.url) == ("POST", "https://bao.test/v1/secret/data/path")
+    assert sent.headers["X-Vault-Token"] == "synthetic-token"
+    assert json_module.loads(sent.body) == {
+        "options": {"cas": 3},
+        "data": {"key": "synthetic-secret"},
+    }
+    assert str(captured.value) == (
+        f"OpenBao request POST /v1/secret/data/path failed with HTTP {status}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "location"),
+    [
+        (307, "https://other.test/v1/auth/kubernetes/login"),
+        (308, "http://other.test/v1/auth/kubernetes/login"),
+    ],
+)
+def test_login_redirects_never_forward_jwt(tmp_path, transport, status, location):
+    session, adapter = transport
+    adapter.responses = [
+        redirect_response(status, location),
+        response(body={"auth": {"client_token": "synthetic-operator"}}),
+    ]
+    api = OpenBaoClient("https://bao.test", None, tmp_path / "ca.crt", session)
+
+    with pytest.raises(OpenBaoError) as captured:
+        api.kubernetes_login("operator", "synthetic-jwt")
+
+    assert len(adapter.calls) == 1
+    sent = adapter.calls[0]
+    assert (sent.method, sent.url) == ("POST", "https://bao.test/v1/auth/kubernetes/login")
+    assert "X-Vault-Token" not in sent.headers
+    assert json_module.loads(sent.body) == {"role": "operator", "jwt": "synthetic-jwt"}
+    assert str(captured.value) == (
+        f"OpenBao request POST /v1/auth/kubernetes/login failed with HTTP {status}"
+    )
+
+
+def test_recovery_redirect_keeps_shares_and_cancellation_at_original_endpoint(tmp_path, transport):
+    session, adapter = transport
+    adapter.responses = [
+        response(body={"started": True, "nonce": "nonce", "otp": "otp", "required": 2}),
+        redirect_response(307, "https://other.test/v1/sys/generate-root/update"),
+        response(204),
+    ]
+    api = OpenBaoClient("https://bao.test", None, tmp_path / "ca.crt", session)
+
+    with pytest.raises(OpenBaoError) as captured:
+        api.create_recovery_root_token(("synthetic-share-one", "synthetic-share-two"))
+
+    assert [(sent.method, sent.url) for sent in adapter.calls] == [
+        ("POST", "https://bao.test/v1/sys/generate-root/attempt"),
+        ("POST", "https://bao.test/v1/sys/generate-root/update"),
+        ("DELETE", "https://bao.test/v1/sys/generate-root/attempt"),
+    ]
+    assert all("X-Vault-Token" not in sent.headers for sent in adapter.calls)
+    assert json_module.loads(adapter.calls[0].body) == {}
+    assert json_module.loads(adapter.calls[1].body) == {
+        "key": "synthetic-share-one",
+        "nonce": "nonce",
+    }
+    assert adapter.calls[2].body is None
+    assert str(captured.value) == (
+        "OpenBao request POST /v1/sys/generate-root/update failed with HTTP 307"
+    )
+
+
+def test_direct_transport_preserves_success_statuses_and_tls_settings(tmp_path, transport):
+    session, adapter = transport
+    adapter.responses = [
+        response(body={"auth": {"client_token": "synthetic-operator"}}),
+        response(body={"data": {"data": {"key": "value"}, "metadata": {"version": 3}}}),
+        response(204),
+        response(202),
+        response(204),
+    ]
+    ca = tmp_path / "ca.crt"
+    login = OpenBaoClient("https://bao.test", None, ca, session)
+    token = login.kubernetes_login("operator", "synthetic-jwt")
+    assert token == "synthetic-operator"
+    api = OpenBaoClient("https://bao.test", token, ca, session)
+    record = api.read_secret("path")
+    assert record is not None
+    assert (record.values, record.version) == ({"key": "value"}, 3)
+    api.write_secret("path", {"key": "new"}, record.version)
+    api.tidy_tokens()
+    api.revoke_self()
+
+    assert len(adapter.calls) == 5
+    assert all(sent.url.startswith("https://bao.test/v1/") for sent in adapter.calls)
+    assert "X-Vault-Token" not in adapter.calls[0].headers
+    assert all(sent.headers["X-Vault-Token"] == token for sent in adapter.calls[1:])
+    assert all(settings["verify"] == str(ca) for settings in adapter.settings)
+    assert all(settings["timeout"] == (3.05, 15.0) for settings in adapter.settings)
+
+
+@pytest.mark.parametrize("status", [202, 403, 404])
+def test_direct_transport_rejects_unaccepted_write_statuses(tmp_path, transport, status):
+    session, adapter = transport
+    adapter.responses = [response(status, body={"errors": ["synthetic-response-secret"]})]
+    api = OpenBaoClient("https://bao.test", "synthetic-token", tmp_path / "ca.crt", session)
+
+    with pytest.raises(OpenBaoError) as captured:
+        api.write_secret("path", {"key": "synthetic-secret"}, 0)
+
+    assert len(adapter.calls) == 1
+    assert str(captured.value) == (
+        f"OpenBao request POST /v1/secret/data/path failed with HTTP {status}"
+    )
 
 
 def client(tmp_path: Path, session: QueueSession) -> OpenBaoClient:
