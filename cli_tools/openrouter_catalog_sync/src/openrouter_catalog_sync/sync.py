@@ -108,8 +108,6 @@ def load_policy(path: Path) -> Policy:
     """Load and validate policy JSON from path."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
-    except CatalogSyncError:
-        raise
     except (OSError, json.JSONDecodeError) as error:
         raise CatalogSyncError(f"could not read policy {path}: {error}") from error
     policy = _object(raw, "policy")
@@ -750,7 +748,7 @@ def _publisher_fallback(upstream_id: str) -> str:
 def _pricing(model: Mapping[str, object], upstream_id: str) -> dict[str, object]:
     pricing = _object(model.get("pricing"), f"pricing for {upstream_id}")
     _reject_per_request_pricing(pricing, upstream_id)
-    rates = _rates(pricing, upstream_id, required=True)
+    rates = _rates(pricing, upstream_id)
     result: dict[str, object] = {"rates": rates}
     overrides = pricing.get("overrides", [])
     if not isinstance(overrides, list):
@@ -790,7 +788,7 @@ def _pricing(model: Mapping[str, object], upstream_id: str) -> dict[str, object]
             tiers.append(
                 {
                     "contextOver": threshold,
-                    "rates": _rates(effective_pricing, upstream_id, required=True),
+                    "rates": _rates(effective_pricing, upstream_id),
                 }
             )
         result["tiers"] = tiers
@@ -886,7 +884,7 @@ def _threshold(raw: object, upstream_id: str) -> int:
     return threshold
 
 
-def _rates(pricing: Mapping[str, object], upstream_id: str, *, required: bool) -> dict[str, str]:
+def _rates(pricing: Mapping[str, object], upstream_id: str) -> dict[str, str]:
     rates: dict[str, str] = {}
     for destination, sources in TOKEN_FIELDS.items():
         candidates = [
@@ -902,7 +900,7 @@ def _rates(pricing: Mapping[str, object], upstream_id: str, *, required: bool) -
         if candidates:
             source, _value = max(candidates, key=lambda candidate: candidate[1])
             rates[destination] = _per_million(pricing[source], source, upstream_id)
-    if required and not rates:
+    if not rates:
         raise CatalogSyncError(f"pricing for {upstream_id} has no supported token rates")
     return rates
 

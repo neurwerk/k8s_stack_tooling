@@ -182,13 +182,8 @@ def with_checkpoint(kit: RecoveryKit, checkpoint: str) -> RecoveryKit:
         pending_bootstrap_passwords: dict[str, str] | None = None
     else:
         pending_bootstrap_passwords = kit.pending_bootstrap_passwords
-    return RecoveryKit(
-        schema_version=kit.schema_version,
-        client=kit.client,
-        cluster_id=kit.cluster_id,
-        namespace_uid=kit.namespace_uid,
-        static_seal_key=kit.static_seal_key,
-        static_seal_key_id=kit.static_seal_key_id,
+    return replace(
+        kit,
         checkpoint=checkpoint,
         pending_bootstrap_passwords=pending_bootstrap_passwords,
         pending_password_bindings=(
@@ -197,9 +192,6 @@ def with_checkpoint(kit: RecoveryKit, checkpoint: str) -> RecoveryKit:
         bootstrap_passwords_acknowledged=(
             False if checkpoint == "seeded" else kit.bootstrap_passwords_acknowledged
         ),
-        ceremony_id=kit.ceremony_id,
-        custodian_names=kit.custodian_names,
-        custodian_fingerprints=kit.custodian_fingerprints,
         custodian_public_keys=None if checkpoint == "initialized" else kit.custodian_public_keys,
         custodian_private_keys=None if checkpoint == "initialized" else kit.custodian_private_keys,
         initialization_root_token=(
@@ -226,14 +218,8 @@ def with_pending_bootstrap_passwords(
     staged = dict(passwords)
     if not _valid_password_mapping(staged, bindings):
         raise RecoveryKitError("Bootstrap passwords are invalid")
-    return RecoveryKit(
-        schema_version=kit.schema_version,
-        client=kit.client,
-        cluster_id=kit.cluster_id,
-        namespace_uid=kit.namespace_uid,
-        static_seal_key=kit.static_seal_key,
-        static_seal_key_id=kit.static_seal_key_id,
-        checkpoint=kit.checkpoint,
+    return replace(
+        kit,
         pending_bootstrap_passwords=staged,
         pending_password_bindings=(
             {key: dict(binding) for key, binding in bindings.items()}
@@ -241,13 +227,6 @@ def with_pending_bootstrap_passwords(
             else None
         ),
         bootstrap_passwords_acknowledged=False,
-        ceremony_id=kit.ceremony_id,
-        custodian_names=kit.custodian_names,
-        custodian_fingerprints=kit.custodian_fingerprints,
-        custodian_public_keys=kit.custodian_public_keys,
-        custodian_private_keys=kit.custodian_private_keys,
-        initialization_root_token=kit.initialization_root_token,
-        encrypted_recovery_shares=kit.encrypted_recovery_shares,
     )
 
 
@@ -255,25 +234,7 @@ def with_bootstrap_passwords_acknowledged(kit: RecoveryKit) -> RecoveryKit:
     """Record acknowledgement before storing staged passwords in OpenBao."""
     if kit.pending_bootstrap_passwords is None or kit.bootstrap_passwords_acknowledged:
         raise RecoveryKitError("Bootstrap passwords are not awaiting acknowledgement")
-    return RecoveryKit(
-        schema_version=kit.schema_version,
-        client=kit.client,
-        cluster_id=kit.cluster_id,
-        namespace_uid=kit.namespace_uid,
-        static_seal_key=kit.static_seal_key,
-        static_seal_key_id=kit.static_seal_key_id,
-        checkpoint=kit.checkpoint,
-        pending_bootstrap_passwords=kit.pending_bootstrap_passwords,
-        pending_password_bindings=kit.pending_password_bindings,
-        bootstrap_passwords_acknowledged=True,
-        ceremony_id=kit.ceremony_id,
-        custodian_names=kit.custodian_names,
-        custodian_fingerprints=kit.custodian_fingerprints,
-        custodian_public_keys=kit.custodian_public_keys,
-        custodian_private_keys=kit.custodian_private_keys,
-        initialization_root_token=kit.initialization_root_token,
-        encrypted_recovery_shares=kit.encrypted_recovery_shares,
-    )
+    return replace(kit, bootstrap_passwords_acknowledged=True)
 
 
 def validate_pending_password_bindings(
@@ -313,21 +274,9 @@ def with_initialization_material(
         or any(not share for share in encrypted_shares)
     ):
         raise RecoveryKitError("OpenBao initialization material is invalid at this checkpoint")
-    return RecoveryKit(
-        schema_version=kit.schema_version,
-        client=kit.client,
-        cluster_id=kit.cluster_id,
-        namespace_uid=kit.namespace_uid,
-        static_seal_key=kit.static_seal_key,
-        static_seal_key_id=kit.static_seal_key_id,
-        checkpoint=kit.checkpoint,
-        pending_bootstrap_passwords=kit.pending_bootstrap_passwords,
-        bootstrap_passwords_acknowledged=kit.bootstrap_passwords_acknowledged,
-        ceremony_id=kit.ceremony_id,
-        custodian_names=kit.custodian_names,
-        custodian_fingerprints=kit.custodian_fingerprints,
-        custodian_public_keys=kit.custodian_public_keys,
-        custodian_private_keys=kit.custodian_private_keys,
+    return replace(
+        kit,
+        pending_password_bindings=None,
         initialization_root_token=root_token,
         encrypted_recovery_shares=encrypted_shares,
     )
