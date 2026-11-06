@@ -1054,7 +1054,6 @@ def _find_or_create_group_path(
 
 
 def _reconcile_group_role_mappings(
-    admin_url: str,
     token: str,
     url: str,
     group_path: str,
@@ -1166,7 +1165,6 @@ def upsert_groups_api(
             raise SystemExit(1)
         group_id = group_ids[path]
         _reconcile_group_role_mappings(
-            admin_url,
             token,
             f"{admin_url}/admin/realms/{realm}/groups/{group_id}/role-mappings/realm",
             path,
@@ -1187,7 +1185,6 @@ def upsert_groups_api(
                 raise SystemExit(1)
             client_role_map = client_role_maps[client_id]
             _reconcile_group_role_mappings(
-                admin_url,
                 token,
                 f"{admin_url}/admin/realms/{realm}/groups/{group_id}/role-mappings/clients/{client_uuid}",
                 path,
