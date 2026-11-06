@@ -388,6 +388,8 @@ def test_incompatible_base(package, tmp_path):
         {"charts/postgres/addon": ">=0.1.4"},
         {"charts/postgres/addon": "0.1"},
         {"charts/postgres/addon": "00.1.4"},
+        {"charts/postgres/addon": "0.1.4-rc.1"},
+        {"charts/postgres/addon": "0.1.4+build.1"},
     ],
 )
 def test_invalid_base_chart_version_prerequisites(package, versions):

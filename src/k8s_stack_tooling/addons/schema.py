@@ -52,26 +52,20 @@ class Contract(BaseModel):
 
 
 class Prerequisites(Contract):
-    base: Version = Field(
-        description="Minimum supported Base release; required chart versions remain exact"
-    )
+    base: Version = Field(description="Minimum supported Base release")
     tooling: Version = Field(description="Minimum supported k8s_stack_tooling SDK version")
     stack_setup: Version = Field(alias="stackSetup")
     base_charts: list[str] = Field(default_factory=list, alias="baseCharts", max_length=100)
-    base_chart_versions: dict[str, str] = Field(default_factory=dict, alias="baseChartVersions")
+    base_chart_versions: dict[str, Version] = Field(
+        default_factory=dict,
+        alias="baseChartVersions",
+        description="Minimum stable chart versions within the same major (same minor for 0.x)",
+    )
 
     @model_validator(mode="after")
     def chart_versions(self):
-        number = r"(?:0|[1-9][0-9]*)"
-        identifier = rf"(?:{number}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
-        semver = (
-            rf"{number}\.{number}\.{number}(?:-{identifier}(?:\.{identifier})*)?"
-            r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-        )
-        if not self.base_chart_versions.keys() <= set(self.base_charts) or any(
-            not re.fullmatch(semver, version) for version in self.base_chart_versions.values()
-        ):
-            raise ValueError("expected declared Base charts and exact chart versions")
+        if not self.base_chart_versions.keys() <= set(self.base_charts):
+            raise ValueError("expected declared Base charts for chart version prerequisites")
         return self
 
 
