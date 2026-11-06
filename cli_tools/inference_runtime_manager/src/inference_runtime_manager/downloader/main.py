@@ -80,9 +80,9 @@ def main(action: str | None = None) -> None:
     client = HuggingFaceClient(huggingface_environment(settings))
     store = ArtifactStore(settings.storage_root.resolve(), client)
     if action is None:
-        _run_menu(store, client, settings, catalog, _ask_text, print)
+        _run_menu(store, client, settings, catalog, print)
     else:
-        _run_selection(action, store, client, settings, catalog, print, _ask_text)
+        _run_selection(action, store, client, settings, catalog, print)
 
 
 def _select_menu_option() -> str | None:
@@ -95,23 +95,11 @@ def _select_menu_option() -> str | None:
     return selection if isinstance(selection, str) else None
 
 
-def _ask_text(message: str) -> str:
-    """Prompt for text and treat cancellation as an operation failure."""
-    try:
-        answer = questionary.text(message).ask()
-    except (EOFError, KeyboardInterrupt):
-        raise MediaDownloaderError("Interactive prompt was cancelled") from None
-    if not isinstance(answer, str):
-        raise MediaDownloaderError("Interactive prompt was cancelled")
-    return answer
-
-
 def _run_menu(
     store: ArtifactStore,
     client: HuggingFaceClient,
     settings: Settings,
     catalog: AvailableCatalog,
-    prompt: Callable[[str], str],
     output: Callable[[str], None],
     menu_prompt: Callable[[], str | None] = _select_menu_option,
 ) -> None:
@@ -125,7 +113,7 @@ def _run_menu(
         if selection is None or selection == "exit":
             output("Exiting.")
             return
-        _run_selection(selection, store, client, settings, catalog, output, prompt)
+        _run_selection(selection, store, client, settings, catalog, output)
 
 
 def _run_selection(
@@ -135,7 +123,6 @@ def _run_selection(
     settings: Settings,
     catalog: AvailableCatalog,
     output: Callable[[str], None],
-    prompt: Callable[[str], str] = input,
 ) -> None:
     """Run one menu operation and preserve the interactive session on failure."""
     try:
