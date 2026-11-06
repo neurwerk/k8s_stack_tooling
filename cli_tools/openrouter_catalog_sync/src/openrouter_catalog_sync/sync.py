@@ -196,41 +196,46 @@ def _policy_pricing_models(
 def fetch_models(source_url: str, client: HttpClient | None = None) -> list[object]:
     """Fetch all pages from the public models endpoint."""
     origin = _safe_source_url(source_url)
+    owned_session: requests.Session | None = None
     if client is None:
-        session = requests.Session()
-        session.auth = _without_auth
-        http: HttpClient = session
+        owned_session = requests.Session()
+        owned_session.auth = _without_auth
+        http: HttpClient = owned_session
     else:
         http = client
-    models: list[object] = []
-    next_url: str | None = source_url
-    visited: set[str] = set()
-    model_ids: set[str] = set()
-    expected_total: int | None = None
-    while next_url is not None:
-        if len(visited) >= MAX_PAGES:
-            raise CatalogSyncError(f"pagination exceeds {MAX_PAGES} pages")
-        if next_url in visited:
-            raise CatalogSyncError(f"pagination cycle detected at {next_url}")
-        visited.add(next_url)
-        page = _fetch_page(http, next_url)
-        data, total_count, following = _page_fields(page, next_url)
-        if expected_total is None:
-            expected_total = total_count
-        elif total_count != expected_total:
-            raise CatalogSyncError(f"total_count changed during pagination at {next_url}")
-        _add_page_records(data, next_url, models, model_ids, expected_total)
-        if following is None:
-            if len(model_ids) != expected_total:
-                raise CatalogSyncError(
-                    f"fetched {len(model_ids)} unique records, expected {expected_total}"
-                )
-            next_url = None
-        else:
-            resolved = urljoin(next_url, following)
-            _require_same_origin(resolved, origin)
-            next_url = resolved
-    return models
+    try:
+        models: list[object] = []
+        next_url: str | None = source_url
+        visited: set[str] = set()
+        model_ids: set[str] = set()
+        expected_total: int | None = None
+        while next_url is not None:
+            if len(visited) >= MAX_PAGES:
+                raise CatalogSyncError(f"pagination exceeds {MAX_PAGES} pages")
+            if next_url in visited:
+                raise CatalogSyncError(f"pagination cycle detected at {next_url}")
+            visited.add(next_url)
+            page = _fetch_page(http, next_url)
+            data, total_count, following = _page_fields(page, next_url)
+            if expected_total is None:
+                expected_total = total_count
+            elif total_count != expected_total:
+                raise CatalogSyncError(f"total_count changed during pagination at {next_url}")
+            _add_page_records(data, next_url, models, model_ids, expected_total)
+            if following is None:
+                if len(model_ids) != expected_total:
+                    raise CatalogSyncError(
+                        f"fetched {len(model_ids)} unique records, expected {expected_total}"
+                    )
+                next_url = None
+            else:
+                resolved = urljoin(next_url, following)
+                _require_same_origin(resolved, origin)
+                next_url = resolved
+        return models
+    finally:
+        if owned_session is not None:
+            owned_session.close()
 
 
 def _fetch_page(http: HttpClient, url: str) -> Mapping[str, object]:

@@ -742,6 +742,7 @@ dependencies = [
     { name = "pyopenssl" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "urllib3" },
 ]
 
 [package.metadata]
@@ -756,6 +757,7 @@ requires-dist = [
     { name = "pyopenssl", specifier = ">=25.3" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "requests", specifier = ">=2.31" },
+    { name = "urllib3", specifier = ">=1.24.2,<3" },
 ]
 
 [package.metadata.requires-dev]
@@ -952,6 +954,7 @@ source = { editable = "." }
 dependencies = [
     { name = "inquirerpy" },
     { name = "k8s-stack-tooling" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "requests" },
 ]
@@ -968,6 +971,7 @@ dev = [
 requires-dist = [
     { name = "inquirerpy", specifier = ">=0.3.4" },
     { name = "k8s-stack-tooling", directory = "../../" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.31" },
 ]

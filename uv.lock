@@ -534,6 +534,7 @@ dependencies = [
     { name = "pyopenssl" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "urllib3" },
 ]
 
 [package.dev-dependencies]
@@ -555,6 +556,7 @@ requires-dist = [
     { name = "pyopenssl", specifier = ">=25.3" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "requests", specifier = ">=2.31" },
+    { name = "urllib3", specifier = ">=1.24.2,<3" },
 ]
 
 [package.metadata.requires-dev]
