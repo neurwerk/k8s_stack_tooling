@@ -59,6 +59,7 @@ class FakeSession:
         json: JsonValue | None,
         timeout: tuple[float, float],
         verify: str,
+        allow_redirects: bool,
     ) -> requests.Response:
         """Handle one fake OpenBao HTTP request."""
         path = urlsplit(url).path.removeprefix("/v1/")
