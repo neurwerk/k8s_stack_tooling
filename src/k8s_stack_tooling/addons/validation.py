@@ -291,16 +291,10 @@ def check(
     check_compatibility(addon, installable=installable)
     check_artifacts(addon, installable=installable)
     check_database_claims([addon])
-    if not re.fullmatch(r"[a-z][a-z0-9-]*", addon.metadata.name):
-        raise ContractError("invalid addon ID")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", addon.spec.version):
-        raise ContractError("invalid addon version")
-    if not re.fullmatch(r"[a-z][a-zA-Z0-9]*", addon.spec.configuration_key):
-        raise ContractError("invalid configuration key")
     if installable and addon.spec.status != "ready":
         raise ContractError("addon is staged; publication prerequisites are incomplete")
     packages = {package.name: package for package in addon.spec.packages}
-    if not packages or len(packages) != len(addon.spec.packages):
+    if len(packages) != len(addon.spec.packages):
         raise ContractError("package names must be nonempty and unique")
     if effective_packages is not None and effective_packages.keys() != packages.keys():
         raise ContractError("effective resources must cover every declared package")
@@ -963,10 +957,7 @@ def check_base(addon: Addon, base: Path, revision: str | None = None) -> None:
             content = run_git(base, "show", f"{revision}:{path}", strip=False)
         except ContractError:
             raise ContractError("required Base file is missing at the selected revision")
-        try:
-            return parse_yaml(content.encode())
-        except yaml.YAMLError:
-            raise ContractError("invalid Base prerequisite YAML") from None
+        return parse_yaml(content.encode())
 
     prerequisites = addon.spec.prerequisites
     try:

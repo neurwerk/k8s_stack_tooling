@@ -62,8 +62,6 @@ class Prerequisites(Contract):
 
     @model_validator(mode="after")
     def chart_versions(self):
-        import re
-
         number = r"(?:0|[1-9][0-9]*)"
         identifier = rf"(?:{number}|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
         semver = (
@@ -164,8 +162,6 @@ class Authentication(Contract):
 
     @model_validator(mode="after")
     def authentication_contract(self):
-        import re
-
         for values, origin in (
             (self.redirect_uris, False),
             (self.web_origins, True),

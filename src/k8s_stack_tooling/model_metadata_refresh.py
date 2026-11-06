@@ -434,12 +434,9 @@ def refresh(
         if model is None:
             counts["skipped_" + reason] += 1
             continue
-        if model.limits.context_tokens is None or model.limits.max_output_tokens is None:
-            # Keep unknowns explicit; consumers decide readiness without guessed limits.
-            output.append(model.model_dump())
-            counts["refreshed"] += 1
-            counts["skipped_missing_limits"] += 1
-            continue
         output.append(model.model_dump())
         counts["refreshed"] += 1
+        if model.limits.context_tokens is None or model.limits.max_output_tokens is None:
+            # Keep unknowns explicit; consumers decide readiness without guessed limits.
+            counts["skipped_missing_limits"] += 1
     return output, dict(counts)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -98,15 +98,9 @@ def fetch_reports(client: GitHubClient, packages: Sequence[PackageConfig]) -> li
             versions = client.list_package_versions(package.package_name)
             report = create_report(package, versions, workflow.workflow_run)
             reports.append(
-                PackageReport(
-                    package=report.package,
-                    channel=report.channel,
-                    version=report.version,
-                    published_at=report.published_at,
-                    digest=report.digest,
+                replace(
+                    report,
                     build_status="unknown" if workflow.failed else report.build_status,
-                    build_url=report.build_url,
-                    error=report.error,
                 )
             )
         except GitHubApiError as error:
