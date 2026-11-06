@@ -972,11 +972,19 @@ def check_base(addon: Addon, base: Path, revision: str | None = None) -> None:
         raise ContractError("Base revision is below the minimum prerequisite")
     for path in prerequisites.base_charts:
         chart = document(f"{path}/Chart.yaml")
-        if path in prerequisites.base_chart_versions and (
-            not isinstance(chart, dict)
-            or chart.get("version") != prerequisites.base_chart_versions[path]
-        ):
-            raise ContractError("Base chart version is not the reviewed prerequisite")
+        if path not in prerequisites.base_chart_versions:
+            continue
+        try:
+            selected_chart = TypeAdapter(Version).validate_python(chart["version"])
+        except (KeyError, TypeError, ValidationError):
+            raise ContractError("selected Base chart version must be a stable release") from None
+        required_parts = tuple(map(int, prerequisites.base_chart_versions[path].split(".")))
+        selected_parts = tuple(map(int, selected_chart.split(".")))
+        if selected_parts < required_parts:
+            raise ContractError("Base chart version is below the minimum prerequisite")
+        series_length = 2 if required_parts[0] == 0 else 1
+        if selected_parts[:series_length] != required_parts[:series_length]:
+            raise ContractError("Base chart version is outside the supported compatibility series")
 
 
 def base_revision(base: Path, ref: dict) -> str:

@@ -307,18 +307,60 @@ def test_base_minimum_rejects_invalid_selected_versions(composition, version):
         check_base(load_manifest(addon / "release/manifest.yaml"), base)
 
 
-def test_newer_base_still_requires_exact_chart_interface(composition):
+@pytest.mark.parametrize(
+    ("required", "selected", "compatible"),
+    [
+        ("1.0.9", "1.0.9", True),
+        ("1.0.9", "1.0.10", True),
+        ("1.0.10", "1.0.9", False),
+        ("1.0.9", "1.1.0", True),
+        ("1.0.9", "2.0.0", False),
+        ("0.1.9", "0.1.9", True),
+        ("0.1.9", "0.1.10", True),
+        ("0.1.10", "0.1.9", False),
+        ("0.1.9", "0.2.0", False),
+        ("0.1.9", "1.0.0", False),
+        ("0.0.9", "0.0.10", True),
+    ],
+)
+def test_base_chart_minimum_requires_compatible_series(composition, required, selected, compatible):
+    _, addon, base, manifest, _, _, _, _ = composition
+    chart = "charts/postgres/addon"
+    manifest["spec"]["prerequisites"].update(
+        baseCharts=[chart], baseChartVersions={chart: required}
+    )
+    write(addon / "release/manifest.yaml", manifest)
+    write(base / "release/manifest.yaml", {"spec": {"version": "2.0.0"}})
+    definition = load_manifest(addon / "release/manifest.yaml")
+    write(base / chart / "Chart.yaml", {"version": selected})
+    if compatible:
+        check_base(definition, base)
+    else:
+        with pytest.raises(ContractError, match="Base chart version"):
+            check_base(definition, base)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"version": None},
+        {"version": 1},
+        {"version": "1.0"},
+        {"version": "01.0.0"},
+        {"version": "1.0.1-rc.1"},
+        {"version": "1.0.1+build.1"},
+        [],
+    ],
+)
+def test_base_chart_minimum_rejects_invalid_selected_versions(composition, document):
     _, addon, base, manifest, _, _, _, _ = composition
     chart = "charts/postgres/addon"
     manifest["spec"]["prerequisites"].update(baseCharts=[chart], baseChartVersions={chart: "1.0.0"})
     write(addon / "release/manifest.yaml", manifest)
-    write(base / "release/manifest.yaml", {"spec": {"version": "2.0.0"}})
-    definition = load_manifest(addon / "release/manifest.yaml")
-    write(base / chart / "Chart.yaml", {"version": "1.0.0"})
-    check_base(definition, base)
-    write(base / chart / "Chart.yaml", {"version": "1.0.1"})
+    write(base / chart / "Chart.yaml", document)
     with pytest.raises(ContractError, match="Base chart version"):
-        check_base(definition, base)
+        check_base(load_manifest(addon / "release/manifest.yaml"), base)
 
 
 def test_base_minimum_rejects_missing_selected_version(composition):
