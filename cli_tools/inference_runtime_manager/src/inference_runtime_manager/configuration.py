@@ -75,12 +75,7 @@ def load_workstation_config() -> WorkstationConfig:
 def save_workstation_config(config: WorkstationConfig) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(config.model_dump(mode="json"), indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    _atomic_text(path, json.dumps(config.model_dump(mode="json"), indent=2) + "\n")
 
 
 def management_state(storage_root: Path | None = None) -> Path:

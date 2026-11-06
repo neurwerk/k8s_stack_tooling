@@ -549,7 +549,6 @@ def guided_models() -> None:
         if action != "download":
             return
         download_selections([selection])
-        local_model = True
     if not runtime_ready:
         if not questionary.confirm(
             f"Prepare the required {RUNTIME_NAMES.get(runtime_family(preset['runtime']), preset['runtime'])} runtime on this workstation?",

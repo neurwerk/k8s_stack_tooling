@@ -131,7 +131,7 @@ class GitHubClient:
             response = self._session.get(f"{_API_URL}{path}", timeout=_TIMEOUT_SECONDS)
             response.raise_for_status()
         except requests.RequestException as error:
-            raise GitHubApiError(_request_error_message(path, error)) from error
+            raise GitHubApiError(f"GitHub request failed for {path}: {error}") from error
         return response.text
 
     @staticmethod
@@ -151,7 +151,9 @@ class GitHubClient:
         try:
             return _VERSIONS_ADAPTER.validate_json(response_text)
         except ValidationError as error:
-            raise GitHubApiError(_invalid_version_message(package_name)) from error
+            raise GitHubApiError(
+                f"GitHub returned invalid version data for {package_name}"
+            ) from error
 
     @staticmethod
     def _parse_runs(response_text: str) -> list[WorkflowRun]:
@@ -170,31 +172,6 @@ class GitHubClient:
             return WorkflowRunList.model_validate_json(response_text).workflow_runs
         except ValidationError as error:
             raise GitHubApiError(_INVALID_WORKFLOW_MESSAGE) from error
-
-
-def _request_error_message(path: str, error: requests.RequestException) -> str:
-    """Build a safe error message for a failed GitHub request.
-
-    Args:
-        path: GitHub API path that failed.
-        error: Underlying requests error.
-
-    Returns:
-        Error description without authentication headers.
-    """
-    return f"GitHub request failed for {path}: {error}"
-
-
-def _invalid_version_message(package_name: str) -> str:
-    """Build an error message for malformed package-version data.
-
-    Args:
-        package_name: Package whose payload was invalid.
-
-    Returns:
-        Error description for the package.
-    """
-    return f"GitHub returned invalid version data for {package_name}"
 
 
 _INVALID_WORKFLOW_MESSAGE = "GitHub returned invalid workflow-run data"
