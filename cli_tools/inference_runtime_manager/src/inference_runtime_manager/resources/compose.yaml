@@ -95,6 +95,44 @@ services:
       start_period: 120s
       retries: 8
 
+  llm-general-qwen38:
+    <<: [*common, *gpu]
+    image: ${LLAMACPP_IMAGE:?Run inference-runtime-manager images and install first}
+    command:
+      - --model
+      - /models/active/llm-general/Qwen3.8-27B-UD-Q6_K.gguf
+      - --alias
+      - llm-general
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --ctx-size
+      - "${LLM_CONTEXT_TOKENS:-4096}"
+      - --cache-type-k
+      - "${LLM_KV_CACHE_TYPE:-f16}"
+      - --cache-type-v
+      - "${LLM_KV_CACHE_TYPE:-f16}"
+      - --flash-attn
+      - "${LLM_FLASH_ATTENTION:-auto}"
+      - --n-gpu-layers
+      - "999"
+      - --jinja
+      - --parallel
+      - "1"
+      - --offline
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${LLM_GENERAL_PORT:-8001}:8000"
+    environment:
+      LLAMA_API_KEY: ${LLM_GENERAL_API_KEY-}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:8000/health]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
   vlm-general:
     <<: [*common, *gpu]
     image: ${LLAMACPP_IMAGE:?Run inference-runtime-manager images and install first}

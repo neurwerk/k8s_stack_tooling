@@ -12,16 +12,28 @@ vlm-documents:
   required_files: [config.json]
   required_any_suffix: [.safetensors, .bin]
 llm-general:
-  runtime: llama.cpp
-  service: llm-general
-  model_id: qwen3-4b
-  variant_id: gguf-q4-k-m
-  enabled: false
-  estimated_vram_gib: 4
-  internal_port: 8000
-  health_path: /health
-  transport: curl
-  required_files: [Qwen3-4B-Q4_K_M.gguf]
+  recipes:
+    - runtime: llama.cpp
+      service: llm-general
+      model_id: qwen3-4b
+      variant_id: gguf-q4-k-m
+      enabled: false
+      default: true
+      estimated_vram_gib: 4
+      internal_port: 8000
+      health_path: /health
+      transport: curl
+      required_files: [Qwen3-4B-Q4_K_M.gguf]
+    - runtime: llama.cpp
+      service: llm-general-qwen38
+      model_id: qwen38-27b
+      variant_id: gguf-ud-q6-k
+      enabled: false
+      estimated_vram_gib: 38
+      internal_port: 8000
+      health_path: /health
+      transport: curl
+      required_files: [Qwen3.8-27B-UD-Q6_K.gguf]
 vlm-general:
   runtime: llama.cpp
   service: vlm-general

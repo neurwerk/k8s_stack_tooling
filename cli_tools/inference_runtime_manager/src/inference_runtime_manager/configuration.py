@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -51,18 +53,78 @@ class WorkstationConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
 
+_profile: ContextVar[str] = ContextVar("inference_runtime_manager_profile", default="default")
+_profile_name = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
+
+
+def active_profile() -> str:
+    return _profile.get()
+
+
+def select_profile(name: str) -> None:
+    if not _profile_name.fullmatch(name):
+        raise ValueError("Profile names must use letters, numbers, hyphens or underscores")
+    if name != "default" and name not in profile_names():
+        raise ValueError(f"Unknown profile: {name}")
+    _profile.set(name)
+
+
+def profile_names() -> list[str]:
+    config_profiles = config_root() / "profiles"
+    state_profiles = _state_base() / "profiles"
+    names = {
+        path.name
+        for directory in (config_profiles, state_profiles)
+        if directory.is_dir()
+        for path in directory.iterdir()
+        if path.is_dir() and _profile_name.fullmatch(path.name)
+    }
+    legacy = (config_root() / "config.json").exists() or any(
+        (_state_base() / name).exists() for name in ("deployment.json", "download.yaml")
+    )
+    prefix: list[str] = ["default"] if legacy or not names else []
+    return prefix + sorted(names - {"default"})
+
+
+def create_profile(name: str) -> None:
+    if name == "default" or not _profile_name.fullmatch(name):
+        raise ValueError("Choose a new profile name using letters, numbers, - or _")
+    if name in profile_names():
+        raise ValueError(f"Profile already exists: {name}")
+    previous = active_profile()
+    try:
+        _profile.set(name)
+        save_workstation_config(WorkstationConfig(runtime=RuntimeConfig(bind_address="127.0.0.1")))
+    finally:
+        _profile.set(previous)
+
+
 def config_root() -> Path:
     base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return base / "inference-runtime-manager"
 
 
 def config_path() -> Path:
-    return config_root() / "config.json"
+    root = config_root()
+    if active_profile() != "default":
+        root = root / "profiles" / active_profile()
+    return root / "config.json"
+
+
+def profile_env_file() -> str | Path:
+    return ".env" if active_profile() == "default" else config_path().with_name(".env")
+
+
+def _state_base() -> Path:
+    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    return base / "inference-runtime-manager"
 
 
 def state_root() -> Path:
-    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
-    return base / "inference-runtime-manager"
+    root = _state_base()
+    if active_profile() != "default":
+        root = root / "profiles" / active_profile()
+    return root
 
 
 def load_workstation_config() -> WorkstationConfig:
@@ -82,6 +144,8 @@ def management_state(storage_root: Path | None = None) -> Path:
     """Return local state, importing legacy small files without moving large data."""
     root = state_root()
     root.mkdir(parents=True, exist_ok=True)
+    if active_profile() != "default":
+        return root
     if storage_root is not None and storage_root.is_dir():
         resolved = storage_root.resolve()
         legacy_files = [resolved / name for name in ("deployment.json", "download.yaml")]

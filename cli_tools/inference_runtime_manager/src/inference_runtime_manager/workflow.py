@@ -29,13 +29,10 @@ from inference_runtime_manager.downloader.catalog import (
 )
 from inference_runtime_manager.downloader.config import Settings, validate_storage
 from inference_runtime_manager.downloader.errors import StorageUnavailableError
-from inference_runtime_manager.downloader.main import _confirm_gated, download_selections
+from inference_runtime_manager.downloader.main import download_selections
 from inference_runtime_manager.downloader.models import DownloadQueue, Selection
 from inference_runtime_manager.downloader.presentation import (
-    CATEGORY_NAMES,
     format_bytes,
-    show_queue,
-    show_variants,
 )
 from inference_runtime_manager.downloader.selection import (
     partition_queue,
@@ -229,46 +226,13 @@ def add_to_download_queue(state_root: Path, selection: Selection) -> None:
 
 
 def select_recipe(alias: str, catalog: Any) -> dict[str, Any] | None:
+    from inference_runtime_manager.downloader.hierarchy import browse
+
     recipes = service_recipes().get(alias, [])
-    families = list(dict.fromkeys(runtime_family(item["runtime"]) for item in recipes))
-    family = questionary.select(
-        "Runtime",
-        choices=[
-            questionary.Choice(RUNTIME_NAMES.get(item, item), value=item) for item in families
-        ],
-    ).ask()
-    if family is None:
+    selected = browse(catalog, {(item["model_id"], item["variant_id"]) for item in recipes})
+    if not selected:
         return None
-    compatible = [item for item in recipes if runtime_family(item["runtime"]) == family]
-    model_ids = list(dict.fromkeys(item["model_id"] for item in compatible))
-    model_id = questionary.select(
-        "Model",
-        choices=[
-            questionary.Choice(
-                catalog.model(item).display_name,
-                value=item,
-                description=catalog.model(item).description,
-            )
-            for item in model_ids
-        ],
-    ).ask()
-    if model_id is None:
-        return None
-    variants = [item for item in compatible if item["model_id"] == model_id]
-    if len(variants) == 1:
-        return variants[0]
-    variant_id = questionary.select(
-        "Variant",
-        choices=[
-            questionary.Choice(
-                f"{item['variant_id']} — {memory_label(item)}",
-                value=item["variant_id"],
-                description=catalog.model(model_id).variant(item["variant_id"]).runtime_notes,
-            )
-            for item in variants
-        ],
-    ).ask()
-    return next((item for item in variants if item["variant_id"] == variant_id), None)
+    return next(item for item in recipes if (item["model_id"], item["variant_id"]) in selected)
 
 
 def show_current_category_status(
@@ -775,6 +739,7 @@ def configuration_menu() -> None:
             downloads("authentication" if action == "login" else "storage_status")
             continue
         if action == "runtime":
+            load_deployment(workstation_state_root(), DeploymentSettings().docker_context)
             runtime_configuration()
             continue
         if action == "storage":
@@ -1054,133 +1019,21 @@ def runtime_configuration() -> None:
 
 
 def select_models() -> None:
-    settings = Settings()
-    root = settings.storage_root
-    storage_ready = configured_storage(settings)
-    catalog = load_catalog()
-    category = questionary.select(
-        "Category",
-        choices=[
-            questionary.Choice(CATEGORY_NAMES.get(c, c), value=c)
-            for c in sorted({m.browse_group for m in catalog.models})
-        ],
-    ).ask()
-    if category is None:
-        return
-    models = [model for model in catalog.models if model.browse_group == category]
-    installed = (
-        {(i.model_id, i.variant_id): i for i in load_installed(root / "installed.yaml").installed}
-        if storage_ready
-        else {}
-    )
-    queue_path = management_state(root) / "download.yaml"
-    queue = load_queue(queue_path)
-    queue = review_obsolete_queue(catalog, queue, print)
-    if queue is None:
-        return
-    selected = {(s.model_id, s.variant_id) for s in queue.selected}
-    table(
-        CATEGORY_NAMES.get(category, category),
-        ["#", "Model", "Variants", "Selected", "Local files"],
-        [
-            [
-                str(i),
-                model.display_name,
-                str(len(model.variants)),
-                ", ".join(
-                    variant.id for variant in model.variants if (model.id, variant.id) in selected
-                )
-                or "—",
-                (
-                    f"{sum(1 for variant in model.variants if (model.id, variant.id) in installed and (root / installed[model.id, variant.id].path).is_dir())}/{len(model.variants)} downloaded"
-                    if storage_ready
-                    else "Storage disconnected"
-                ),
-            ]
-            for i, model in enumerate(models, 1)
-        ],
-    )
-    action = questionary.select(
-        "Catalog", choices=["Select downloads", "Model details", "Back"]
-    ).ask()
-    if action == "Model details":
-        model = questionary.select(
-            "Model details",
-            choices=[
-                questionary.Choice(m.display_name, value=m)
-                for m in catalog.models
-                if m.browse_group == category
-            ],
-        ).ask()
-        if model is not None:
-            show_variants(model, print)
-        return
-    if action != "Select downloads":
-        return
-    chosen = questionary.checkbox(
-        "Select models (Space toggles, Enter chooses variants)",
-        choices=[
-            questionary.Choice(
-                f"{i:>2}  {model.display_name}",
-                value=model.id,
-                checked=any((model.id, variant.id) in selected for variant in model.variants),
-                description=model.description,
-            )
-            for i, model in enumerate(models, 1)
-        ],
-    ).ask()
-    if chosen is None:
-        return
-    kept = [s for s in queue.selected if catalog.model(s.model_id).browse_group != category]
-    category_selections = []
-    for model in models:
-        if model.id not in chosen:
-            continue
-        if len(model.variants) == 1:
-            variant_ids = [model.variants[0].id]
-        else:
-            show_variants(model, print)
-            variant_ids = questionary.checkbox(
-                f"{model.display_name} — select variant(s)",
-                choices=[
-                    questionary.Choice(
-                        f"{variant.id} [{', '.join(variant.runtimes) or 'download only'}] — {format_bytes(variant.estimated_download_bytes)}",
-                        value=variant.id,
-                        checked=(model.id, variant.id) in selected,
-                        description=variant.compatibility_notes,
-                    )
-                    for variant in model.variants
-                ],
-                instruction="Arrows, Space to select, Enter to continue; Ctrl+C cancels.",
-            ).ask()
-            if variant_ids is None:
-                return
-            if not variant_ids:
-                print(f"Select at least one variant for {model.display_name}; queue unchanged.")
-                return
-        category_selections.extend(
-            Selection(modelId=model.id, variantId=variant_id) for variant_id in variant_ids
-        )
-    draft = DownloadQueue(schemaVersion=1, selected=kept + category_selections)
-    show_queue(draft, catalog, print)
-    if not questionary.confirm("Save this download queue?", default=False).ask():
-        print("Download queue unchanged.")
-        return
-    _confirm_gated(catalog, draft.selected)
-    write_queue(queue_path, draft)
-    print(f"Saved {len(draft.selected)} variants. Choose Download queued models next.")
+    from inference_runtime_manager.downloader.main import main as downloads
+
+    downloads("select_models")
 
 
 def upload_models() -> None:
+    from inference_runtime_manager.downloader.hierarchy import browse
+
     root = storage()
     entries = load_installed(root / "installed.yaml").installed
     if not entries:
         print("No downloaded models. Select and download models first.")
         return
-    choices = questionary.checkbox(
-        "Upload downloaded models (files only; does not enable models)",
-        choices=[questionary.Choice(f"{e.model_id} / {e.variant_id}", value=e) for e in entries],
-    ).ask()
+    selected = browse(load_catalog(), {(e.model_id, e.variant_id) for e in entries}, multiple=True)
+    choices = [e for e in entries if (e.model_id, e.variant_id) in (selected or set())]
     if not choices:
         return
     prepared = [prepare_artifact(root, e.model_id, e.variant_id) for e in choices]
@@ -1195,6 +1048,8 @@ def upload_models() -> None:
 
 
 def assign_models() -> None:
+    from inference_runtime_manager.downloader.hierarchy import browse
+
     root = storage()
     state_root = state()
     target = DeploymentSettings().docker_context
@@ -1218,16 +1073,12 @@ def assign_models() -> None:
         print("No downloaded model with a reviewed runtime recipe for this alias.")
         print("Unverified models can be downloaded/uploaded, but cannot be activated yet.")
         return
-    selected = questionary.select(
-        f"Assign {alias}",
-        choices=[
-            questionary.Choice(f"{e.model_id} / {e.variant_id} [{runtime}]", value=(e, runtime))
-            for e, runtime in candidates
-        ],
-    ).ask()
-    if selected is None:
+    selected = browse(catalog, {(e.model_id, e.variant_id) for e, _ in candidates})
+    if not selected:
         return
-    entry, runtime = selected
+    entry, runtime = next(
+        (e, runtime) for e, runtime in candidates if (e.model_id, e.variant_id) in selected
+    )
     # Check actual publication, rather than trusting a previous upload receipt.
     _, manifest = prepare_artifact(root, entry.model_id, entry.variant_id, verify=False)
     if not Docker(DeploymentSettings()).worker({"action": "present", "manifest": manifest})[

@@ -13,6 +13,7 @@ from typing import Any, Protocol
 import yaml
 
 from inference_runtime_manager.downloader.catalog import load_catalog, load_installed
+from inference_runtime_manager.downloader.hierarchy import artifact_path
 from inference_runtime_manager.downloader.integrity import verify_checksums
 from inference_runtime_manager.downloader.models import StoredArtifact
 from inference_runtime_manager.installer.assignments import (
@@ -45,12 +46,18 @@ def prepare_artifact(
     if len(entries) != 1:
         raise ValueError(f"Download {model.id}/{variant.id} before uploading or applying it")
     entry = entries[0]
-    expected = f"models/{model.category}/{source_id}/{entry.revision}/{variant.id}"
-    if entry.path != expected or entry.source != source_id or entry.verification != "sha256":
+    expected = artifact_path(model, variant, entry.revision).as_posix()
+    legacy = f"models/{model.category}/{source_id}/{entry.revision}/{variant.id}"
+    categoryless = Path("models", *Path(expected).parts[2:]).as_posix()
+    if (
+        entry.path not in (expected, legacy, categoryless)
+        or entry.source != source_id
+        or entry.verification != "sha256"
+    ):
         raise ValueError("Installed artifact identity/path does not match the catalog")
     if requested_revision != "main" and entry.revision != requested_revision:
         raise ValueError("Installed artifact differs from the pinned catalog revision")
-    source = root / expected
+    source = root / entry.path
     if source.is_symlink() or not source.resolve().is_relative_to(root.resolve()):
         raise ValueError("Artifact is outside the storage root")
     artifact = StoredArtifact.model_validate(

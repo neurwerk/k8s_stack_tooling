@@ -11,7 +11,7 @@ import questionary
 from pydantic import ValidationError
 from questionary import Choice
 
-from inference_runtime_manager.configuration import management_state
+from inference_runtime_manager.configuration import active_profile, management_state
 from inference_runtime_manager.downloader.catalog import (
     load_catalog,
     load_installed,
@@ -33,11 +33,15 @@ from inference_runtime_manager.downloader.models import (
     DownloadQueue,
     Selection,
 )
+from inference_runtime_manager.downloader.ollama_archive import archived_models
 from inference_runtime_manager.downloader.presentation import (
     format_bytes as _format_bytes,
 )
 from inference_runtime_manager.downloader.presentation import (
     show_installed as _show_installed,
+)
+from inference_runtime_manager.downloader.presentation import (
+    show_ollama_archive as _show_ollama_archive,
 )
 from inference_runtime_manager.downloader.presentation import (
     show_queue as _show_queue,
@@ -135,6 +139,14 @@ def _run_selection(
             _download_queue(store, settings, catalog, output)
         elif selection == "view_installed":
             _show_installed(load_installed(_installed_path(settings)), catalog, output)
+            try:
+                _show_ollama_archive(
+                    archived_models(settings.storage_root, active_profile()), output
+                )
+            except (OSError, ValueError, TypeError, KeyError):
+                output(
+                    "Ollama archive is incomplete or invalid; it is not available in the library."
+                )
         elif selection == "authentication":
             _manage_authentication(client, output)
         elif selection == "storage_status":
@@ -216,8 +228,20 @@ def _synchronize_selections(
     output: Callable[[str], None],
 ) -> list[Selection]:
     """Synchronize selections and return only failures."""
+    from inference_runtime_manager.downloader.migration import library_lock
+
+    with library_lock(settings.storage_root):
+        return _synchronize_locked(store, settings, catalog, selections, output)
+
+
+def _synchronize_locked(
+    store: ArtifactStore,
+    settings: Settings,
+    catalog: AvailableCatalog,
+    selections: list[Selection],
+    output: Callable[[str], None],
+) -> list[Selection]:
     installed_path = _installed_path(settings)
-    installed = load_installed(installed_path)
     remaining = []
     for selection in selections:
         try:
@@ -225,7 +249,9 @@ def _synchronize_selections(
             artifact = store.synchronize(request)
             destination = store.destination(request, artifact.revision)
             relative_path = destination.relative_to(settings.storage_root.resolve())
-            installed = upsert_installed(installed, artifact.to_installed(relative_path))
+            installed = upsert_installed(
+                load_installed(installed_path), artifact.to_installed(relative_path)
+            )
             write_installed(installed_path, installed)
             output(f"Downloaded {selection.model_id}/{selection.variant_id}.")
         except (MediaDownloaderError, OSError, ValidationError, ValueError, TypeError) as error:
@@ -236,6 +262,8 @@ def _synchronize_selections(
 
 def _request_from_selection(catalog: AvailableCatalog, selection: Selection) -> ArtifactRequest:
     """Resolve one queue selection to its curated concrete download request."""
+    from inference_runtime_manager.downloader.hierarchy import component, grouping
+
     model = catalog.model(selection.model_id)
     variant = model.variant(selection.variant_id)
     return ArtifactRequest(
@@ -246,6 +274,11 @@ def _request_from_selection(catalog: AvailableCatalog, selection: Selection) -> 
         revision=variant.revision or model.revision,
         include=variant.include,
         companions=variant.companions,
+        storage_parts=[
+            model.category,
+            *(component(x) for x in grouping(model, variant)),
+            variant.id,
+        ],
     )
 
 
