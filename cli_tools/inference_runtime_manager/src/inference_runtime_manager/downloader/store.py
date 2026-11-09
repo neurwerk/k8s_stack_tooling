@@ -88,6 +88,10 @@ class ArtifactStore:
         Returns:
             Canonical artifact directory path.
         """
+        if request.storage_parts:
+            if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
+                raise ValueError("Artifact revision must be an immutable commit SHA")
+            return self._root.joinpath("models", *request.storage_parts, revision)
         return (
             self._root
             / "models"

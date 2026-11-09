@@ -14,18 +14,30 @@ import yaml
 from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from inference_runtime_manager.configuration import load_workstation_config
+from inference_runtime_manager.configuration import (
+    active_profile,
+    load_workstation_config,
+    profile_env_file,
+)
 
 
 def _configured_docker_context() -> str:
     value = load_workstation_config().docker_context
     if value is None:
+        if active_profile() != "default":
+            raise ValueError("Set the target Docker context for this profile in Setup")
         raise ValueError("Missing workstation configuration: docker_context")
     return value
 
 
 class DeploymentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
+
+    def __init__(self, **values: Any) -> None:
+        if active_profile() != "default" and "_env_file" not in values:
+            values["_env_file"] = profile_env_file()
+        super().__init__(**values)
+
     docker_context: str = Field(
         default_factory=_configured_docker_context,
         validation_alias=AliasChoices(
@@ -115,6 +127,8 @@ class DeploymentSettings(BaseSettings):
     @model_validator(mode="after")
     def apply_workstation_config(self) -> DeploymentSettings:
         configured = load_workstation_config()
+        if active_profile() != "default" and configured.docker_context is None:
+            raise ValueError("Set the target Docker context for this profile in Setup")
         if configured.docker_context is not None:
             self.docker_context = configured.docker_context
         for name, value in configured.runtime.model_dump(exclude_none=True).items():
@@ -400,10 +414,16 @@ class Docker:
                 and environment.get("GLINER_THRESHOLD") == self.environment["GLINER_THRESHOLD"]
                 and environment.get("GLINER_LABELS") == self.environment["GLINER_LABELS"]
             )
-        if service not in {"ner-german", "ner-english", "vlm-documents", "llm-general"}:
+        if service not in {
+            "ner-german",
+            "ner-english",
+            "vlm-documents",
+            "llm-general",
+            "llm-general-qwen38",
+        }:
             return True
         command = self.service_command(service)
-        if service == "llm-general":
+        if service in {"llm-general", "llm-general-qwen38"}:
             expected = {
                 "--ctx-size": str(self.settings.llm_context_tokens),
                 "--cache-type-k": self.settings.llm_kv_cache_type,

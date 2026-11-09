@@ -31,7 +31,12 @@ def load_catalog(path: Path | None = None) -> AvailableCatalog:
         )
     else:
         mapping = _load_mapping(path, "Available catalog")
-    return AvailableCatalog.model_validate(mapping)
+    catalog = AvailableCatalog.model_validate(mapping)
+    if path is None:
+        from inference_runtime_manager.downloader.hierarchy import validate_hierarchy
+
+        validate_hierarchy(catalog)
+    return catalog
 
 
 def load_queue(path: Path) -> DownloadQueue:

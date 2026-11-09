@@ -771,6 +771,82 @@ models:
         estimatedDownloadBytes: 162537607392
         include: ["*UD-Q4_K_M*.gguf"]
 
+  - id: gemma3-4b-it
+    category: vlm
+    displayName: Gemma 3 4B Instruct (llama.cpp)
+    description: Gemma3 vision model for the existing local model endpoint.
+    source: ggml-org/gemma-3-4b-it-GGUF
+    revision: d0976223747697cb51e056d85c532013931fe52e
+    license:
+      name: gemma
+      url: https://ai.google.dev/gemma/terms
+      commercialUse: true
+      noticeRequired: true
+      notes: Retain and comply with the Gemma terms when using or redistributing the weights.
+    metadata:
+      architecture: gemma3
+      parameterCount: 4B
+      languages: [multilingual]
+      intendedUse: instruction-following-and-vision
+    variants:
+      - id: gguf-q4-k-m
+        format: gguf
+        quantization: Q4_K_M
+        estimatedDownloadBytes: 3341008960
+        include: [gemma-3-4b-it-Q4_K_M.gguf, mmproj-model-f16.gguf]
+        runtimes: [llama.cpp]
+        compatibilityNotes: Replacement candidate for Ollama GGUF; target text and vision inference are not yet verified.
+
+  - id: mistral-small32-24b
+    category: vlm
+    displayName: Mistral Small 3.2 24B Instruct (llama.cpp)
+    description: Mistral Small 3.2 vision model for the existing local model endpoint.
+    source: unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF
+    revision: b750ec2299225e492f1bd27cab88a0a595fa848f
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: mistral3
+      parameterCount: 24B
+      languages: [multilingual]
+      intendedUse: instruction-following-and-vision
+    variants:
+      - id: gguf-q4-k-m
+        format: gguf
+        quantization: Q4_K_M
+        estimatedDownloadBytes: 15211976416
+        include: [Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf, mmproj-F16.gguf]
+        runtimes: [llama.cpp]
+        compatibilityNotes: Replacement candidate for Ollama GGUF; preserve the existing separate system prompt at deployment; target text and vision inference are not yet verified.
+
+  - id: qwen36-35b-a3b
+    category: vlm
+    displayName: Qwen3.6 35B A3B (llama.cpp)
+    description: Qwen3.6 vision MoE model for the existing local model endpoint.
+    source: unsloth/Qwen3.6-35B-A3B-GGUF
+    revision: a483e9e6cbd595906af30beda3187c2663a1118c
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: qwen35moe
+      parameterCount: 35B
+      languages: [multilingual]
+      intendedUse: instruction-following-and-vision
+    variants:
+      - id: gguf-ud-q4-k-m
+        format: gguf
+        quantization: UD-Q4_K_M
+        estimatedDownloadBytes: 23033812672
+        include: [Qwen3.6-35B-A3B-UD-Q4_K_M.gguf, mmproj-F16.gguf]
+        runtimes: [llama.cpp]
+        compatibilityNotes: Replacement candidate for Ollama GGUF; target text and vision inference are not yet verified.
+
   - id: qwen38-27b
     category: llm
     displayName: Qwen3.8 27B
@@ -799,6 +875,51 @@ models:
         precision: null
         estimatedDownloadBytes: 13146393504
         include: ["Qwen3.8-27B-UD-Q3_K_XL.gguf"]
+      - id: gguf-ud-q6-k
+        source: unsloth/Qwen3.8-27B-GGUF
+        revision: 4ca720788d1e01f1bff70c033e0d0028fd02e502
+        format: gguf
+        quantization: UD-Q6_K
+        precision: null
+        estimatedDownloadBytes: 21983677344
+        include: ["Qwen3.8-27B-UD-Q6_K.gguf"]
+        runtimes: [llama.cpp]
+        runtimeNotes: "Text-only llama.cpp recipe; use Q8_0 KV cache and verify 262144 context on the target GPU. Vision requires a separate projector recipe."
+
+  - id: qwen38-27b-turbo-fable-cold-fusion-neo-coder-max-mtp
+    category: llm
+    displayName: Qwen3.8 27B Turbo Fable Cold Fusion Heretic Uncensored NEO Coder MAX MTP
+    description: DavidAU Heretic Uncensored fine-tune of Qwen3.8 27B for coding, reasoning, and creative writing.
+    recommended: false
+    source: DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF
+    revision: 926f44a3d81936187ab2af7783ed759f33c39ff5
+    gated: false
+    license:
+      name: Apache-2.0
+      url: https://huggingface.co/DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF
+      commercialUse: true
+      noticeRequired: true
+    metadata:
+      architecture: qwen35
+      parameterCount: 27B
+      contextLength: 262144
+      languages: [en, zh]
+      intendedUse: instruction-following
+    variants:
+      - id: gguf-mtp-q4-k-m
+        format: gguf
+        quantization: Q4_K_M
+        precision: null
+        estimatedDownloadBytes: 18498573856
+        include: ["Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q4_K_M.gguf"]
+        compatibilityNotes: Download only; MTP, vision, and tool-call behavior are not assessed for the pinned runtime.
+      - id: gguf-mtp-q6-k
+        format: gguf
+        quantization: Q6_K
+        precision: null
+        estimatedDownloadBytes: 24033703456
+        include: ["Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q6_K.gguf"]
+        compatibilityNotes: Download only; MTP, vision, and tool-call behavior are not assessed for the pinned runtime.
 
   - id: qwen36-27b
     category: llm

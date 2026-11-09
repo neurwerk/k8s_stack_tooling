@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 
 import questionary
 from pydantic import ValidationError
 
-from inference_runtime_manager.configuration import management_state
+from inference_runtime_manager.configuration import (
+    active_profile,
+    create_profile,
+    load_workstation_config,
+    management_state,
+    profile_names,
+    select_profile,
+    state_root,
+)
 from inference_runtime_manager.downloader.config import Settings
 from inference_runtime_manager.downloader.main import main as downloads
 from inference_runtime_manager.installer.api_tests import manual_menu as manual_tests
@@ -25,6 +34,17 @@ from inference_runtime_manager.installer.voice import voice_cloning_available
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
     from inference_runtime_manager import workflow
 
+    if action == "migrate-storage":
+        from inference_runtime_manager.downloader.config import validate_storage
+        from inference_runtime_manager.downloader.migration import migrate_library
+
+        settings = Settings()
+        validate_storage(settings)
+        for old, new in migrate_library(settings.storage_root, dry_run=dry_run):
+            print(f"{old} -> {new}")
+        return
+    if action not in {"configuration", "slots"}:
+        check_assignment_target()
     local_actions = {
         "guided": workflow.guided_models,
         "runtimes": workflow.runtime_updates,
@@ -123,6 +143,7 @@ def menu() -> None:
                 else []
             ),
             questionary.Separator(" "),
+            questionary.Choice("Switch profile", value="profile"),
             *(
                 [questionary.Choice([("fg:ansigreen", "Apply saved changes")], value="apply")]
                 if workflow.pending_changes()
@@ -130,14 +151,18 @@ def menu() -> None:
             ),
             questionary.Choice("Exit", value="exit"),
         ]
-        action = questionary.select("Inference Runtime Manager", choices=choices).ask()
+        action = questionary.select(
+            f"Inference Runtime Manager [{active_profile()}]", choices=choices
+        ).ask()
         if action in (None, "exit"):
             return
+        if action == "profile":
+            if not profile_menu():
+                return
+            continue
         try:
             if action == "guided":
-                from inference_runtime_manager import workflow
-
-                workflow.guided_models()
+                execute("guided")
             elif action == "configuration":
                 from inference_runtime_manager import workflow
 
@@ -156,6 +181,59 @@ def menu() -> None:
                 "Invalid or incomplete settings; use Setup."
                 if isinstance(exc, ValidationError)
                 else f"Failed: {exc}"
+            )
+
+
+def profile_menu() -> bool:
+    """Choose a profile before loading its settings or contacting a target."""
+    while True:
+        names = profile_names()
+        choice = questionary.select(
+            "Select an inference profile",
+            choices=[
+                *(questionary.Choice(name, value=name) for name in names),
+                questionary.Choice("Create new profile", value="create"),
+                questionary.Choice("Exit", value="exit"),
+            ],
+        ).ask()
+        if choice in (None, "exit"):
+            return False
+        if choice == "create":
+            name = questionary.text("New profile name:").ask()
+            if name is None:
+                continue
+            try:
+                create_profile(name.strip())
+            except ValueError as exc:
+                print(f"Failed: {exc}")
+                continue
+            choice = name.strip()
+        select_profile(choice)
+        configured = load_workstation_config()
+        deployment_path = state_root() / "deployment.json"
+        if deployment_path.is_file():
+            saved_target = json.loads(deployment_path.read_text(encoding="utf-8")).get("target")
+            if configured.docker_context != saved_target:
+                print(
+                    f"Saved assignments belong to {saved_target}, but this profile selects "
+                    f"{configured.docker_context or 'no target'}. Set the matching context in Setup "
+                    "before managing services."
+                )
+        elif configured.docker_context is None and choice != "default":
+            print("Set this profile's target Docker context in Setup before managing services.")
+        print(f"Profile: {choice}")
+        return True
+
+
+def check_assignment_target() -> None:
+    path = state_root() / "deployment.json"
+    if path.is_file():
+        saved = json.loads(path.read_text(encoding="utf-8"))["target"]
+        current = DeploymentSettings().docker_context
+        if saved != current:
+            raise ValueError(
+                f"Saved assignments belong to {saved}, not {current}. "
+                "Select the matching target in Setup before continuing."
             )
 
 
@@ -227,22 +305,34 @@ def main() -> None:
             "queue",
             "login",
             "storage",
+            "migrate-storage",
         ],
     )
     parser.add_argument("slots", nargs="*")
+    parser.add_argument("--profile", help="Use an existing profile for a non-interactive action")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Verify local upload inputs without server access"
+        "--dry-run",
+        action="store_true",
+        help="Preview storage migration or verify local upload inputs",
     )
     args = parser.parse_intermixed_args()
-    if args.dry_run and args.action != "upload":
-        parser.error("--dry-run is only valid for upload")
+    if args.dry_run and args.action not in {"upload", "migrate-storage"}:
+        parser.error("--dry-run is only valid for upload or migrate-storage")
     if args.slots and args.action != "upload":
         parser.error("Model slot arguments are only valid for upload")
     try:
         if args.action:
+            if args.profile:
+                select_profile(args.profile)
+            elif len(profile_names()) > 1:
+                raise ValueError("Specify --profile for non-interactive actions")
             execute(args.action, args.slots, args.dry_run)
         else:
-            menu()
+            if args.profile:
+                select_profile(args.profile)
+                menu()
+            elif profile_menu():
+                menu()
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:

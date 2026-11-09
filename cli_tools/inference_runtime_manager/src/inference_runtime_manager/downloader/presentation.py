@@ -154,25 +154,52 @@ def show_installed(
     state: InstalledState, catalog: AvailableCatalog, output: Callable[[str], None]
 ) -> None:
     """Display verified external-drive installs with actual stored sizes."""
+    from inference_runtime_manager.downloader.hierarchy import grouping
+
     if not state.installed:
         output("No models are installed.")
         return
     console = Console()
-    table = _table("Installed models", "Model / category", "Variant", "Stored size")
+    table = _table(
+        "Installed models",
+        "Category / publisher / family / version / edition",
+        "Variant",
+        "Stored size",
+    )
     models = {model.id: model for model in catalog.models}
+    rows = []
     for item in state.installed:
         model = models.get(item.model_id)
+        selected_variant = (
+            next((v for v in model.variants if v.id == item.variant_id), None) if model else None
+        )
         label = (
-            f"{model.display_name}\n{model.category.upper()}"
-            if model is not None
+            " / ".join(
+                (
+                    CATEGORY_NAMES.get(model.browse_group, model.browse_group),
+                    *grouping(model, selected_variant),
+                )
+            )
+            if model is not None and selected_variant is not None
             else f"{item.model_id}\nNot in current catalog"
         )
         variant = item.variant_id
+        if model is not None:
+            label += f"\n{model.display_name}"
         if model is not None and not any(v.id == item.variant_id for v in model.variants):
             variant += "\nNot in current catalog"
-        table.add_row(
-            Text(label),
-            Text(variant),
-            Text(format_bytes(item.total_bytes)),
-        )
+        rows.append((label, variant, format_bytes(item.total_bytes)))
+    for row in sorted(rows):
+        table.add_row(*(Text(value) for value in row))
+    _emit(console, table, output)
+
+
+def show_ollama_archive(models: list[tuple[str, int]], output: Callable[[str], None]) -> None:
+    """List preserved Ollama files separately from deployable model artifacts."""
+    if not models:
+        return
+    console = Console()
+    table = _table("Archived Ollama models (not deployable)", "Model", "Stored GGUF size")
+    for name, size in models:
+        table.add_row(Text(name), Text(format_bytes(size)))
     _emit(console, table, output)

@@ -367,6 +367,14 @@ class ArtifactRequest(BaseModel):
     revision: str
     include: list[str] = Field(default_factory=list)
     companions: list[ModelCompanion] = Field(default_factory=list)
+    storage_parts: list[str] = Field(default_factory=list)
+
+    @field_validator("storage_parts")
+    @classmethod
+    def safe_storage_parts(cls, value: list[str]) -> list[str]:
+        if any(not _IDENTIFIER.fullmatch(part) or part in (".", "..") for part in value):
+            raise ValueError("Storage hierarchy must use safe path components")
+        return value
 
     @property
     def owner(self) -> str:

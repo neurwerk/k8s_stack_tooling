@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from inference_runtime_manager.configuration import load_workstation_config
+from inference_runtime_manager.configuration import (
+    active_profile,
+    load_workstation_config,
+    profile_env_file,
+)
 from inference_runtime_manager.downloader.errors import StorageUnavailableError
 
 
@@ -31,6 +35,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )
+
+    def __init__(self, **values: Any) -> None:
+        if active_profile() != "default" and "_env_file" not in values:
+            values["_env_file"] = profile_env_file()
+        super().__init__(**values)
 
     storage_root: Path = Field(
         default_factory=lambda: _configured_path("storage_root"),
