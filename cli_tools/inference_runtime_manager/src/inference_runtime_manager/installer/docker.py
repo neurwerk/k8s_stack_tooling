@@ -114,6 +114,9 @@ class DeploymentSettings(BaseSettings):
     )
     vlm_images_port: int = Field(default=8007, ge=1, le=65535, alias="VLM_IMAGES_PORT")
     olmocr_gpu_layers: int = Field(default=999, ge=0, le=999, alias="OLMOCR_GPU_LAYERS")
+    olmocr_context_tokens: int = Field(
+        default=16384, ge=256, le=128000, alias="OLMOCR_CONTEXT_TOKENS"
+    )
     vllm_granite_dtype: str = Field(default="float32", alias="VLLM_GRANITE_DTYPE")
     vllm_granite_gpu_memory_utilization: float = Field(
         default=0.25, gt=0, le=1, alias="VLLM_GRANITE_GPU_MEMORY_UTILIZATION"
@@ -233,6 +236,7 @@ class Docker:
             "GLINER_LABELS": json.dumps(settings.gliner_labels),
             "VLM_IMAGES_PORT": str(settings.vlm_images_port),
             "OLMOCR_GPU_LAYERS": str(settings.olmocr_gpu_layers),
+            "OLMOCR_CONTEXT_TOKENS": str(settings.olmocr_context_tokens),
             "VLLM_GRANITE_DTYPE": settings.vllm_granite_dtype,
             "VLLM_GRANITE_GPU_MEMORY_UTILIZATION": str(
                 settings.vllm_granite_gpu_memory_utilization
@@ -428,8 +432,12 @@ class Docker:
         command = self.service_command(service)
         if service == "vlm-images-olmocr":
             try:
-                return command[command.index("--n-gpu-layers") + 1] == str(
-                    self.settings.olmocr_gpu_layers
+                return all(
+                    command[command.index(flag) + 1] == str(value)
+                    for flag, value in {
+                        "--n-gpu-layers": self.settings.olmocr_gpu_layers,
+                        "--ctx-size": self.settings.olmocr_context_tokens,
+                    }.items()
                 )
             except (ValueError, IndexError):
                 return False

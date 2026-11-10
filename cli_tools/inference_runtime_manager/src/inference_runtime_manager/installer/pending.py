@@ -35,7 +35,7 @@ def snapshots(root: Path, settings: DeploymentSettings) -> dict[str, dict[str, A
         if preset["service"] == "vlm-documents":
             fields += ["vllm_granite_gpu_memory_utilization"]
         if preset["service"] == "vlm-images-olmocr":
-            fields += ["olmocr_gpu_layers"]
+            fields += ["olmocr_gpu_layers", "olmocr_context_tokens"]
         result[alias] = {
             "enabled": True,
             "model": assignment.model_id,

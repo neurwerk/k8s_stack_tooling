@@ -235,7 +235,7 @@ services:
       - --port
       - "8001"
       - --ctx-size
-      - "16384"
+      - ${OLMOCR_CONTEXT_TOKENS:-16384}
       - --repeat-penalty
       - "1.1"
       - --repeat-last-n
