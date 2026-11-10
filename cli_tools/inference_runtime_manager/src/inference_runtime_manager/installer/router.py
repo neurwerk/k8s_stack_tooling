@@ -39,6 +39,11 @@ ROUTER_RECIPES = {
         "mmproj-F16.gguf",
     ),
     ("qwen38-27b", "gguf-ud-q6-k"): ("Qwen3.8-27B-UD-Q6_K.gguf", None),
+    ("qwen38-27b", "gguf-ud-q6-k-vision"): ("Qwen3.8-27B-UD-Q6_K.gguf", "mmproj-F16.gguf"),
+    ("qwen38-27b-turbo-fable-cold-fusion-neo-coder-max-mtp", "gguf-mtp-q6-k-vision"): (
+        "Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q6_K.gguf",
+        "mmproj-F16.gguf",
+    ),
     ("gemma3-4b-it", "gguf-q4-k-m"): ("gemma-3-4b-it-Q4_K_M.gguf", "mmproj-model-f16.gguf"),
     ("qwen36-35b-a3b", "gguf-ud-q4-k-m"): ("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", "mmproj-F16.gguf"),
     **{

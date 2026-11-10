@@ -963,6 +963,16 @@ models:
         include: ["Qwen3.8-27B-UD-Q6_K.gguf"]
         runtimes: [llama.cpp]
         runtimeNotes: "Text-only llama.cpp recipe; use Q8_0 KV cache and verify 262144 context on the target GPU. Vision requires a separate projector recipe."
+      - id: gguf-ud-q6-k-vision
+        estimatedDownloadBytes: 22911284832
+        source: unsloth/Qwen3.8-27B-GGUF
+        revision: 4ca720788d1e01f1bff70c033e0d0028fd02e502
+        format: gguf
+        quantization: UD-Q6_K
+        precision: null
+        include: ["Qwen3.8-27B-UD-Q6_K.gguf", "mmproj-F16.gguf"]
+        runtimes: [llama.cpp]
+        runtimeNotes: "Includes the same-revision F16 vision projector; verify image input and context on the target GPU."
 
   - id: qwen38-27b-turbo-fable-cold-fusion-neo-coder-max-mtp
     category: llm
@@ -998,6 +1008,15 @@ models:
         estimatedDownloadBytes: 24033703456
         include: ["Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q6_K.gguf"]
         compatibilityNotes: Download only; MTP, vision, and tool-call behavior are not assessed for the pinned runtime.
+
+      - id: gguf-mtp-q6-k-vision
+        estimatedDownloadBytes: 24961310432
+        format: gguf
+        quantization: Q6_K
+        precision: null
+        include: ["Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-MTP-Q6_K.gguf", "mmproj-F16.gguf"]
+        runtimes: [llama.cpp]
+        compatibilityNotes: "Includes the publisher's same-revision F16 vision projector; target image acceptance is required. MTP acceleration and tool calls are not verified."
 
   - id: qwen36-27b
     category: llm
