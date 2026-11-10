@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from inference_runtime_manager.configuration import state_root
 from inference_runtime_manager.downloader.config import Settings
+from inference_runtime_manager.downloader.ollama_archive import (
+    ARCHIVE_RECIPES,
+    prepare_archived_bundle,
+)
 from inference_runtime_manager.installer.docker import DeploymentSettings, Docker
 from inference_runtime_manager.installer.images import install_local_images, selected_specs
 from inference_runtime_manager.installer.upload import prepare_artifact, transfer
@@ -35,6 +39,12 @@ ROUTER_RECIPES = {
         "mmproj-F16.gguf",
     ),
     ("qwen38-27b", "gguf-ud-q6-k"): ("Qwen3.8-27B-UD-Q6_K.gguf", None),
+    ("gemma3-4b-it", "gguf-q4-k-m"): ("gemma-3-4b-it-Q4_K_M.gguf", "mmproj-model-f16.gguf"),
+    ("qwen36-35b-a3b", "gguf-ud-q4-k-m"): ("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", "mmproj-F16.gguf"),
+    **{
+        (model, variant): ("sha256-" + digest, None)
+        for model, variant, digest in ARCHIVE_RECIPES.values()
+    },
 }
 
 
@@ -46,11 +56,22 @@ class RouterModel(BaseModel):
     context_tokens: int = Field(ge=256, le=1048576)
     cache_type: Literal["f16", "q8_0", "q4_0"] = "q8_0"
     template: Path | None = None
+    archive_model: Literal["deepseek-r1/32b", "deepseek-r1/70b", "llama3/latest"] | None = None
 
     @model_validator(mode="after")
     def reviewed_recipe(self) -> RouterModel:
         if (self.model_id, self.variant_id) not in ROUTER_RECIPES:
             raise ValueError("No reviewed router recipe for the selected model")
+        archive_identity = next(
+            (
+                name
+                for name, recipe in ARCHIVE_RECIPES.items()
+                if recipe[:2] == (self.model_id, self.variant_id)
+            ),
+            None,
+        )
+        if self.archive_model != archive_identity:
+            raise ValueError("Archive selection does not match the reviewed model/variant")
         return self
 
 
@@ -61,6 +82,7 @@ class RouterConfig(BaseModel):
     port: int = Field(default=11434, ge=1024, le=65535)
     max_loaded: int = Field(default=1, ge=1, le=8)
     models: list[RouterModel] = Field(min_length=1, max_length=32)
+    archive_profile: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9_-]*$")
 
     @field_validator("bind_address")
     @classmethod
@@ -72,6 +94,8 @@ class RouterConfig(BaseModel):
 
     @model_validator(mode="after")
     def unique_models(self) -> RouterConfig:
+        if any(model.archive_model for model in self.models) and self.archive_profile is None:
+            raise ValueError("Archived models require an explicit archive profile")
         identities = [(m.model_id, m.variant_id) for m in self.models]
         aliases = [m.serving_id for m in self.models]
         if len(set(identities)) != len(identities) or len(set(aliases)) != len(aliases):
@@ -131,7 +155,13 @@ def prepare_router(
         "",
     ]
     for index, model in enumerate(config.models):
-        source, manifest = prepare_artifact(model_root, model.model_id, model.variant_id)
+        if model.archive_model is not None:
+            assert config.archive_profile is not None
+            source, manifest = prepare_archived_bundle(
+                model_root, config.archive_profile, model.archive_model
+            )
+        else:
+            source, manifest = prepare_artifact(model_root, model.model_id, model.variant_id)
         weight, projector = ROUTER_RECIPES[(model.model_id, model.variant_id)]
         required = {weight} | ({projector} if projector else set())
         if not required <= {record["path"] for record in manifest["files"]}:
@@ -246,7 +276,9 @@ def accept_router(docker: Docker, container: str, config: RouterConfig) -> None:
         payload = {
             "model": model.serving_id,
             "messages": [{"role": "user", "content": "Reply with exactly READY."}],
-            "max_tokens": 128,
+            "max_tokens": 1024
+            if model.archive_model in {"deepseek-r1/32b", "deepseek-r1/70b"}
+            else 128,
             "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
         }
