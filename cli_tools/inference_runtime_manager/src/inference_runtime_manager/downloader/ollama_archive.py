@@ -1,4 +1,4 @@
-"""Read verified Ollama GGUF archives without treating them as deployable artifacts."""
+"""Inspect retained Ollama archives and verify explicitly reviewed router bundles."""
 
 from __future__ import annotations
 
@@ -6,9 +6,80 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Any
+
+from inference_runtime_manager.installer.worker import safe, sha256
 
 _MODEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*\Z")
 _BLOB = re.compile(r"sha256-[0-9a-f]{64}\Z")
+
+# Reviewed standard GGUF weights with embedded llama.cpp chat templates.
+ARCHIVE_RECIPES = {
+    "deepseek-r1/32b": (
+        "deepseek-r1-32b",
+        "gguf-q4-k-m",
+        "6150cb382311b69f09cc0f9a1b69fc029cbd742b66bb8ec531aa5ecf5c613e93",
+    ),
+    "deepseek-r1/70b": (
+        "deepseek-r1-70b",
+        "gguf-q4-k-m",
+        "4cd576d9aa16961244012223abf01445567b061f1814b57dfef699e4cf8df339",
+    ),
+    "llama3/latest": (
+        "llama3-8b",
+        "gguf-q4-0",
+        "6a0746a1ec1aef3e7ec53868f220ff6e389f6f8ef87a01d77c96807de94ca2aa",
+    ),
+}
+
+
+def prepare_archived_bundle(
+    storage_root: Path, profile: str, name: str
+) -> tuple[Path, dict[str, Any]]:
+    """Verify original archive blobs and reference them without copies or edits."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", profile) or name not in ARCHIVE_RECIPES:
+        raise ValueError("Unreviewed archive profile/model")
+    if any(path.is_symlink() for path in (storage_root, *storage_root.parents)):
+        raise ValueError("Archive storage path must not contain symlinks")
+    root = safe(storage_root, "ollama-archive/" + profile)
+    index_path = safe(root, "index.json")
+    # Check every referenced ancestor before the existing archive inventory reader.
+    if index_path.stat().st_size > 1024 * 1024:
+        raise ValueError("Oversized archive index")
+    index = json.loads(index_path.read_text())
+    for entry in index["models"]:
+        safe(root, entry["path"])
+    safe(root, "blobs")
+    archived_models(storage_root, profile)
+    entry = next((entry for entry in index["models"] if entry["model"] == name), None)
+    if entry is None:
+        raise ValueError("Reviewed model is absent from archive")
+    manifest = json.loads(safe(root, entry["path"]).read_text())
+    model_id, variant_id, weight_hash = ARCHIVE_RECIPES[name]
+    weights = [
+        layer
+        for layer in manifest["layers"]
+        if layer["mediaType"] == "application/vnd.ollama.image.model"
+    ]
+    if weights[0]["digest"] != "sha256:" + weight_hash:
+        raise ValueError("Archive weight differs from reviewed model identity")
+    records = {}
+    blobs = safe(root, "blobs")
+    for layer in [manifest["config"], *manifest["layers"]]:
+        digest = layer["digest"].removeprefix("sha256:")
+        filename = "sha256-" + digest
+        path = safe(blobs, filename)
+        if sha256(path) != digest:
+            raise ValueError("Archive blob checksum mismatch")
+        records[filename] = {"path": filename, "size": path.stat().st_size, "sha256": digest}
+    files = [records[name] for name in sorted(records)]
+    fingerprint = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    return blobs, {
+        "destination": f"library/{model_id}/{entry['sha256']}/{variant_id}/{fingerprint}",
+        "source": "ollama/" + name.split("/")[0],
+        "revision": entry["sha256"],
+        "files": files,
+    }
 
 
 def archived_models(storage_root: Path, profile: str) -> list[tuple[str, int]]:
