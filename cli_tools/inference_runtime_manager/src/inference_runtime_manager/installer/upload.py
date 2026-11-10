@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-import tarfile
 import time
 from pathlib import Path
 from typing import Any, Protocol
@@ -133,28 +132,58 @@ def transfer(docker: Docker, source: Path, manifest: dict[str, Any]) -> None:
     if docker.worker({"action": "present", "manifest": manifest})["present"]:
         print("Previously verified remote bundle is present; skipping upload.")
         return
+    prefixes = docker.worker({"action": "upload_status", "manifest": manifest})
+    if set(prefixes) != {record["path"] for record in manifest["files"]}:
+        raise ValueError("Remote upload status has unexpected paths")
+    for record in manifest["files"]:
+        prefix = prefixes[record["path"]]
+        offset = prefix.get("offset")
+        if type(offset) is not int or not 0 <= offset <= record["size"]:
+            raise ValueError("Invalid remote resume offset")
+        digest = hashlib.sha256()
+        with safe(source, record["path"]).open("rb") as stream:
+            remaining = offset
+            while remaining:
+                chunk = stream.read(min(remaining, 8 * 1024 * 1024))
+                if not chunk:
+                    raise ValueError("Local artifact shortened during resume verification")
+                digest.update(chunk)
+                remaining -= len(chunk)
+        if digest.hexdigest() != prefix.get("sha256"):
+            raise ValueError("Remote upload prefix differs; staged data preserved")
+    resumed = sum(prefix["offset"] for prefix in prefixes.values())
+    print(f"Verified {resumed} previously uploaded bytes; sending remaining bytes.")
     process = subprocess.Popen(
         docker.worker_command(), env=docker.environment, stdin=subprocess.PIPE
     )
     assert process.stdin is not None
     try:
         process.stdin.write(
-            (json.dumps({"action": "receive", "manifest": manifest}) + "\n").encode()
+            (
+                json.dumps({"action": "receive", "manifest": manifest, "prefixes": prefixes}) + "\n"
+            ).encode()
         )
-        with tarfile.open(fileobj=process.stdin, mode="w|") as archive:
-            for record in manifest["files"]:
-                file = source / record["path"]
-                if file.is_symlink():
-                    raise ValueError("Artifact symlinks are not uploaded")
-                with file.open("rb") as stream:
-                    info = tarfile.TarInfo(record["path"])
-                    info.size = record["size"]
-                    info.mode = 0o644
-                    archive.addfile(info, stream)
+        process.stdin.flush()
+        for record in manifest["files"]:
+            offset = prefixes[record["path"]]["offset"]
+            with safe(source, record["path"]).open("rb") as stream:
+                stream.seek(offset)
+                remaining = record["size"] - offset
+                while remaining:
+                    chunk = stream.read(min(remaining, 8 * 1024 * 1024))
+                    if not chunk:
+                        raise ValueError("Local artifact shortened during upload")
+                    process.stdin.write(chunk)
+                    remaining -= len(chunk)
         process.stdin.close()
         if process.wait() != 0:
             raise ValueError("Remote publication failed")
     finally:
+        if not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
         if process.poll() is None:
             process.kill()
             process.wait()
