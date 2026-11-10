@@ -1,0 +1,33 @@
+services:
+  node-exporter:
+    image: ${NODE_EXPORTER_IMAGE:?Prepare the node exporter image}
+    pull_policy: never
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /:/host:ro,rslave
+    command:
+      - --path.rootfs=/host
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --web.listen-address=${MONITORING_BIND_ADDRESS:-127.0.0.1}:9100
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  dcgm-exporter:
+    image: ${DCGM_EXPORTER_IMAGE:?Prepare the GPU exporter image}
+    pull_policy: never
+    restart: unless-stopped
+    network_mode: host
+    hostname: ${MONITORING_HOSTNAME:?Select the target host}
+    gpus: all
+    cap_add: [SYS_ADMIN]
+    environment:
+      DCGM_EXPORTER_LISTEN: ${MONITORING_BIND_ADDRESS:-127.0.0.1}:9400
+      DCGM_EXPORTER_KUBERNETES: "false"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}

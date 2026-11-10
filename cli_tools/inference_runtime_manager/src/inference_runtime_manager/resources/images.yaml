@@ -31,3 +31,6 @@ nemotron-diarization-cuda:
 kserve: kserve/huggingfaceserver@sha256:c84aefd18daf9055aa649fba519751c22818834bf0783ebf5e5032613848914f
 gliner:
   build: gliner
+# Exporters verified on Linux/AMD64; prepared locally for offline delivery.
+node-exporter: prom/node-exporter:v1.12.1@sha256:da83fae85603c4e47e6c68369a7d746e2dda683dc35ea2e234b4f171e0d92798
+dcgm-exporter: nvcr.io/nvidia/k8s/dcgm-exporter:4.8.3@sha256:b4df763de9558e5b3f1f1d79bc65b772fcf65b8a9c3664ea7173e47153112b4a
