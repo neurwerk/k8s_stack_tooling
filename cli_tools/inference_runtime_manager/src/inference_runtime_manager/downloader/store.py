@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
-from uuid import uuid4
 
 import yaml
 
-from inference_runtime_manager.downloader.errors import HuggingFaceCommandError, IntegrityError
+from inference_runtime_manager.downloader.errors import IntegrityError
 from inference_runtime_manager.downloader.huggingface import HuggingFaceClient
 from inference_runtime_manager.downloader.integrity import (
     calculate_checksums,
@@ -140,16 +140,25 @@ class ArtifactStore:
             Stored metadata written for the newly downloaded artifact.
         """
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.parent / f".{revision}.partial-{uuid4().hex}"
+        # Include filters and companion pins are part of the resumable download identity.
+        identity = request.model_copy(update={"revision": revision}).model_dump_json()
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        temporary = destination.parent / f".{revision}.partial-{key}"
         try:
-            temporary.mkdir()
-            self._client.download(request, revision, temporary)
+            temporary.mkdir(exist_ok=True)
+            main_verified = temporary / ".cache" / "inference-runtime-manager" / "main-verified"
+            if not main_verified.exists():
+                self._client.download(request, revision, temporary)
             self._client.verify_download(request, revision, temporary)
+            if not main_verified.exists():
+                for companion in request.companions:
+                    if (temporary / companion.directory).exists():
+                        raise IntegrityError("Companion directory overlaps model content")
+                main_verified.parent.mkdir(parents=True, exist_ok=True)
+                main_verified.touch()
             for companion in request.companions:
                 target = temporary / companion.directory
-                if target.exists():
-                    raise IntegrityError("Companion directory overlaps model content")
-                target.mkdir()
+                target.mkdir(exist_ok=True)
                 companion_request = request.model_copy(
                     update={
                         "source": companion.source,
@@ -170,7 +179,7 @@ class ArtifactStore:
             _write_metadata(temporary / _METADATA_NAME, artifact)
             verify_checksums(temporary, checksums)
             temporary.replace(destination)
-        except (HuggingFaceCommandError, IntegrityError, OSError, ValueError, yaml.YAMLError):
+        except IntegrityError:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
         return artifact
