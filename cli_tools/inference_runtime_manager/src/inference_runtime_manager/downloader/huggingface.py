@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 from inference_runtime_manager.downloader.errors import HuggingFaceCommandError
+from inference_runtime_manager.downloader.http_resume import download_file, metadata
 from inference_runtime_manager.downloader.models import ArtifactRequest
 
 
@@ -102,18 +105,32 @@ class HuggingFaceClient:
         Raises:
             HuggingFaceCommandError: If the CLI download fails.
         """
-        self._run(
-            [
-                "hf",
-                "download",
-                request.source,
-                "--revision",
-                revision,
-                "--local-dir",
-                str(destination),
-                *[argument for pattern in request.include for argument in ("--include", pattern)],
-            ]
-        )
+        selected = []
+        for entry in metadata(request.source, revision, self._environment):
+            name = entry["rfilename"]
+            if request.include and not any(
+                fnmatch.fnmatchcase(name, pattern) for pattern in request.include
+            ):
+                continue
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or ".cache" in path.parts or "\\" in name:
+                raise HuggingFaceCommandError("Invalid model file path")
+            target = destination / path
+            if not target.resolve().is_relative_to(destination.resolve()):
+                raise HuggingFaceCommandError("Model file escapes the download directory")
+            selected.append(name)
+            lfs = entry.get("lfs")
+            digest = lfs["sha256"] if lfs else entry["blobId"]
+            download_file(
+                f"https://huggingface.co/{request.source}/resolve/{revision}/{quote(name, safe='/')}",
+                target,
+                entry["size"],
+                digest,
+                not bool(lfs),
+                self._environment,
+            )
+        if not selected:
+            raise HuggingFaceCommandError("No model files match the selected download")
 
     def verify_download(self, request: ArtifactRequest, revision: str, destination: Path) -> None:
         """Verify a local download against Hugging Face's remote file metadata.
