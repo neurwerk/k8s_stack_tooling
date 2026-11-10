@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import sys
-import tarfile
 import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
@@ -98,7 +97,7 @@ def validate(manifest):
     names = set()
     for item in manifest["files"]:
         name = relative(item["path"])
-        if name in names or name == ".receipt.json":
+        if name in names or name.split("/")[0] == ".receipt.json":
             raise ValueError("Duplicate or reserved artifact filename")
         if type(item["size"]) is not int or item["size"] < 0:
             raise ValueError("Invalid artifact size")
@@ -107,6 +106,8 @@ def validate(manifest):
         names.add(name)
     if not names:
         raise ValueError("Empty artifact")
+    if any(str(parent) in names for name in names for parent in PurePosixPath(name).parents):
+        raise ValueError("Conflicting artifact file and directory paths")
 
 
 def verify(root, manifest):
@@ -144,41 +145,87 @@ def present(manifest):
     return True
 
 
-def receive(manifest):
+def upload_stage(manifest):
     validate(manifest)
+    encoded = json.dumps(manifest, sort_keys=True).encode()
+    identity = hashlib.sha256(encoded).hexdigest()
+    folder = safe(ROOT, ".installer/uploads/" + identity)
+    folder.mkdir(parents=True, exist_ok=True)
+    metadata = safe(folder, "manifest.json")
+    if metadata.exists():
+        if metadata.read_bytes() != encoded:
+            raise ValueError("Conflicting upload manifest; staged data preserved")
+    else:
+        atomic_write(metadata, encoded)
+    stage = safe(folder, "artifact")
+    stage.mkdir(exist_ok=True)
+    return stage
+
+
+def upload_status(manifest):
+    stage = upload_stage(manifest)
+    expected = {record["path"]: record for record in manifest["files"]}
+    directories = {str(parent) for name in expected for parent in PurePosixPath(name).parents}
+    for path in stage.rglob("*"):
+        name = path.relative_to(stage).as_posix()
+        safe(stage, name)
+        if name == ".receipt.json" and path.is_file():
+            if json.loads(path.read_text()) != manifest:
+                raise ValueError("Conflicting staged receipt")
+            continue
+        if not (path.is_dir() and name in directories) and not (
+            path.is_file() and name in expected
+        ):
+            raise ValueError("Unexpected staged upload path")
+    result = {}
+    for name, record in expected.items():
+        path = safe(stage, name)
+        if path.exists() and not path.is_file():
+            raise ValueError("Upload path is not a regular file")
+        size = path.stat().st_size if path.exists() else 0
+        if size > record["size"]:
+            raise ValueError("Oversized staged upload")
+        result[name] = {
+            "offset": size,
+            "sha256": sha256(path) if path.exists() else hashlib.sha256(b"").hexdigest(),
+        }
+    return result
+
+
+def receive(manifest, prefixes):
+    # Recheck under the worker lock: another invocation may have appended since status.
+    current = upload_status(manifest)
+    if prefixes != current:
+        raise ValueError("Staged upload changed since resume status")
     target = safe(ROOT, manifest["destination"])
     if target.exists():
         raise ValueError("Destination exists; inspect before upload")
-    required = sum(record["size"] for record in manifest["files"])
+    required = sum(
+        record["size"] - current[record["path"]]["offset"] for record in manifest["files"]
+    )
     if shutil.disk_usage(ROOT).free < required + 256 * 1024 * 1024:
         raise ValueError("Insufficient remote disk space")
-    with tempfile.TemporaryDirectory(dir=ROOT, prefix=".incoming-") as folder:
-        stage = Path(folder) / "artifact"
-        stage.mkdir()
-        expected = {record["path"]: record for record in manifest["files"]}
-        seen = set()
-        with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
-            for member in archive:
-                name = relative(member.name)
-                if not member.isfile() or name not in expected or name in seen:
-                    raise ValueError("Unexpected archive member")
-                if member.size != expected[name]["size"]:
-                    raise ValueError("Wrong archive member size")
-                path = safe(stage, name)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                source = archive.extractfile(member)
-                if source is None:
-                    raise ValueError("Missing archive data")
-                with source, path.open("xb") as out:
-                    shutil.copyfileobj(source, out, length=8 * 1024 * 1024)
-                path.chmod(0o644)
-                seen.add(name)
-        if seen != set(expected):
-            raise ValueError("Incomplete archive")
-        verify(stage, manifest)
-        (stage / ".receipt.json").write_text(json.dumps(manifest, sort_keys=True))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(stage, target)
+    stage = upload_stage(manifest)
+    for record in manifest["files"]:
+        path = safe(stage, record["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        remaining = record["size"] - current[record["path"]]["offset"]
+        with path.open("ab") as out:
+            while remaining:
+                chunk = sys.stdin.buffer.read(min(remaining, 8 * 1024 * 1024))
+                if not chunk:
+                    raise ValueError("Interrupted upload; staged bytes retained")
+                out.write(chunk)
+                remaining -= len(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        path.chmod(0o644)
+    if sys.stdin.buffer.read(1):
+        raise ValueError("Unexpected trailing upload data")
+    verify(stage, manifest)
+    atomic_write(stage / ".receipt.json", json.dumps(manifest, sort_keys=True).encode())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.rename(stage, target)
 
 
 def cache_view(repo, revision, target, records, base=None):
@@ -402,8 +449,10 @@ def main():
         elif action == "present":
             result = {"present": present(payload["manifest"])}
         elif action == "receive":
-            receive(payload["manifest"])
+            receive(payload["manifest"], payload["prefixes"])
             result = {"published": True}
+        elif action == "upload_status":
+            result = upload_status(payload["manifest"])
         elif action == "activate":
             activate(payload)
             result = {"activated": payload["alias"]}
