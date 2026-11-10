@@ -62,6 +62,16 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "tts-test": tts_menu,
         "voice": voice,
     }
+    if action == "router":
+        from inference_runtime_manager.installer.router import menu as router_menu
+
+        router_menu()
+        return
+    if action == "router-apply":
+        from inference_runtime_manager.installer.router import apply_router
+
+        apply_router()
+        return
     if action == "monitoring":
         from inference_runtime_manager.installer.monitoring import menu as monitoring
 
@@ -252,6 +262,7 @@ def advanced_menu() -> None:
                 questionary.Choice("Enable / disable a service", value="toggle"),
                 questionary.Choice("Prepare or update runtime images", value="runtimes"),
                 questionary.Choice("Manage host / GPU monitoring", value="monitoring"),
+                questionary.Choice("Manage multi-model router", value="router"),
                 questionary.Choice("Verify remote model files (full SHA-256)", value="remote"),
                 questionary.Choice("Back", value="back"),
             ],
@@ -313,16 +324,23 @@ def main() -> None:
             "storage",
             "migrate-storage",
             "monitoring",
+            "router",
+            "router-apply",
         ],
     )
     parser.add_argument("slots", nargs="*")
     parser.add_argument("--profile", help="Use an existing profile for a non-interactive action")
+    parser.add_argument(
+        "--adopt-container", help="Existing router to retain as rollback during router-apply"
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview storage migration or verify local upload inputs",
     )
     args = parser.parse_intermixed_args()
+    if args.adopt_container and args.action != "router-apply":
+        parser.error("--adopt-container is only valid for router-apply")
     if args.dry_run and args.action not in {"upload", "migrate-storage"}:
         parser.error("--dry-run is only valid for upload or migrate-storage")
     if args.slots and args.action != "upload":
@@ -333,7 +351,12 @@ def main() -> None:
                 select_profile(args.profile)
             elif len(profile_names()) > 1:
                 raise ValueError("Specify --profile for non-interactive actions")
-            execute(args.action, args.slots, args.dry_run)
+            if args.adopt_container:
+                from inference_runtime_manager.installer.router import apply_router
+
+                apply_router(args.adopt_container)
+            else:
+                execute(args.action, args.slots, args.dry_run)
         else:
             if args.profile:
                 select_profile(args.profile)

@@ -305,6 +305,77 @@ def restore_active(payload):
         temporary.unlink(missing_ok=True)
 
 
+def router_version_path(version):
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9a-f]{64}", version):
+        raise ValueError("Invalid router configuration version")
+    return safe(CONFIG_ROOT, "router/versions/" + version)
+
+
+def stage_router(payload):
+    files = payload["files"]
+    if not isinstance(files, dict) or not 1 <= len(files) <= 33 or "models.ini" not in files:
+        raise ValueError("Invalid router configuration files")
+    total = 0
+    for name, content in files.items():
+        if name != "models.ini" and not re.fullmatch(r"[a-zA-Z0-9_-]+\.jinja", name):
+            raise ValueError("Invalid router configuration filename")
+        if not isinstance(content, str) or not content or len(content.encode()) > 1024 * 1024:
+            raise ValueError("Invalid or oversized router configuration file")
+        total += len(content.encode())
+    if total > 8 * 1024 * 1024:
+        raise ValueError("Router configuration exceeds 8 MiB")
+    version = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    destination = router_version_path(version)
+    if destination.exists():
+        if {p.name for p in destination.iterdir()} != set(files) or any(
+            safe(destination, name).read_text() != content for name, content in files.items()
+        ):
+            raise ValueError("Existing router configuration failed verification")
+        return {"version": version}
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".router-") as folder:
+        stage = Path(folder) / "version"
+        stage.mkdir()
+        for name, content in files.items():
+            atomic_write(stage / name, content.encode())
+        stage.rename(destination)
+    return {"version": version}
+
+
+def current_router():
+    link = safe(CONFIG_ROOT, "router") / "current"
+    if not link.is_symlink():
+        if link.exists():
+            raise ValueError("Router current configuration is not a link")
+        return {"version": None}
+    target = os.readlink(link)
+    version = target.removeprefix("versions/")
+    path = router_version_path(version)
+    if target != "versions/" + version or not path.is_dir():
+        raise ValueError("Invalid current router configuration")
+    return {"version": version}
+
+
+def select_router(payload):
+    current_router()  # Refuse to overwrite unexpected state.
+    root = safe(CONFIG_ROOT, "router")
+    root.mkdir(parents=True, exist_ok=True)
+    link = root / "current"
+    version = payload["version"]
+    if version is None:
+        link.unlink(missing_ok=True)
+    else:
+        if not router_version_path(version).is_dir():
+            raise ValueError("Router configuration version is not staged")
+        temporary = root / (".current-" + uuid.uuid4().hex)
+        try:
+            temporary.symlink_to("versions/" + version)
+            os.replace(temporary, link)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return {"version": version}
+
+
 def configure():
     chatterbox = b"""server:\n  host: 0.0.0.0\n  port: 8004\n  use_ngrok: false\n  use_auth: false\n  log_file_path: /tmp/chatterbox.log\nmodel:\n  repo_id: chatterbox-multilingual\ntts_engine:\n  device: cuda\n  predefined_voices_path: /runtime-config/voices\n  reference_audio_path: /tmp/reference_audio\n  default_voice_id: default\npaths:\n  model_cache: /models/cache\n  output: /tmp/outputs\ngeneration_defaults:\n  temperature: 0.8\n  exaggeration: 1.0\n  cfg_weight: 0.5\n  seed: 0\n  speed_factor: 1.0\n  language: de\naudio_output:\n  format: wav\n  sample_rate: 24000\n  max_reference_duration_sec: 30\n  save_to_disk: false\nui:\n  title: Chatterbox TTS Server\n  show_language_select: true\n  max_predefined_voices_in_dropdown: 0\ndebug:\n  save_intermediate_audio: false\n"""
     VOICE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -346,6 +417,12 @@ def main():
         elif action == "configure":
             configure()
             result = {"configured": True}
+        elif action == "router_stage":
+            result = stage_router(payload)
+        elif action == "router_current":
+            result = current_router()
+        elif action == "router_select":
+            result = select_router(payload)
         elif action == "receive_voice":
             result = receive_voice(payload)
         elif action == "promote_voice":

@@ -616,6 +616,33 @@ services:
       start_period: 180s
       retries: 12
 
+  chat-router:
+    <<: [*common, *gpu]
+    profiles: [router]
+    image: ${LLAMACPP_IMAGE:?Prepare the llama.cpp runtime image first}
+    volumes:
+      - models:/models:ro
+      - runtime-config:/runtime-config:ro
+    ports:
+      - "${ROUTER_BIND_ADDRESS:-127.0.0.1}:${ROUTER_PORT:-11434}:8000"
+    command:
+      - --models-preset
+      - /runtime-config/router/current/models.ini
+      - --models-max
+      - ${ROUTER_MAX_LOADED:-1}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --offline
+      - --no-webui
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:8000/health]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 8
+
   setup:
     profiles: [setup]
     image: ${SETUP_IMAGE:?Run inference-runtime-manager images and install first}
