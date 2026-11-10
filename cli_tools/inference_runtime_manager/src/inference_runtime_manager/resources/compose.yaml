@@ -241,7 +241,7 @@ services:
       - --repeat-last-n
       - "256"
       - --n-gpu-layers
-      - "999"
+      - ${OLMOCR_GPU_LAYERS:-999}
       - --jinja
       - --parallel
       - "1"

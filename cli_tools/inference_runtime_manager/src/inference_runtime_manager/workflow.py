@@ -917,6 +917,7 @@ def runtime_configuration() -> None:
         "ner_english_dtype": ("English NER precision", "ner-english"),
         "ner_multilingual_dtype": ("Multilingual GLiNER precision", "ner-multilingual"),
         "vllm_granite_gpu_memory_utilization": ("Docling GPU memory fraction", "vlm-documents"),
+        "olmocr_gpu_layers": ("olmOCR GPU layers", "vlm-images"),
         "gliner_threshold": ("GLiNER confidence threshold", "gliner"),
         "gliner_labels": ("GLiNER entity labels", "gliner"),
     }
@@ -946,6 +947,11 @@ def runtime_configuration() -> None:
                 questionary.Choice("FP32 — conservative default", value="float32"),
             ],
             default=getattr(settings, name),
+        ).ask()
+    elif name == "olmocr_gpu_layers":
+        value = questionary.text(
+            "olmOCR GPU layers (0–999; 0 uses CPU layers, 999 offloads all layers):",
+            default=str(settings.olmocr_gpu_layers),
         ).ask()
     elif name == "gliner_labels":
         value = questionary.text(

@@ -113,6 +113,7 @@ class DeploymentSettings(BaseSettings):
         alias="GLINER_LABELS",
     )
     vlm_images_port: int = Field(default=8007, ge=1, le=65535, alias="VLM_IMAGES_PORT")
+    olmocr_gpu_layers: int = Field(default=999, ge=0, le=999, alias="OLMOCR_GPU_LAYERS")
     vllm_granite_dtype: str = Field(default="float32", alias="VLLM_GRANITE_DTYPE")
     vllm_granite_gpu_memory_utilization: float = Field(
         default=0.25, gt=0, le=1, alias="VLLM_GRANITE_GPU_MEMORY_UTILIZATION"
@@ -231,6 +232,7 @@ class Docker:
             "GLINER_THRESHOLD": str(settings.gliner_threshold),
             "GLINER_LABELS": json.dumps(settings.gliner_labels),
             "VLM_IMAGES_PORT": str(settings.vlm_images_port),
+            "OLMOCR_GPU_LAYERS": str(settings.olmocr_gpu_layers),
             "VLLM_GRANITE_DTYPE": settings.vllm_granite_dtype,
             "VLLM_GRANITE_GPU_MEMORY_UTILIZATION": str(
                 settings.vllm_granite_gpu_memory_utilization
@@ -420,9 +422,17 @@ class Docker:
             "vlm-documents",
             "llm-general",
             "llm-general-qwen38",
+            "vlm-images-olmocr",
         }:
             return True
         command = self.service_command(service)
+        if service == "vlm-images-olmocr":
+            try:
+                return command[command.index("--n-gpu-layers") + 1] == str(
+                    self.settings.olmocr_gpu_layers
+                )
+            except (ValueError, IndexError):
+                return False
         if service in {"llm-general", "llm-general-qwen38"}:
             expected = {
                 "--ctx-size": str(self.settings.llm_context_tokens),
