@@ -62,6 +62,11 @@ def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False
         "tts-test": tts_menu,
         "voice": voice,
     }
+    if action == "monitoring":
+        from inference_runtime_manager.installer.monitoring import menu as monitoring
+
+        monitoring()
+        return
     if action in local_actions:
         local_actions[action]()
         return
@@ -246,6 +251,7 @@ def advanced_menu() -> None:
                 questionary.Choice("Downloaded inventory", value="inventory"),
                 questionary.Choice("Enable / disable a service", value="toggle"),
                 questionary.Choice("Prepare or update runtime images", value="runtimes"),
+                questionary.Choice("Manage host / GPU monitoring", value="monitoring"),
                 questionary.Choice("Verify remote model files (full SHA-256)", value="remote"),
                 questionary.Choice("Back", value="back"),
             ],
@@ -306,6 +312,7 @@ def main() -> None:
             "login",
             "storage",
             "migrate-storage",
+            "monitoring",
         ],
     )
     parser.add_argument("slots", nargs="*")
