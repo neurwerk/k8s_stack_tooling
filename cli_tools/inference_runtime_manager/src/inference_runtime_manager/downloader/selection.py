@@ -23,6 +23,8 @@ def partition_queue(
             obsolete.append((selection, "model is not in the current catalog"))
         elif not any(variant.id == selection.variant_id for variant in model.variants):
             obsolete.append((selection, "variant is not in the current catalog"))
+        elif model.variant(selection.variant_id).archive_model is not None:
+            obsolete.append((selection, "archive-only model; select it in the multi-model router"))
         else:
             current.append(selection)
     return DownloadQueue(schemaVersion=1, selected=current), obsolete
@@ -50,8 +52,18 @@ def select_downloads(
     catalog: AvailableCatalog, queue: DownloadQueue, output: Callable[[str], None]
 ) -> DownloadQueue:
     selected = {(item.model_id, item.variant_id) for item in queue.selected}
+    downloadable = {
+        (model.id, variant.id)
+        for model in catalog.models
+        for variant in model.variants
+        if variant.archive_model is None
+    }
+    selected &= downloadable
+    output(
+        "Archive-backed models are available in Manage multi-model router → Add catalogue model; they are not downloaded from Hugging Face."
+    )
     while True:
-        result = browse(catalog, selected=selected, multiple=True)
+        result = browse(catalog, identities=downloadable, selected=selected, multiple=True)
         if result is None:
             raise KeyboardInterrupt
         draft = DownloadQueue(

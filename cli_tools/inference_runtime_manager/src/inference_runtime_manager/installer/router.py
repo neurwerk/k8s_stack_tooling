@@ -400,6 +400,75 @@ def apply_router(legacy_container: str | None = None) -> None:
     print("Router adopted successfully; previous container retained stopped for rollback.")
 
 
+def add_catalogue_model(target: str) -> None:
+    """Save one reviewed model choice without changing a live deployment."""
+    import questionary
+
+    from inference_runtime_manager.configuration import active_profile
+    from inference_runtime_manager.downloader.catalog import load_catalog
+    from inference_runtime_manager.downloader.hierarchy import browse
+
+    config = load_router(target)
+    catalog = load_catalog()
+    configured = {(model.model_id, model.variant_id) for model in config.models}
+    available = {
+        (model.id, variant.id)
+        for model in catalog.models
+        for variant in model.variants
+        if (model.id, variant.id) in ROUTER_RECIPES and (model.id, variant.id) not in configured
+    }
+    if not available:
+        print("All reviewed catalogue router models are already configured.")
+        return
+    selected = browse(catalog, available)
+    if not selected:
+        return
+    model_id, variant_id = next(iter(selected))
+    if (model_id, variant_id) not in available:
+        raise ValueError("Selected model is not an available router recipe")
+    model = catalog.model(model_id)
+    variant = model.variant(variant_id)
+    alias = questionary.text(
+        "Exact serving alias used by clients",
+        default=variant.archive_model.replace("/", ":")
+        if variant.archive_model
+        else model.id + ":local",
+    ).ask()
+    if alias is None:
+        return
+    context = questionary.text(
+        "Context tokens (must fit target memory)",
+        default=str(min(model.metadata.context_length or 32768, 32768)),
+    ).ask()
+    if context is None:
+        return
+    archive_profile = config.archive_profile
+    if variant.archive_model:
+        print(
+            "Archive-backed model: original blobs are verified; no Hugging Face download is used."
+        )
+        if archive_profile is None:
+            archive_profile = questionary.text(
+                "Retained archive profile", default=active_profile()
+            ).ask()
+            if archive_profile is None:
+                return
+    choice = RouterModel(
+        model_id=model_id,
+        variant_id=variant_id,
+        serving_id=alias,
+        context_tokens=int(context),
+        archive_model=variant.archive_model,
+    )
+    if model.metadata.context_length and choice.context_tokens > model.metadata.context_length:
+        raise ValueError("Context exceeds the model's declared limit")
+    draft = config.model_dump()
+    draft["models"].append(choice.model_dump())
+    draft["archive_profile"] = archive_profile
+    save_router(RouterConfig.model_validate(draft))
+    print("Router model saved. Choose Apply router configuration to deploy and verify it.")
+
+
 def menu() -> None:
     """Manage a multi-model endpoint independently of single-model slots."""
     import questionary
@@ -411,6 +480,7 @@ def menu() -> None:
             "Multi-model router",
             choices=[
                 questionary.Choice("Show configuration and container status", value="status"),
+                questionary.Choice("Add catalogue model", value="add-model"),
                 questionary.Choice("Import router configuration JSON", value="configure"),
                 questionary.Choice("Prepare router images on workstation", value="images"),
                 questionary.Choice("Apply router configuration", value="apply"),
@@ -421,7 +491,9 @@ def menu() -> None:
         if action in {None, "back"}:
             return
         deployment = DeploymentSettings()
-        if action == "configure":
+        if action == "add-model":
+            add_catalogue_model(deployment.docker_context)
+        elif action == "configure":
             filename = questionary.path("Router JSON file").ask()
             if filename:
                 config = RouterConfig.model_validate_json(Path(filename).expanduser().read_text())

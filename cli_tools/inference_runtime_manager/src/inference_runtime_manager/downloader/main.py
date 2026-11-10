@@ -266,6 +266,10 @@ def _request_from_selection(catalog: AvailableCatalog, selection: Selection) -> 
 
     model = catalog.model(selection.model_id)
     variant = model.variant(selection.variant_id)
+    if variant.archive_model is not None:
+        raise ValueError(
+            "Archive-only model: use Manage multi-model router → Add catalogue model and select the retained archive profile."
+        )
     return ArtifactRequest(
         model_id=model.id,
         variant_id=variant.id,

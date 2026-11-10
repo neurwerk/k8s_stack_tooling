@@ -87,6 +87,9 @@ class ModelVariant(BaseModel):
     precision: str | None = None
     estimated_download_bytes: int = Field(alias="estimatedDownloadBytes", ge=1)
     include: list[str] = Field(default_factory=list)
+    archive_model: Literal["deepseek-r1/32b", "deepseek-r1/70b", "llama3/latest"] | None = Field(
+        default=None, alias="archiveModel"
+    )
     companions: list[ModelCompanion] = Field(default_factory=list)
     runtime_notes: str = Field(default="", alias="runtimeNotes")
     runtimes: list[
