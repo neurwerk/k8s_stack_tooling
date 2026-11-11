@@ -61,8 +61,8 @@ class ArchiveRouterTests(TestCase):
         patched.start()
         self.addCleanup(patched.stop)
 
-    def prepare(self):
-        return prepare_archived_bundle(self.storage, "server-a", "llama3/latest")
+    def prepare(self, *, verify=True):
+        return prepare_archived_bundle(self.storage, "server-a", "llama3/latest", verify=verify)
 
     def test_mixed_router_keeps_aliases_and_original_archive_untouched(self):
         before = {
@@ -128,11 +128,17 @@ class ArchiveRouterTests(TestCase):
         )
 
     def test_same_size_weight_and_ancillary_corruption_fails(self):
+        expected = self.prepare()
         for layer in self.layers:
             path = self.blobs / layer["digest"].replace(":", "-")
             original = path.read_bytes()
             with self.subTest(layer=layer["mediaType"]):
                 path.write_bytes(original[:-1] + b"X")
+                with patch(
+                    "inference_runtime_manager.downloader.ollama_archive.sha256",
+                    side_effect=AssertionError("Metadata preparation must not hash blobs"),
+                ):
+                    self.assertEqual(self.prepare(verify=False), expected)
                 with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                     self.prepare()
                 path.write_bytes(original)
@@ -144,9 +150,13 @@ class ArchiveRouterTests(TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "reviewed model identity"):
                 self.prepare()
+            with self.assertRaisesRegex(ValueError, "reviewed model identity"):
+                self.prepare(verify=False)
         self.manifest_path.write_text("{}")
         with self.assertRaisesRegex(ValueError, "manifest digest"):
             self.prepare()
+        with self.assertRaisesRegex(ValueError, "manifest digest"):
+            self.prepare(verify=False)
         with self.assertRaisesRegex(ValueError, "Archive selection"):
             RouterModel(
                 model_id="llama3-8b",
@@ -164,3 +174,10 @@ class ArchiveRouterTests(TestCase):
         self.blobs.symlink_to(moved, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "symlink"):
             self.prepare()
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.prepare(verify=False)
+
+    def test_metadata_preparation_rejects_resized_blob(self):
+        (self.blobs / ("sha256-" + self.digest)).write_bytes(b"GGUFshort")
+        with self.assertRaisesRegex(ValueError, "blob size"):
+            self.prepare(verify=False)

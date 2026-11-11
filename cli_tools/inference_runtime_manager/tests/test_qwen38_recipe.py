@@ -19,7 +19,11 @@ from inference_runtime_manager.downloader.models import (
     StoredArtifact,
 )
 from inference_runtime_manager.installer.assignments import load_deployment, recipe, services
-from inference_runtime_manager.installer.upload import activate_with_rollback, prepare_recipe
+from inference_runtime_manager.installer.upload import (
+    activate_with_rollback,
+    prepare_artifact,
+    prepare_recipe,
+)
 
 
 class QwenRecipeTests(TestCase):
@@ -110,6 +114,15 @@ class QwenRecipeTests(TestCase):
             )
             _, _, application = prepare_recipe(root, "llm-general", preset)
             self.assertEqual(application["service"], "llm-general-qwen38")
+            expected = prepare_artifact(root, request.model_id, request.variant_id)
+            (model / name).write_bytes(content[:-1] + b"X")
+            self.assertEqual(
+                prepare_artifact(root, request.model_id, request.variant_id, verify=False), expected
+            )
+            with self.assertRaisesRegex(IntegrityError, "checksums do not match"):
+                prepare_artifact(root, request.model_id, request.variant_id)
             (model / name).write_bytes(b"corrupted")
+            with self.assertRaisesRegex(ValueError, "Missing/resized"):
+                prepare_artifact(root, request.model_id, request.variant_id, verify=False)
             with self.assertRaisesRegex(IntegrityError, "checksums do not match"):
                 prepare_recipe(root, "llm-general", preset)
