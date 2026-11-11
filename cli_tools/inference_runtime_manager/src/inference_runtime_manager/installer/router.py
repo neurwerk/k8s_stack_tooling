@@ -278,15 +278,24 @@ def accept_router(docker: Docker, container: str, config: RouterConfig) -> None:
     """Exercise exact aliases inside the target, including switching back to the first."""
     choices = config.models + (config.models[:1] if len(config.models) > 1 else [])
     for model in choices:
+        reasoning = model.archive_model in {"deepseek-r1/32b", "deepseek-r1/70b"}
+        request_timeout = 600 if reasoning else 300
         payload = {
             "model": model.serving_id,
             "messages": [{"role": "user", "content": "Reply with exactly READY."}],
-            "max_tokens": 1024
-            if model.archive_model in {"deepseek-r1/32b", "deepseek-r1/70b"}
-            else 128,
+            "max_tokens": 128,
             "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
         }
+        if reasoning:
+            # R1 cannot disable thinking; greedy decoding can loop in reasoning.
+            payload.update(
+                max_tokens=4096,
+                temperature=0.6,
+                top_p=0.95,
+                reasoning_format="deepseek",
+            )
+            del payload["chat_template_kwargs"]
         result = subprocess.run(
             docker.docker_command
             + [
@@ -298,7 +307,7 @@ def accept_router(docker: Docker, container: str, config: RouterConfig) -> None:
                 "--silent",
                 "--show-error",
                 "--max-time",
-                "300",
+                str(request_timeout),
                 "-H",
                 "Content-Type: application/json",
                 "--data-binary",
@@ -310,10 +319,13 @@ def accept_router(docker: Docker, container: str, config: RouterConfig) -> None:
             text=True,
             capture_output=True,
             check=True,
-            timeout=310,
+            timeout=request_timeout + 10,
         )
         response = json.loads(result.stdout)
-        content = response["choices"][0]["message"].get("content")
+        choice = response["choices"][0]
+        if choice.get("finish_reason") != "stop":
+            raise ValueError(f"Router acceptance did not complete for {model.serving_id}")
+        content = choice["message"].get("content")
         if not isinstance(content, str) or not content.strip():
             raise ValueError(f"Router acceptance returned no text for {model.serving_id}")
         print(f"Router acceptance passed: {model.serving_id}")
