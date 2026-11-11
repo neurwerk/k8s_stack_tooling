@@ -81,7 +81,9 @@ def prepare_artifact(
     if safe(source, "checksums.sha256").read_text() != expected_checksums:
         raise ValueError("Checksum index disagrees with artifact metadata")
     for record in artifact.files:
-        safe(source, record.path)
+        path = safe(source, record.path)
+        if not verify and (not path.is_file() or path.stat().st_size != record.size):
+            raise ValueError(f"Missing/resized artifact file: {record.path}")
     if verify:
         verify_checksums(source, artifact.files)
     records = [record.model_dump() for record in artifact.files]

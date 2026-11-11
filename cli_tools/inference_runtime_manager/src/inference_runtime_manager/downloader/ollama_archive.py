@@ -34,7 +34,7 @@ ARCHIVE_RECIPES = {
 
 
 def prepare_archived_bundle(
-    storage_root: Path, profile: str, name: str
+    storage_root: Path, profile: str, name: str, *, verify: bool = True
 ) -> tuple[Path, dict[str, Any]]:
     """Verify original archive blobs and reference them without copies or edits."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", profile) or name not in ARCHIVE_RECIPES:
@@ -69,7 +69,7 @@ def prepare_archived_bundle(
         digest = layer["digest"].removeprefix("sha256:")
         filename = "sha256-" + digest
         path = safe(blobs, filename)
-        if sha256(path) != digest:
+        if verify and sha256(path) != digest:
             raise ValueError("Archive blob checksum mismatch")
         records[filename] = {"path": filename, "size": path.stat().st_size, "sha256": digest}
     files = [records[name] for name in sorted(records)]

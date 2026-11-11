@@ -1,5 +1,6 @@
 """Protect target isolation and model identity at the router planning boundary."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -53,6 +54,89 @@ def config(target: str = "server-a") -> RouterConfig:
 
 
 class RouterTests(TestCase):
+    def test_same_size_remote_corruption_blocks_switch_despite_receipt(self):
+        module = "inference_runtime_manager.installer.router"
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            content = b"verified weights"
+            manifest = {
+                "destination": "library/test/model",
+                "files": [
+                    {
+                        "path": "model.gguf",
+                        "size": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                ],
+            }
+            target = root / manifest["destination"]
+            target.mkdir(parents=True)
+            (target / ".receipt.json").write_text(json.dumps(manifest))
+            (target / "model.gguf").write_bytes(content[:-1] + b"X")
+            selected = config()
+            selected.models = selected.models[:1]
+            with (
+                patch.object(worker, "ROOT", root),
+                patch(module + ".DeploymentSettings") as deployment,
+                patch(module + ".load_router", return_value=selected),
+                patch(module + ".applied_router", return_value=None),
+                patch(module + ".Settings"),
+                patch(
+                    module + ".prepare_router",
+                    return_value=({"models.ini": "config"}, [(root, manifest)]),
+                ),
+                patch(module + ".Docker") as factory,
+                patch(module + ".install_local_images"),
+                patch(module + ".prepare_artifact") as local,
+                patch(module + ".transfer") as transfer,
+                patch(module + ".publish_config") as publish,
+                patch(module + ".subprocess.run") as run,
+            ):
+                deployment.return_value.docker_context = "server-a"
+                factory.return_value.worker.side_effect = lambda p: {
+                    "present": getattr(worker, p["action"])(p["manifest"])
+                }
+                self.assertTrue(worker.present(manifest))
+                with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
+                    apply_router("legacy-router")
+                local.assert_not_called()
+                transfer.assert_not_called()
+                publish.assert_not_called()
+                run.assert_not_called()
+
+    def test_missing_remote_bundle_requires_unchanged_fully_verified_local_bundle(self):
+        module = "inference_runtime_manager.installer.router"
+        selected = config()
+        selected.models = selected.models[:1]
+        for failure in (ValueError("local checksum mismatch"), (Path("/changed"), {})):
+            with (
+                self.subTest(failure=failure),
+                patch(module + ".DeploymentSettings") as deployment,
+                patch(module + ".load_router", return_value=selected),
+                patch(module + ".applied_router", return_value=None),
+                patch(module + ".Settings") as settings,
+                patch(
+                    module + ".prepare_router",
+                    return_value=({"models.ini": "config"}, [(Path("/local"), {})]),
+                ),
+                patch(module + ".Docker") as factory,
+                patch(module + ".install_local_images"),
+                patch(module + ".prepare_artifact", side_effect=[failure]) as local,
+                patch(module + ".transfer") as transfer,
+                patch(module + ".publish_config") as publish,
+                patch(module + ".subprocess.run") as run,
+            ):
+                deployment.return_value.docker_context = "server-a"
+                factory.return_value.worker.return_value = {"present": False}
+                with self.assertRaises(ValueError):
+                    apply_router("legacy-router")
+                local.assert_called_once_with(
+                    settings.return_value.storage_root, "mistral-small32-24b", "gguf-q4-k-m"
+                )
+                transfer.assert_not_called()
+                publish.assert_not_called()
+                run.assert_not_called()
+
     def test_second_remote_bundle_failure_never_stops_previous_router(self):
         module = "inference_runtime_manager.installer.router"
         with (
@@ -70,7 +154,12 @@ class RouterTests(TestCase):
             patch(module + ".subprocess.run") as run,
         ):
             deployment.return_value.docker_context = "server-a"
-            factory.return_value.worker.side_effect = [{"present": True}, {"present": False}]
+            factory.return_value.worker.side_effect = [
+                {"present": True},
+                {"present": True},
+                {"present": True},
+                {"present": False},
+            ]
             with self.assertRaisesRegex(ValueError, "full verification"):
                 apply_router("legacy-router")
             run.assert_not_called()
@@ -167,7 +256,7 @@ class RouterTests(TestCase):
                 select_profile("default")
 
     def test_aliases_and_required_projector_survive_rendering(self):
-        def artifact(root, model, variant):
+        def artifact(root, model, variant, *, verify=True):
             names = [name for name in ROUTER_RECIPES[(model, variant)] if name]
             return root, {
                 "destination": f"library/{model}/revision/variant/fingerprint",

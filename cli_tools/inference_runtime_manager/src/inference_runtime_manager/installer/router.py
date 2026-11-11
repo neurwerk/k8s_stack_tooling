@@ -141,9 +141,9 @@ def read_template(path: Path) -> str:
 
 
 def prepare_router(
-    config: RouterConfig, target: str, model_root: Path
+    config: RouterConfig, target: str, model_root: Path, *, verify: bool = True
 ) -> tuple[dict[str, str], list[tuple[Path, dict[str, Any]]]]:
-    """Verify all local bundles and render config before contacting the target."""
+    """Validate local bundle identities and render config, optionally hashing contents."""
     if config.target != target:
         raise ValueError("Saved router belongs to a different Docker context")
     artifacts = []
@@ -163,10 +163,12 @@ def prepare_router(
         if model.archive_model is not None:
             assert config.archive_profile is not None
             source, manifest = prepare_archived_bundle(
-                model_root, config.archive_profile, model.archive_model
+                model_root, config.archive_profile, model.archive_model, verify=verify
             )
         else:
-            source, manifest = prepare_artifact(model_root, model.model_id, model.variant_id)
+            source, manifest = prepare_artifact(
+                model_root, model.model_id, model.variant_id, verify=verify
+            )
         weight, projector = ROUTER_RECIPES[(model.model_id, model.variant_id)]
         required = {weight} | ({projector} if projector else set())
         if not required <= {record["path"] for record in manifest["files"]}:
@@ -329,11 +331,24 @@ def apply_router(legacy_container: str | None = None) -> None:
     if legacy_container and (legacy_container.startswith("-") or "/" in legacy_container):
         raise ValueError("Invalid legacy container name")
     settings = Settings()
-    files, artifacts = prepare_router(config, deployment.docker_context, settings.storage_root)
+    files, artifacts = prepare_router(
+        config, deployment.docker_context, settings.storage_root, verify=False
+    )
     docker = Docker(deployment)
     install_local_images(docker, settings, ["setup", "llamacpp"])
-    for source, manifest in artifacts:
-        transfer(docker, source, manifest)
+    for model, (source, manifest) in zip(config.models, artifacts, strict=True):
+        if not docker.worker({"action": "present", "manifest": manifest})["present"]:
+            if model.archive_model is not None:
+                assert config.archive_profile is not None
+                verified = prepare_archived_bundle(
+                    settings.storage_root, config.archive_profile, model.archive_model
+                )
+            else:
+                verified = prepare_artifact(settings.storage_root, model.model_id, model.variant_id)
+            if verified != (source, manifest):
+                raise ValueError("Local model bundle identity changed during preparation")
+            transfer(docker, source, manifest)
+        # Receipts only decide whether to upload; always hash the serving bytes before switching.
         if not docker.worker({"action": "inspect", "manifest": manifest})["present"]:
             raise ValueError("Remote model bundle did not pass full verification")
     version = publish_config(docker, files)
