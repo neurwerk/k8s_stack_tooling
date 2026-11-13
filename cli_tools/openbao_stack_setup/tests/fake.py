@@ -81,7 +81,23 @@ class FakeSession:
             return access_response
         if path.startswith("secret/data/"):
             return self._secret_request(method, path.removeprefix("secret/data/"), json)
+        if path.startswith("secret/metadata/"):
+            return self._metadata_request(method, path.removeprefix("secret/metadata/"))
         return _response(204)
+
+    def _metadata_request(self, method: str, record: str) -> requests.Response:
+        if method == "LIST":
+            keys = set()
+            for name in self.secrets:
+                if name.startswith(record + "/"):
+                    child = name[len(record) + 1 :]
+                    keys.add(child.split("/", 1)[0] + ("/" if "/" in child else ""))
+            values = cast(list[JsonValue], sorted(keys))
+            return _response(200, {"data": {"keys": values}}) if keys else _response(404)
+        if method == "DELETE":
+            self.secrets.pop(record, None)
+            return _response(204)
+        raise AssertionError("Unexpected KV metadata request")
 
     def _access_request(self, method: str, path: str, body: JsonValue) -> requests.Response | None:
         for prefix, records in (

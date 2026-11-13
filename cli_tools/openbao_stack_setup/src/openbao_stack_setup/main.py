@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import json
 import os
 import shutil
 import signal
@@ -20,7 +21,12 @@ from typing import Never, TextIO, override
 
 import questionary
 import requests
-from k8s_stack_tooling.addons import ContractError, VerifiedSelection, valid_value
+from k8s_stack_tooling.addons import (
+    ContractError,
+    VerifiedSelection,
+    selection_projection,
+    valid_value,
+)
 from kubernetes.client.exceptions import ApiException
 
 from openbao_stack_setup.access import apply_access, complete_access
@@ -68,6 +74,7 @@ from openbao_stack_setup.librechat_preservation import preserve_librechat
 from openbao_stack_setup.mcp import reconcile_mcp
 from openbao_stack_setup.native import NativeError
 from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, Provider, update_provider
+from openbao_stack_setup.purge import purge_addon, removed_addon_prefix
 from openbao_stack_setup.reconcile import (
     ReconciliationIdentity,
     plan_reconciliation_access,
@@ -131,6 +138,16 @@ def _arguments() -> argparse.ArgumentParser:
     reconcile.add_argument("--confirm", metavar="CLIENT")
     _credential_arguments(reconcile)
     reconcile.add_argument("--rotate-contextforge-token", action="store_true")
+    purge = _guarded(
+        commands.add_parser(
+            "purge-addon",
+            help="Permanently delete a removed add-on's OpenBao versions and owned access",
+        )
+    )
+    purge.add_argument("addon")
+    purge.add_argument("--custody-root", type=Path)
+    purge.add_argument("--custodian-package", action="append", type=Path, required=True)
+    purge.add_argument("--confirm", metavar="CLIENT")
     preserve = _guarded(commands.add_parser("preserve-librechat"))
     preserve.add_argument("--custody-root", type=Path)
     preserve.add_argument("--custodian-package", action="append", type=Path, required=True)
@@ -180,11 +197,20 @@ def main() -> None:
     args = _arguments().parse_args()
     try:
         verified = None
-        if args.command in ("preflight", "bootstrap", "reconcile", "preserve-librechat"):
+        if args.command in (
+            "preflight",
+            "bootstrap",
+            "reconcile",
+            "preserve-librechat",
+            "purge-addon",
+        ):
             cluster = Cluster(args.context)
             cluster.identity(args.client)
             verified = verify_client_sources(cluster)
-        _dispatch(args, verified)
+        if args.command == "purge-addon" and verified is not None:
+            _purge_addon(args, SelectedRun(verified))
+        else:
+            _dispatch(args, verified)
     except (
         ClusterError,
         ContractError,
@@ -546,6 +572,51 @@ def _reconcile(
         print("LibreChat credentials preserved; temporary root revoked. Run reconciliation next.")
     else:
         print("Selected credentials and access prepared; temporary root revoked.")
+
+
+def _purge_addon(args: argparse.Namespace, run: SelectedRun) -> None:
+    run.require_verified()
+    prefix = removed_addon_prefix(args.addon, run.setups)
+    cluster = Cluster(args.context)
+    identity = cluster.identity(args.client)
+
+    def verify_selection() -> None:
+        data = cluster.selection_projection().get("data")
+        try:
+            live = json.loads(data["selection.json"]) if isinstance(data, dict) else None
+        except (KeyError, TypeError, ValueError):
+            raise SetupError("Staged selection is invalid; refusing purge") from None
+        if live != selection_projection(run.verified):
+            raise SetupError("Staged selection changed; refusing purge")
+
+    verify_selection()
+    _confirm(
+        args.context,
+        args.client,
+        f"Permanently delete ALL versions under {prefix} and remove owned access",
+        args.confirm,
+    )
+    cluster.require_openbao_release()
+    paths = prepare_custody_paths(args.custody_root or default_custody_root(args.client))
+    kit = _bound_kit(paths.seal_file, identity)
+    if kit.checkpoint != "complete" or kit.pending_bootstrap_passwords:
+        raise SetupError("Complete bootstrap and pending password handover before purging")
+    shares = _decrypt_custodian_packages(_required_package_paths(args.custodian_package), kit)
+    cluster.wait_openbao_endpoint()
+    with _openbao(cluster) as unauthenticated:
+        token = unauthenticated.create_recovery_root_token(shares)
+        root = OpenBaoClient(_ADDRESS, token, unauthenticated.ca_cert, unauthenticated.session)
+        try:
+            count = purge_addon(
+                root,
+                ReconciliationIdentity(kit.client, kit.cluster_id, kit.namespace_uid),
+                args.addon,
+                run.setups,
+                verify_selection=verify_selection,
+            )
+        finally:
+            root.revoke_self()
+    print(f"Purged {count} add-on records and owned grants; temporary root revoked.")
 
 
 def _prepare_selected(
