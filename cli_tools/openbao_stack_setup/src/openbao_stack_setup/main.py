@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import json
 import os
 import shutil
 import signal
@@ -582,11 +581,7 @@ def _purge_addon(args: argparse.Namespace, run: SelectedRun) -> None:
 
     def verify_selection() -> None:
         data = cluster.selection_projection().get("data")
-        try:
-            live = json.loads(data["selection.json"]) if isinstance(data, dict) else None
-        except (KeyError, TypeError, ValueError):
-            raise SetupError("Staged selection is invalid; refusing purge") from None
-        if live != selection_projection(run.verified):
+        if data != selection_projection(run.verified)["data"]:
             raise SetupError("Staged selection changed; refusing purge")
 
     verify_selection()
