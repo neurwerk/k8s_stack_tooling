@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -356,6 +357,24 @@ class OpenBaoClient:
             },
         )
 
+    def list_secret_metadata(self, path: str) -> tuple[str, ...]:
+        """List immediate KV v2 children, including records whose values were deleted."""
+        _secret_path(path)
+        response = self._request("LIST", f"secret/metadata/{path}", allow_not_found=True)
+        if response is None:
+            return ()
+        keys = _mapping(_mapping(response, "KV listing").get("data"), "KV listing data").get("keys")
+        if not isinstance(keys, list) or any(
+            not isinstance(key, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+/?", key) for key in keys
+        ):
+            raise OpenBaoError("OpenBao returned an invalid KV metadata listing")
+        return tuple(sorted(set(cast(list[str], keys))))
+
+    def purge_secret(self, path: str) -> None:
+        """Permanently delete a KV v2 record's metadata and every stored version."""
+        _secret_path(path)
+        self._request("DELETE", f"secret/metadata/{path}", allow_not_found=True)
+
     def read_secret(self, path: str) -> SecretRecord | None:
         """Read a KV v2 record, returning None when it does not exist."""
         payload = self._request("GET", f"secret/data/{path}", allow_not_found=True)
@@ -428,6 +447,11 @@ class OpenBaoClient:
                 f"OpenBao request {method} /v1/{path} returned invalid JSON"
             ) from None
         return _json_value(payload, f"{method} /v1/{path} response")
+
+
+def _secret_path(path: str) -> None:
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*", path):
+        raise OpenBaoError("KV metadata path must name an exact record or directory")
 
 
 def _mapping(value: JsonValue | object, location: str) -> dict[str, JsonValue]:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version as distribution_version
 
 from openbao_stack_setup.access import (
@@ -249,6 +249,24 @@ def plan_reconciliation_access(
         values["appliedVersion"] = 0
         record = SecretRecord(values, 0)
     return plan_access(client, record, readers)
+
+
+def plan_removed_addon_access(
+    client: OpenBaoClient, identity: ReconciliationIdentity, prefix: str
+) -> AccessPlan:
+    """Remove only a retired add-on's grants from cluster-bound owned readers."""
+    record = client.read_secret(RECONCILIATION_STATE_PATH)
+    if record is None:
+        raise OpenBaoError("Reconciliation ownership state is missing")
+    state = _load_state(record, identity, client=client)
+    if state.applied_version > CURRENT_RECONCILIATION_VERSION:
+        raise OpenBaoError("OpenBao reconciliation state is newer than this stack-setup version")
+    readers = []
+    for item in load_access(record.values.get("access")):
+        retained = tuple(path for path in item.reader.records if not path.startswith(prefix))
+        if retained:
+            readers.append(replace(item.reader, records=retained))
+    return plan_access(client, record, tuple(readers))
 
 
 def _state_values(identity: ReconciliationIdentity) -> dict[str, JsonValue]:
