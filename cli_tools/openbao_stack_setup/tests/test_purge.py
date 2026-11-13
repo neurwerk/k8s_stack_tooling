@@ -6,8 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fake import FakeSession, StoredSecret
+from k8s_stack_tooling.addons import selection_projection
 from test_main import kit, opened
 from test_reconcile import client, identity, state_values
+from test_selected_cli import verified
 
 from openbao_stack_setup import main
 from openbao_stack_setup.access import AccessReader, apply_access, complete_access
@@ -16,6 +18,7 @@ from openbao_stack_setup.client import OpenBaoError
 from openbao_stack_setup.custody import CustodyPaths
 from openbao_stack_setup.purge import purge_addon, removed_addon_prefix
 from openbao_stack_setup.reconcile import plan_reconciliation_access
+from openbao_stack_setup.selection import SelectedRun
 
 
 @pytest.fixture
@@ -134,14 +137,20 @@ def test_selection_change_before_deletion_preserves_records(stored):
     assert not any(c.method == "DELETE" and c.path.startswith("secret/") for c in session.calls)
 
 
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [None, "purge", "selection"])
 def test_cli_always_revokes_temporary_root(tmp_path, monkeypatch, failure):
-    run = MagicMock()
-    run.setups = {}
+    run = SelectedRun(verified(addon_id="other"))
     cluster = MagicMock()
-    cluster.selection_projection.return_value = {"data": {"selection.json": "{}"}}
+    projection = selection_projection(run.verified)
+    cluster.selection_projection.return_value = {
+        **projection,
+        "metadata": {
+            "name": "addon-selection",
+            "namespace": "flux-system",
+            "resourceVersion": "42",
+        },
+    }
     api, root = MagicMock(), MagicMock()
-    monkeypatch.setattr(main, "selection_projection", lambda _: {})
     monkeypatch.setattr(main, "Cluster", lambda _: cluster)
     monkeypatch.setattr(main, "_confirm", MagicMock())
     monkeypatch.setattr(
@@ -152,7 +161,17 @@ def test_cli_always_revokes_temporary_root(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(main, "_decrypt_custodian_packages", lambda *_: ("one", "two"))
     monkeypatch.setattr(main, "_openbao", lambda _: opened(api))
     monkeypatch.setattr(main, "OpenBaoClient", lambda *_: root)
-    purge = MagicMock(return_value=2, side_effect=OpenBaoError("failed") if failure else None)
+
+    def execute_purge(*_args, verify_selection, **_kwargs):
+        verify_selection()
+        if failure == "selection":
+            cluster.selection_projection.return_value = {"data": {"selection.json": "{}"}}
+        verify_selection()
+        if failure == "purge":
+            raise OpenBaoError("failed")
+        return 2
+
+    purge = MagicMock(side_effect=execute_purge)
     monkeypatch.setattr(main, "purge_addon", purge)
     args = argparse.Namespace(
         addon="sample",
@@ -163,11 +182,12 @@ def test_cli_always_revokes_temporary_root(tmp_path, monkeypatch, failure):
         custodian_package=[tmp_path / "one", tmp_path / "two"],
     )
     if failure:
-        with pytest.raises(OpenBaoError):
+        with pytest.raises((OpenBaoError, main.SetupError)):
             main._purge_addon(args, run)
     else:
         main._purge_addon(args, run)
     root.revoke_self.assert_called_once_with()
+    cluster.selection_projection.return_value = projection
     # A pending handover must stop before decrypting shares or opening privileged access.
     monkeypatch.setattr(
         main,
@@ -182,12 +202,10 @@ def test_cli_always_revokes_temporary_root(tmp_path, monkeypatch, failure):
 
 @pytest.mark.parametrize("selected,live", [(True, "{}"), (False, "invalid"), (False, "[]")])
 def test_cli_refuses_selected_or_changed_projection_before_custody(monkeypatch, selected, live):
-    run = MagicMock()
-    run.setups = {"sample": MagicMock()} if selected else {}
+    run = SelectedRun(verified(addon_id="sample" if selected else "other"))
     cluster = MagicMock()
     cluster.selection_projection.return_value = {"data": {"selection.json": live}}
     custody = MagicMock()
-    monkeypatch.setattr(main, "selection_projection", lambda _: {})
     monkeypatch.setattr(main, "Cluster", lambda _: cluster)
     monkeypatch.setattr(main, "prepare_custody_paths", custody)
     args = argparse.Namespace(addon="sample", context="ctx", client="client")
