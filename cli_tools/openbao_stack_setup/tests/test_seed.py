@@ -88,6 +88,12 @@ def test_seed_accepts_paired_smtp_credentials(tmp_path: Path) -> None:
             "postgresqlPassword"
         ],
         "studioPassword": session.secrets["frontend-studio/internal"].values["postgresqlPassword"],
+        "studioUsageCollectorPassword": session.secrets["frontend-studio/internal"].values[
+            "usageCollectorPassword"
+        ],
+        "studioUsageReaderPassword": session.secrets["frontend-studio/internal"].values[
+            "usageReaderPassword"
+        ],
         "langfusePassword": session.secrets["monitor-langfuse/internal"].values[
             "postgresqlPassword"
         ],
