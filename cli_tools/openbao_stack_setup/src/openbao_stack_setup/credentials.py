@@ -153,7 +153,7 @@ def reconcile_internal_credentials(
     studio, count = _upsert(
         client,
         "frontend-studio/internal",
-        _random_fields("postgresqlPassword"),
+        _random_fields("postgresqlPassword", "usageCollectorPassword", "usageReaderPassword"),
         {
             "opensearchPassword": _required_text(opensearch, "studioPassword"),
             "llmLogsPublicKey": _required_text(langfuse, "initProjectPublicKey"),
@@ -209,6 +209,8 @@ def reconcile_internal_credentials(
                 "agentgatewayPassword": _required_text(agentgateway, "postgresqlPassword"),
                 "apiKeyBridgePassword": _required_text(bridge, "postgresqlPassword"),
                 "studioPassword": _required_text(studio, "postgresqlPassword"),
+                "studioUsageCollectorPassword": _required_text(studio, "usageCollectorPassword"),
+                "studioUsageReaderPassword": _required_text(studio, "usageReaderPassword"),
                 "langfusePassword": _required_text(langfuse, "postgresqlPassword"),
             },
         ),

@@ -82,6 +82,8 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "postgresqlPassword",
         "llmLogsPublicKey",
         "llmLogsSecretKey",
+        "usageCollectorPassword",
+        "usageReaderPassword",
     }
     langfuse = original["monitor-langfuse/internal"]
     assert studio["llmLogsPublicKey"] == langfuse["initProjectPublicKey"]
@@ -97,12 +99,17 @@ def test_internal_credentials_are_complete_and_idempotent(tmp_path: Path) -> Non
         "apiKeyBridgePassword",
         "studioPassword",
         "langfusePassword",
+        "studioUsageCollectorPassword",
+        "studioUsageReaderPassword",
     }
     assert postgres_auth["adminPassword"]
     assert postgres_operations["adminPassword"]
     assert postgres_operations["agentgatewayPassword"] == agentgateway_password
     assert postgres_operations["apiKeyBridgePassword"] == bridge["postgresqlPassword"]
     assert postgres_operations["studioPassword"] == studio["postgresqlPassword"]
+    assert postgres_operations["studioUsageCollectorPassword"] == studio["usageCollectorPassword"]
+    assert postgres_operations["studioUsageReaderPassword"] == studio["usageReaderPassword"]
+    assert studio["usageReaderPassword"] != studio["usageCollectorPassword"]
     assert postgres_auth["keycloakPassword"] == original["auth-keycloak/internal"]["dbPassword"]
     assert (
         postgres_operations["langfusePassword"]
@@ -171,6 +178,12 @@ def test_existing_studio_langfuse_fields_are_preserved(tmp_path: Path) -> None:
         ],
         "postgresqlPassword": session.secrets["infra-postgres-operations/internal"].values[
             "studioPassword"
+        ],
+        "usageCollectorPassword": session.secrets["infra-postgres-operations/internal"].values[
+            "studioUsageCollectorPassword"
+        ],
+        "usageReaderPassword": session.secrets["infra-postgres-operations/internal"].values[
+            "studioUsageReaderPassword"
         ],
     }
 
