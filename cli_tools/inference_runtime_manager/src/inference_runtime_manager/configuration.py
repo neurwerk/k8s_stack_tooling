@@ -26,6 +26,7 @@ class RuntimeConfig(BaseModel):
     ner_english_dtype: Literal["float32", "float16"] | None = None
     ner_multilingual_dtype: Literal["float32", "float16"] | None = None
     vllm_granite_gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+    vllm_granite_max_num_seqs: int | None = Field(default=None, ge=1)
     olmocr_gpu_layers: int | None = Field(default=None, ge=0, le=999)
     olmocr_context_tokens: int | None = Field(default=None, ge=256, le=128000)
     gliner_threshold: float | None = Field(default=None, gt=0, lt=1)

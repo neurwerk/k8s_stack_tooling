@@ -917,6 +917,7 @@ def runtime_configuration() -> None:
         "ner_english_dtype": ("English NER precision", "ner-english"),
         "ner_multilingual_dtype": ("Multilingual GLiNER precision", "ner-multilingual"),
         "vllm_granite_gpu_memory_utilization": ("Docling GPU memory fraction", "vlm-documents"),
+        "vllm_granite_max_num_seqs": ("Docling VLM concurrency", "vlm-documents"),
         "olmocr_gpu_layers": ("olmOCR GPU layers", "vlm-images"),
         "olmocr_context_tokens": ("olmOCR context tokens", "vlm-images"),
         "gliner_threshold": ("GLiNER confidence threshold", "gliner"),
@@ -948,6 +949,16 @@ def runtime_configuration() -> None:
                 questionary.Choice("FP32 — conservative default", value="float32"),
             ],
             default=getattr(settings, name),
+        ).ask()
+    elif name == "vllm_granite_max_num_seqs":
+        value = questionary.text(
+            "Maximum active page requests (positive integer; GPU memory budget is separate):",
+            default=str(settings.vllm_granite_max_num_seqs),
+            validate=lambda text: (
+                True
+                if text.isascii() and text.isdigit() and int(text) >= 1
+                else "Enter a positive whole number."
+            ),
         ).ask()
     elif name == "olmocr_context_tokens":
         value = questionary.text(

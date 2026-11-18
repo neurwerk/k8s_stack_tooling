@@ -118,6 +118,7 @@ class DeploymentSettings(BaseSettings):
         default=16384, ge=256, le=128000, alias="OLMOCR_CONTEXT_TOKENS"
     )
     vllm_granite_dtype: str = Field(default="float32", alias="VLLM_GRANITE_DTYPE")
+    vllm_granite_max_num_seqs: int = Field(default=1, ge=1, alias="VLLM_GRANITE_MAX_NUM_SEQS")
     vllm_granite_gpu_memory_utilization: float = Field(
         default=0.25, gt=0, le=1, alias="VLLM_GRANITE_GPU_MEMORY_UTILIZATION"
     )
@@ -238,6 +239,7 @@ class Docker:
             "OLMOCR_GPU_LAYERS": str(settings.olmocr_gpu_layers),
             "OLMOCR_CONTEXT_TOKENS": str(settings.olmocr_context_tokens),
             "VLLM_GRANITE_DTYPE": settings.vllm_granite_dtype,
+            "VLLM_GRANITE_MAX_NUM_SEQS": str(settings.vllm_granite_max_num_seqs),
             "VLLM_GRANITE_GPU_MEMORY_UTILIZATION": str(
                 settings.vllm_granite_gpu_memory_utilization
             ),
@@ -462,7 +464,11 @@ class Docker:
             return f"--dtype={dtype}" in command
         try:
             value = command[command.index("--gpu-memory-utilization") + 1]
-            return float(value) == self.settings.vllm_granite_gpu_memory_utilization
+            sequences = command[command.index("--max-num-seqs") + 1]
+            return (
+                float(value) == self.settings.vllm_granite_gpu_memory_utilization
+                and int(sequences) == self.settings.vllm_granite_max_num_seqs
+            )
         except (ValueError, IndexError, TypeError):
             return False
 
