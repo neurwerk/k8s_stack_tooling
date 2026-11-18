@@ -33,7 +33,7 @@ def snapshots(root: Path, settings: DeploymentSettings) -> dict[str, dict[str, A
         if preset["runtime"] == "gliner":
             fields += ["gliner_threshold", "gliner_labels"]
         if preset["service"] == "vlm-documents":
-            fields += ["vllm_granite_gpu_memory_utilization"]
+            fields += ["vllm_granite_gpu_memory_utilization", "vllm_granite_max_num_seqs"]
         if preset["service"] == "vlm-images-olmocr":
             fields += ["olmocr_gpu_layers", "olmocr_context_tokens"]
         result[alias] = {
@@ -48,7 +48,12 @@ def snapshots(root: Path, settings: DeploymentSettings) -> dict[str, dict[str, A
 
 def _load(root: Path) -> ChangeState:
     path = root / "deployment-changes.json"
-    return ChangeState.model_validate_json(path.read_text()) if path.exists() else ChangeState()
+    state = ChangeState.model_validate_json(path.read_text()) if path.exists() else ChangeState()
+    for services in state.targets.values():
+        for snapshot in services.values():
+            if snapshot.get("service") == "vlm-documents":
+                snapshot["runtime_options"].setdefault("vllm_granite_max_num_seqs", 1)
+    return state
 
 
 def _save(root: Path, state: ChangeState) -> None:

@@ -39,7 +39,7 @@ services:
       - --limit-mm-per-prompt.image
       - "1"
       - --max-num-seqs
-      - "1"
+      - "${VLLM_GRANITE_MAX_NUM_SEQS:-1}"
       - --gpu-memory-utilization
       - ${VLLM_GRANITE_GPU_MEMORY_UTILIZATION:-0.25}
     ports:
