@@ -154,6 +154,8 @@ class ArtifactStore:
                 for companion in request.companions:
                     if (temporary / companion.directory).exists():
                         raise IntegrityError("Companion directory overlaps model content")
+                if request.http_files and (temporary / "rapidocr").exists():
+                    raise IntegrityError("HTTP companion directory overlaps model content")
                 main_verified.parent.mkdir(parents=True, exist_ok=True)
                 main_verified.touch()
             for companion in request.companions:
@@ -172,6 +174,15 @@ class ArtifactStore:
                 for name in companion.include:
                     if not (target / name).is_file():
                         raise IntegrityError(f"Missing companion file: {name}")
+            from inference_runtime_manager.downloader.http_resume import download_file
+
+            for item in request.http_files:
+                target = temporary / item.path
+                if target.is_symlink() or not target.resolve().is_relative_to(temporary.resolve()):
+                    raise IntegrityError("HTTP model file escapes the artifact directory")
+                download_file(
+                    item.url, target, item.size, item.sha256, False, {}, authenticated=False
+                )
             checksums = calculate_checksums(temporary)
             _require_model_files(checksums, request.source)
             artifact = StoredArtifact.create(request, revision, checksums)
@@ -233,6 +244,13 @@ def _validate_identity(artifact: StoredArtifact, request: ArtifactRequest, revis
         raise IntegrityError("Artifact metadata does not match requested source or revision")
     if artifact.companions != request.companions:
         raise IntegrityError("Artifact companion sources do not match the catalog")
+    if artifact.http_files != request.http_files:
+        raise IntegrityError("Artifact HTTP sources do not match the catalog")
+    records = {record.path: record for record in artifact.files}
+    for item in request.http_files:
+        record = records.get(item.path)
+        if record is None or (record.sha256, record.size) != (item.sha256, item.size):
+            raise IntegrityError("HTTP companion checksum differs from the pinned catalog")
 
 
 def _require_model_files(checksums: list[FileChecksum], source: str) -> None:

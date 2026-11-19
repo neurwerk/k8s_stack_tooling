@@ -392,7 +392,7 @@ class Cluster:
         return enabled
 
     def docling_enabled(self) -> bool:
-        """Return whether either Docling inference mode is selected."""
+        """Return whether a Docling inference mode is selected."""
         return self.docling_inference_mode() is not None
 
     def docling_inference_mode(self) -> str | None:
@@ -407,23 +407,16 @@ class Cluster:
         inference = docling.get("inference", {})
         if not isinstance(inference, dict):
             raise ClusterError("Docling inference must be a mapping")
-        mode = inference.get("mode", "private-vlm")
-        modes = {
-            "internal-standard": "internal-standard",
-            "private-vlm": "private-vlm",
-            "cpu": "internal-standard",
-            "remote": "private-vlm",
-        }
+        mode = inference.get("mode", "internal-standard")
+        modes = ("internal-standard", "private-standard", "private-vlm")
         if not isinstance(mode, str) or mode not in modes:
             raise ClusterError(
-                "Docling inference mode must be internal-standard or private-vlm "
-                "(legacy aliases: cpu or remote)"
+                "Docling inference mode must be internal-standard, private-standard or private-vlm"
             )
-        mode = modes[mode]
         if enabled and (
             docling.get("apiKeySecretRef") != {"name": "docling-api", "key": "api-key"}
             or (
-                mode == "private-vlm"
+                mode in ("private-standard", "private-vlm")
                 and inference.get("tokenSecretRef") != {"name": "docling-inference", "key": "token"}
             )
         ):

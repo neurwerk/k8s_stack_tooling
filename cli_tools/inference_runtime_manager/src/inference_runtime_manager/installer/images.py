@@ -120,6 +120,7 @@ RUNTIME_IMAGES = {
     "nemotron-diarization-cuda": "nemotron-diarization-cuda",
     "kserve": "kserve",
     "gliner": "gliner",
+    "docling-standard-cuda": "docling-standard",
 }
 
 

@@ -64,6 +64,25 @@ class ModelCompanion(BaseModel):
         return value
 
 
+class HttpModelFile(BaseModel):
+    """Public companion artifact pinned by size and SHA-256, without Hub credentials."""
+
+    path: str
+    url: str = Field(
+        pattern=r"^https://www\.modelscope\.cn/models/RapidAI/RapidOCR/resolve/v3\.10\.0/"
+    )
+    size: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def safe_path(cls, value: str) -> str:
+        ModelCompanion.exact_safe_files([value])
+        if not value.startswith("rapidocr/") or ".cache" in PurePosixPath(value).parts:
+            raise ValueError("HTTP model files must be inside rapidocr/")
+        return value
+
+
 class ModelVariant(BaseModel):
     """Describe one selectable downloadable representation of a catalog model.
 
@@ -91,6 +110,7 @@ class ModelVariant(BaseModel):
         default=None, alias="archiveModel"
     )
     companions: list[ModelCompanion] = Field(default_factory=list)
+    http_files: list[HttpModelFile] = Field(default_factory=list, alias="httpFiles")
     runtime_notes: str = Field(default="", alias="runtimeNotes")
     runtimes: list[
         Literal[
@@ -106,6 +126,7 @@ class ModelVariant(BaseModel):
             "nemotron-diarization-cuda",
             "kserve",
             "gliner",
+            "docling-standard-cuda",
         ]
     ] = Field(default_factory=list)
     compatibility_notes: str = Field(
@@ -370,6 +391,7 @@ class ArtifactRequest(BaseModel):
     revision: str
     include: list[str] = Field(default_factory=list)
     companions: list[ModelCompanion] = Field(default_factory=list)
+    http_files: list[HttpModelFile] = Field(default_factory=list, alias="httpFiles")
     storage_parts: list[str] = Field(default_factory=list)
 
     @field_validator("storage_parts")
@@ -403,6 +425,7 @@ class StoredArtifact(BaseModel):
     files: list[FileChecksum]
     created_at: datetime = Field(alias="createdAt")
     companions: list[ModelCompanion] = Field(default_factory=list)
+    http_files: list[HttpModelFile] = Field(default_factory=list, alias="httpFiles")
 
     @classmethod
     def create(
@@ -420,6 +443,7 @@ class StoredArtifact(BaseModel):
             files=files,
             createdAt=datetime.now(UTC),
             companions=request.companions,
+            httpFiles=request.http_files,
         )
 
     def to_installed(self, path: Path) -> InstalledModel:

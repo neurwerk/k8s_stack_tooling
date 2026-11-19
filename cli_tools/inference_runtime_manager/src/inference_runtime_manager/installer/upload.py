@@ -66,6 +66,13 @@ def prepare_artifact(
         raise ValueError("Unsupported artifact schema/category")
     if artifact.companions != variant.companions:
         raise ValueError("Artifact companion sources do not match the pinned catalog")
+    if artifact.http_files != variant.http_files:
+        raise ValueError("Artifact HTTP sources do not match the pinned catalog")
+    records = {record.path: record for record in artifact.files}
+    for item in variant.http_files:
+        record = records.get(item.path)
+        if record is None or (record.sha256, record.size) != (item.sha256, item.size):
+            raise ValueError("HTTP companion checksum differs from the pinned catalog")
     if (artifact.model_id, artifact.variant_id, artifact.source, artifact.revision) != (
         entry.model_id,
         entry.variant_id,
@@ -274,6 +281,12 @@ def provision(
         raise ValueError("Unknown inference service")
     enabled = [alias for alias in aliases if configured[alias]["enabled"]]
     disabled = [alias for alias in aliases if not configured[alias]["enabled"]]
+    if (
+        docker is not None
+        and "docling-standard" in enabled
+        and not docker.settings.api_key_for("docling-standard")
+    ):
+        raise ValueError("Set DOCLING_STANDARD_API_KEY before activating standard Docling")
     if docker is not None and "llm-general" in enabled:
         docker.settings.validate_llm_context(configured["llm-general"]["model_id"])
     desired = snapshots(state_root, docker.settings) if docker is not None and not dry_run else {}

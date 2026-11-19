@@ -26,6 +26,8 @@ def snapshots(root: Path, settings: DeploymentSettings) -> dict[str, dict[str, A
             continue
         preset = recipe(alias, assignment.model_id, assignment.variant_id)
         fields = []
+        if alias == "docling-standard":
+            fields += ["docling_standard_concurrency"]
         if alias == "llm-general":
             fields += ["llm_context_tokens", "llm_kv_cache_type"]
         if alias.startswith("ner-"):
