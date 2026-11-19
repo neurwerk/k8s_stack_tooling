@@ -1,3 +1,22 @@
+docling-standard:
+  runtime: docling-standard-cuda
+  device: CUDA GPU
+  service: docling-standard
+  model_id: docling-standard
+  variant_id: cuda
+  enabled: false
+  estimated_vram_gib: 3
+  internal_port: 8011
+  health_path: /health
+  transport: python
+  required_files:
+    - config.json
+    - preprocessor_config.json
+    - model.safetensors
+    - rapidocr/PP-OCRv6_det_small.pth
+    - rapidocr/PP-OCRv6_rec_small.pth
+    - rapidocr/ch_ppocr_mobile_v2.0_cls_mobile.pth
+    - rapidocr/ppocrv6_dict.txt
 vlm-documents:
   runtime: vllm
   service: vlm-documents

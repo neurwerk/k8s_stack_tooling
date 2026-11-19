@@ -13,6 +13,7 @@ from inference_runtime_manager.downloader.catalog import load_catalog
 from inference_runtime_manager.installer.docker import service_recipes, services
 
 ALIAS_CATEGORIES = {
+    "docling-standard": "ocr",
     "llm-general": "llm",
     "vlm-general": "vlm",
     "vlm-images": "ocr",

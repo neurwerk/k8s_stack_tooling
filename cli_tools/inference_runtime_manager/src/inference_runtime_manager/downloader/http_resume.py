@@ -71,6 +71,8 @@ def download_file(
     digest: str,
     git_blob: bool,
     environment: dict[str, str],
+    *,
+    authenticated: bool = True,
 ) -> None:
     if (
         type(size) is not int
@@ -92,7 +94,7 @@ def download_file(
         partial.unlink()
         offset = 0
     if offset < size:
-        request_headers = headers(environment)
+        request_headers = headers(environment) if authenticated else {"Accept-Encoding": "identity"}
         if offset:
             request_headers["Range"] = f"bytes={offset}-"
         request = urllib.request.Request(url, headers=request_headers)

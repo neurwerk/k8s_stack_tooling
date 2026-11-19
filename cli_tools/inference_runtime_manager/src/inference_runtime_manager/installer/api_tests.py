@@ -35,6 +35,7 @@ SENTENCE = "Guten Tag. Dies ist ein kurzer Test."
 DIARIZATION_SAMPLE_SHA256 = "c319b4abca767b124e41432d364fd7df006cb26bb79d09326c487d606a134e6e"
 
 ORDER = [
+    "docling-standard",
     "vlm-documents",
     "llm-general",
     "vlm-general",
@@ -711,7 +712,9 @@ def _test_service(
         raise ValueError(f"{alias} has no saved assignment")
     describe_assignment(docker, alias, preset, running)
     request(docker, alias, preset["health_path"])
-    if alias in {"llm-general", "vlm-general", "vlm-images", "vlm-documents"}:
+    if alias == "docling-standard":
+        docker.run("exec", "-T", preset["service"], "python", "/app/smoke.py", check=True)
+    elif alias in {"llm-general", "vlm-general", "vlm-images", "vlm-documents"}:
         if alias == "vlm-images":
             if prompt is not None and preset["runtime"] != "llama.cpp-ocr-proxy":
                 raise ValueError("Custom prompts are supported only for olmOCR")

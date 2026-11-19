@@ -17,6 +17,25 @@ x-gpu: &gpu
     NVIDIA_DRIVER_CAPABILITIES: compute,utility
 
 services:
+  docling-standard:
+    <<: [*common, *gpu]
+    image: ${DOCLING_STANDARD_IMAGE:?Run inference-runtime-manager images and install first}
+    command: [--concurrency, "${DOCLING_STANDARD_CONCURRENCY:-1}"]
+    ports:
+      - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${DOCLING_STANDARD_PORT:-8011}:8011"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      DOCLING_STANDARD_API_KEY: ${DOCLING_STANDARD_API_KEY-}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8011/health',timeout=5))['device']=='cuda'"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 12
+
   vlm-documents:
     <<: [*common, *gpu]
     image: ${VLLM_IMAGE:?Run inference-runtime-manager images and install first}

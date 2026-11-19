@@ -132,6 +132,7 @@ jobs:
           NEMOTRON_DIARIZATION_CUDA_IMAGE: nemotron-diarization-cuda
           KSERVE_IMAGE: kserve
           GLINER_IMAGE: gliner
+          DOCLING_STANDARD_IMAGE: docling-standard
         run: docker compose -f src/inference_runtime_manager/resources/compose.yaml --profile setup config --quiet
 
       - name: Test
@@ -140,7 +141,9 @@ jobs:
 
       - name: Test inference runtime manager
         if: matrix.project == 'cli_tools/inference_runtime_manager'
-        run: uv run --frozen python -m unittest discover -s tests
+        run: |
+          uv run --frozen python -m unittest discover -s tests
+          uv run --frozen python -m unittest discover -s src/inference_runtime_manager/resources/docling_standard/tests
 
       - name: Build
         run: uv build

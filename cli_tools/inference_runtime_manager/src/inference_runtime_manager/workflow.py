@@ -107,7 +107,7 @@ CATEGORY_GUIDES = {
     ),
     "document-parsing": (
         "Structured document parsing",
-        "Extracts document text, tables and layout as structured DocTags.",
+        "Standard layout/OCR inference or full-page VLM document parsing.",
         "vlm-documents",
     ),
     "asr": ("Speech recognition", "Converts spoken audio into text.", "stt-general"),
@@ -155,6 +155,7 @@ CATEGORY_GUIDES = {
 }
 
 RUNTIME_NAMES = {
+    "docling-standard-cuda": "Standard Docling CUDA",
     "vllm": "vLLM",
     "llama.cpp": "llama.cpp",
     "speaches": "Speaches",
@@ -393,7 +394,9 @@ def guided_models() -> None:
             f"{category} — which task would you like to configure?",
             choices=[
                 questionary.Choice(
-                    f"{CATEGORY_GUIDES[key][0]} — {CATEGORY_GUIDES[key][2]}",
+                    CATEGORY_GUIDES[key][0]
+                    if key == "document-parsing"
+                    else f"{CATEGORY_GUIDES[key][0]} — {CATEGORY_GUIDES[key][2]}",
                     value=key,
                     description=CATEGORY_GUIDES[key][1],
                     disabled=(
@@ -412,6 +415,17 @@ def guided_models() -> None:
         if group != "back":
             break
     title, description, alias = CATEGORY_GUIDES[group]
+    if group == "document-parsing":
+        alias = questionary.select(
+            "Document parsing approach",
+            choices=[
+                questionary.Choice("Standard Docling — Heron + RapidOCR", value="docling-standard"),
+                questionary.Choice("VLM — Granite-Docling", value="vlm-documents"),
+                questionary.Choice("Back", value="back"),
+            ],
+        ).ask()
+        if alias in (None, "back"):
+            return
     print(f"\n{title}: {description}")
     if alias not in deployable_aliases:
         print("This category is catalog-only; no deployable runtime is configured.")
@@ -913,6 +927,7 @@ def runtime_configuration() -> None:
     configured = load_workstation_config()
     settings = DeploymentSettings()
     options = {
+        "docling_standard_concurrency": ("Docling standard model concurrency", "docling-standard"),
         "ner_german_dtype": ("German NER precision", "ner-german"),
         "ner_english_dtype": ("English NER precision", "ner-english"),
         "ner_multilingual_dtype": ("Multilingual GLiNER precision", "ner-multilingual"),
@@ -949,6 +964,12 @@ def runtime_configuration() -> None:
                 questionary.Choice("FP32 — conservative default", value="float32"),
             ],
             default=getattr(settings, name),
+        ).ask()
+    elif name == "docling_standard_concurrency":
+        value = questionary.text(
+            "Active model stages (1–3; one request per model, layout batches up to 4):",
+            default=str(settings.docling_standard_concurrency),
+            validate=lambda text: True if text in {"1", "2", "3"} else "Enter 1, 2 or 3.",
         ).ask()
     elif name == "vllm_granite_max_num_seqs":
         value = questionary.text(

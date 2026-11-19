@@ -278,6 +278,7 @@ def _request_from_selection(catalog: AvailableCatalog, selection: Selection) -> 
         revision=variant.revision or model.revision,
         include=variant.include,
         companions=variant.companions,
+        httpFiles=variant.http_files,
         storage_parts=[
             model.category,
             *(component(x) for x in grouping(model, variant)),

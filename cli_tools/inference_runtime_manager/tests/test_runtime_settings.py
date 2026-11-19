@@ -19,6 +19,31 @@ from inference_runtime_manager.installer.pending import pending_aliases, record_
 
 
 class RuntimeSettingsTests(TestCase):
+    def test_docling_image_selection_and_one_run_override(self) -> None:
+        with (
+            TemporaryDirectory() as root,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": root}, clear=True),
+        ):
+            save_workstation_config(WorkstationConfig(docker_context="synthetic"))
+            docker = Docker(DeploymentSettings(_env_file=None))
+            expected = docker.environment["DOCLING_STANDARD_IMAGE"]
+            other_image = docker.environment["VLLM_IMAGE"]
+            self.assertEqual(docker.image_tag_for("docling-standard-cuda"), expected)
+            self.assertTrue(docker.image_matches("docling-standard-cuda", expected))
+            self.assertFalse(docker.image_matches("docling-standard-cuda", other_image))
+            replacement = "synthetic/docling-standard:replacement"
+            with patch("subprocess.run") as run:
+                docker.run_with_image(
+                    "docling-standard-cuda", replacement, "up", "-d", "docling-standard"
+                )
+            run.assert_called_once()
+            self.assertEqual(
+                run.call_args.args[0], docker.command + ["up", "-d", "docling-standard"]
+            )
+            self.assertEqual(run.call_args.kwargs["env"]["DOCLING_STANDARD_IMAGE"], replacement)
+            self.assertEqual(run.call_args.kwargs["env"]["VLLM_IMAGE"], other_image)
+            self.assertEqual(docker.image_tag_for("docling-standard-cuda"), expected)
+
     def test_saved_overrides_reach_compose_and_unset_values_use_environment(self) -> None:
         with (
             TemporaryDirectory() as root,

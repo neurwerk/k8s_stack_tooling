@@ -46,6 +46,13 @@ class DeploymentSettings(BaseSettings):
         min_length=1,
     )
     vlm_documents_api_key: SecretStr | None = Field(default=None, alias="VLM_DOCUMENTS_API_KEY")
+    docling_standard_api_key: SecretStr | None = Field(
+        default=None, alias="DOCLING_STANDARD_API_KEY"
+    )
+    docling_standard_port: int = Field(default=8011, ge=1, le=65535, alias="DOCLING_STANDARD_PORT")
+    docling_standard_concurrency: int = Field(
+        default=1, ge=1, le=3, alias="DOCLING_STANDARD_CONCURRENCY"
+    )
     llm_general_api_key: SecretStr | None = Field(default=None, alias="LLM_GENERAL_API_KEY")
     vlm_general_api_key: SecretStr | None = Field(default=None, alias="VLM_GENERAL_API_KEY")
     stt_general_api_key: SecretStr | None = Field(default=None, alias="STT_GENERAL_API_KEY")
@@ -218,6 +225,8 @@ class Docker:
             },
             "INFERENCE_BIND_ADDRESS": settings.bind_address,
             "VLM_DOCUMENTS_PORT": str(settings.vlm_documents_port),
+            "DOCLING_STANDARD_PORT": str(settings.docling_standard_port),
+            "DOCLING_STANDARD_CONCURRENCY": str(settings.docling_standard_concurrency),
             "LLM_GENERAL_PORT": str(settings.llm_general_port),
             "LLM_CONTEXT_TOKENS": str(settings.llm_context_tokens),
             "LLM_KV_CACHE_TYPE": settings.llm_kv_cache_type,
@@ -260,6 +269,7 @@ class Docker:
             "NEMOTRON_DIARIZATION_CUDA_IMAGE": images["nemotron-diarization-cuda"],
             "KSERVE_IMAGE": images["kserve"],
             "GLINER_IMAGE": images["gliner"],
+            "DOCLING_STANDARD_IMAGE": images["docling-standard"],
         }
         compose_file = str(files("inference_runtime_manager.resources").joinpath("compose.yaml"))
         self.docker_command = ["docker", "--context", settings.docker_context]
@@ -338,6 +348,7 @@ class Docker:
 
     def image_environment_key(self, runtime: str) -> str:
         return {
+            "docling-standard-cuda": "DOCLING_STANDARD_IMAGE",
             "vllm": "VLLM_IMAGE",
             "vllm-ocr-proxy": "VLLM_OCR_PROXY_IMAGE",
             "llama.cpp": "LLAMACPP_IMAGE",
@@ -404,6 +415,15 @@ class Docker:
 
     def runtime_settings_match(self, service: str) -> bool:
         """Do not skip application when saved runtime settings changed."""
+        if service == "docling-standard":
+            command = self.service_command(service)
+            try:
+                return (
+                    int(command[command.index("--concurrency") + 1])
+                    == self.settings.docling_standard_concurrency
+                )
+            except (ValueError, IndexError):
+                return False
         if service in {"ner-german-gliner", "ner-english-gliner", "ner-multilingual-gliner"}:
             values = json.loads(
                 subprocess.run(

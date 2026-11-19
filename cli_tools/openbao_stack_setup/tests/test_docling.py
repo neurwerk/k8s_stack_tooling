@@ -33,7 +33,10 @@ SELECTED = """docling:
 
 def test_selection_fails_before_confirmation_or_secret_access() -> None:
     target = cluster()
-    cpu = SELECTED.replace("tokenSecretRef: {name: docling-inference, key: token}", "mode: cpu")
+    internal = SELECTED.replace(
+        "tokenSecretRef: {name: docling-inference, key: token}", "mode: internal-standard"
+    )
+    private = SELECTED.replace("inference:", "inference:\n    mode: private-standard")
     with (
         patch("openbao_stack_setup.main.Cluster", return_value=target),
         patch.object(target, "identity"),
@@ -54,21 +57,21 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
             "[",
             "",
             "docling: {enabled: true}",
-            SELECTED.replace("key: token", "key: wrong"),
+            private.replace("key: token", "key: wrong"),
             SELECTED.replace("name: docling-api", "name: other"),
             SELECTED.replace("key: api-key", "key: api-key, extra: value"),
             SELECTED.replace("tokenSecretRef: {name: docling-inference, key: token}", "null"),
-            cpu,
-            cpu.replace("name: docling-api", "name: other"),
+            internal,
+            internal.replace("name: docling-api", "name: other"),
             *[
-                cpu.replace("mode: cpu", f"mode: {mode}")
-                for mode in ("null", "true", "1", "[]", "{}", "other")
+                internal.replace("mode: internal-standard", f"mode: {mode}")
+                for mode in ("null", "true", "1", "[]", "{}", "other", "cpu", "remote")
             ],
         ]:
             target.core.read_namespaced_config_map.return_value = SimpleNamespace(
                 data={"values.yaml": text}
             )
-            if text not in ("{}", "docling: {enabled: false}", cpu):
+            if text not in ("{}", "docling: {enabled: false}", internal):
                 with pytest.raises(ClusterError, match="Docling"):
                     target.docling_enabled()
             with pytest.raises((SetupError, ClusterError), match="Docling"):
@@ -93,9 +96,9 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
     )
     assert target.docling_enabled() is True
     for text, mode in (
-        (SELECTED, "private-vlm"),
-        (SELECTED.replace("inference:", "inference:\n    mode: remote"), "private-vlm"),
-        (cpu, "internal-standard"),
+        (SELECTED, "internal-standard"),
+        (private, "private-standard"),
+        (internal, "internal-standard"),
     ):
         target.core.read_namespaced_config_map.return_value = SimpleNamespace(
             data={"values.yaml": text}
@@ -105,7 +108,7 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
         assert target.core.read_namespaced_config_map.call_count == before + 1
         assert target.docling_enabled() is True
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": cpu.replace("name: docling-api", "name: other")}
+        data={"values.yaml": internal.replace("name: docling-api", "name: other")}
     )
     with pytest.raises(ClusterError, match="Docling"):
         target.docling_enabled()
@@ -115,20 +118,22 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
     )
 
 
-@pytest.mark.parametrize("mode", [None, "private-vlm", "remote", "internal-standard", "cpu"])
+@pytest.mark.parametrize("mode", [None, "private-standard", "private-vlm", "internal-standard"])
 @pytest.mark.parametrize("enabled", [True, False])
-def test_mode_aliases_and_provider_gate(mode: str | None, enabled: bool) -> None:
+def test_modes_and_provider_gate(mode: str | None, enabled: bool) -> None:
     target = cluster()
     text = SELECTED if enabled else "docling:\n  enabled: false\n  inference: {}\n"
     if mode is not None:
         text = text.replace("inference:", f"inference:\n    mode: {mode}").replace(" {}", "")
-    internal = mode in ("internal-standard", "cpu")
+    internal = mode in (None, "internal-standard")
     if internal:
         text = text.replace("    tokenSecretRef: {name: docling-inference, key: token}\n", "")
+        if mode is None:
+            text = text.replace("  inference:\n", "  inference: {}\n")
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": text}
     )
-    expected = "internal-standard" if internal else "private-vlm"
+    expected = mode or "internal-standard"
     assert target.docling_inference_mode() == (expected if enabled else None)
     assert target.docling_enabled() is enabled
     with (
@@ -149,26 +154,42 @@ def test_mode_aliases_and_provider_gate(mode: str | None, enabled: bool) -> None
         target.core.create_namespaced_service_account_token.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", ["private-vlm", "remote"])
+@pytest.mark.parametrize("mode", ["private-standard", "private-vlm"])
 @pytest.mark.parametrize(
     "reference",
     [
+        None,
         "{}",
         "{name: other, key: token}",
         "{name: docling-inference, key: other}",
         "{name: docling-inference, key: token, extra: value}",
     ],
 )
-def test_private_inference_requires_exact_token_reference(mode: str, reference: str) -> None:
+def test_private_inference_requires_exact_token_reference(mode: str, reference: str | None) -> None:
     target = cluster()
-    text = SELECTED.replace("inference:", f"inference:\n    mode: {mode}").replace(
-        "{name: docling-inference, key: token}", reference
-    )
+    text = SELECTED.replace("inference:", f"inference:\n    mode: {mode}")
+    if reference is None:
+        text = text.replace("    tokenSecretRef: {name: docling-inference, key: token}\n", "")
+    else:
+        text = text.replace("{name: docling-inference, key: token}", reference)
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": text}
     )
     with pytest.raises(ClusterError, match="exact managed Secret references"):
         target.docling_inference_mode()
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=target),
+        patch.object(target, "identity"),
+        patch("openbao_stack_setup.main._confirm") as confirm,
+        patch("openbao_stack_setup.main._prompt_provider") as prompt,
+        patch("openbao_stack_setup.main._openbao") as openbao,
+    ):
+        with pytest.raises(ClusterError, match="exact managed Secret references"):
+            _set_provider("ctx", "client", "docling-inference")
+        confirm.assert_not_called()
+        prompt.assert_not_called()
+        openbao.assert_not_called()
+        target.core.create_namespaced_service_account_token.assert_not_called()
 
 
 def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> None:
