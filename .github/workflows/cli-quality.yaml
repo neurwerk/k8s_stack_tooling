@@ -141,9 +141,7 @@ jobs:
 
       - name: Test inference runtime manager
         if: matrix.project == 'cli_tools/inference_runtime_manager'
-        run: |
-          uv run --frozen python -m unittest discover -s tests
-          uv run --frozen python -m unittest discover -s src/inference_runtime_manager/resources/docling_standard/tests
+        run: uv run --frozen python -m unittest discover -s tests
 
       - name: Build
         run: uv build

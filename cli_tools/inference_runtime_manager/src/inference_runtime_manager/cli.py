@@ -10,6 +10,7 @@ import questionary
 from pydantic import ValidationError
 
 from inference_runtime_manager.configuration import (
+    RETIRED_DOCLING_CONCURRENCY_MESSAGE,
     active_profile,
     create_profile,
     load_workstation_config,
@@ -29,6 +30,16 @@ from inference_runtime_manager.installer.images import download_images
 from inference_runtime_manager.installer.upload import provision
 from inference_runtime_manager.installer.voice import menu as voice
 from inference_runtime_manager.installer.voice import voice_cloning_available
+
+
+def _validation_message(error: ValidationError) -> str:
+    """Expose only the fixed migration instruction, never validation input values."""
+    if any(
+        item["type"] == "retired_docling_concurrency"
+        for item in error.errors(include_input=False, include_context=False, include_url=False)
+    ):
+        return RETIRED_DOCLING_CONCURRENCY_MESSAGE
+    return "Invalid or incomplete settings; use Setup."
 
 
 def execute(action: str, aliases: list[str] | None = None, dry_run: bool = False) -> None:
@@ -193,9 +204,7 @@ def menu() -> None:
         except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
             # Pydantic validation can include input values. Never print it here.
             print(
-                "Invalid or incomplete settings; use Setup."
-                if isinstance(exc, ValidationError)
-                else f"Failed: {exc}"
+                _validation_message(exc) if isinstance(exc, ValidationError) else f"Failed: {exc}"
             )
 
 
@@ -366,9 +375,5 @@ def main() -> None:
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
-        print(
-            "Invalid or incomplete settings; use Setup."
-            if isinstance(exc, ValidationError)
-            else f"Failed: {exc}"
-        )
+        print(_validation_message(exc) if isinstance(exc, ValidationError) else f"Failed: {exc}")
         raise SystemExit(1) from None

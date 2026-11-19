@@ -46,13 +46,9 @@ class DeploymentSettings(BaseSettings):
         min_length=1,
     )
     vlm_documents_api_key: SecretStr | None = Field(default=None, alias="VLM_DOCUMENTS_API_KEY")
-    docling_standard_api_key: SecretStr | None = Field(
-        default=None, alias="DOCLING_STANDARD_API_KEY"
-    )
+    docling_serve_api_key: SecretStr | None = Field(default=None, alias="DOCLING_SERVE_API_KEY")
     docling_standard_port: int = Field(default=8011, ge=1, le=65535, alias="DOCLING_STANDARD_PORT")
-    docling_standard_concurrency: int = Field(
-        default=1, ge=1, le=3, alias="DOCLING_STANDARD_CONCURRENCY"
-    )
+    docling_max_pages: int = Field(default=250, ge=1, alias="DOCLING_SERVE_MAX_NUM_PAGES")
     llm_general_api_key: SecretStr | None = Field(default=None, alias="LLM_GENERAL_API_KEY")
     vlm_general_api_key: SecretStr | None = Field(default=None, alias="VLM_GENERAL_API_KEY")
     stt_general_api_key: SecretStr | None = Field(default=None, alias="STT_GENERAL_API_KEY")
@@ -149,7 +145,8 @@ class DeploymentSettings(BaseSettings):
 
     def api_key_for(self, alias: str) -> str | None:
         """Return the independently configured key for one stable service alias."""
-        value = cast(SecretStr | None, getattr(self, alias.replace("-", "_") + "_api_key"))
+        field = "docling_serve" if alias == "docling-standard" else alias.replace("-", "_")
+        value = cast(SecretStr | None, getattr(self, field + "_api_key"))
         if value is not None:
             return value.get_secret_value()
         if alias == "diarization-general" and self.diarization_general_api_key_file is not None:
@@ -222,11 +219,13 @@ class Docker:
             **{
                 alias.upper().replace("-", "_") + "_API_KEY": settings.api_key_for(alias) or ""
                 for alias in service_recipes()
+                if alias != "docling-standard"
             },
             "INFERENCE_BIND_ADDRESS": settings.bind_address,
             "VLM_DOCUMENTS_PORT": str(settings.vlm_documents_port),
             "DOCLING_STANDARD_PORT": str(settings.docling_standard_port),
-            "DOCLING_STANDARD_CONCURRENCY": str(settings.docling_standard_concurrency),
+            "DOCLING_SERVE_API_KEY": settings.api_key_for("docling-standard") or "",
+            "DOCLING_SERVE_MAX_NUM_PAGES": str(settings.docling_max_pages),
             "LLM_GENERAL_PORT": str(settings.llm_general_port),
             "LLM_CONTEXT_TOKENS": str(settings.llm_context_tokens),
             "LLM_KV_CACHE_TYPE": settings.llm_kv_cache_type,
@@ -416,14 +415,27 @@ class Docker:
     def runtime_settings_match(self, service: str) -> bool:
         """Do not skip application when saved runtime settings changed."""
         if service == "docling-standard":
-            command = self.service_command(service)
-            try:
-                return (
-                    int(command[command.index("--concurrency") + 1])
-                    == self.settings.docling_standard_concurrency
-                )
-            except (ValueError, IndexError):
+            definition = yaml.safe_load(resource("compose.yaml"))["services"][service]
+            if self.service_command(service) != definition["command"]:
                 return False
+            values = json.loads(
+                subprocess.run(
+                    self.docker_command
+                    + ["inspect", f"local-ai-{service}-1", "--format", "{{json .Config.Env}}"],
+                    env=self.environment,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=15,
+                ).stdout
+            )
+            environment = dict(value.split("=", 1) for value in values)
+            expected = {
+                **definition["environment"],
+                "DOCLING_SERVE_API_KEY": self.settings.api_key_for("docling-standard") or "",
+                "DOCLING_SERVE_MAX_NUM_PAGES": str(self.settings.docling_max_pages),
+            }
+            return all(environment.get(key) == value for key, value in expected.items())
         if service in {"ner-german-gliner", "ner-english-gliner", "ner-multilingual-gliner"}:
             values = json.loads(
                 subprocess.run(

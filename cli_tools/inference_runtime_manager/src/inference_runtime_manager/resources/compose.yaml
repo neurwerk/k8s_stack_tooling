@@ -20,17 +20,78 @@ services:
   docling-standard:
     <<: [*common, *gpu]
     image: ${DOCLING_STANDARD_IMAGE:?Run inference-runtime-manager images and install first}
-    command: [--concurrency, "${DOCLING_STANDARD_CONCURRENCY:-1}"]
+    # Adapt only the read-only cache layout, then exec the unmodified official CLI.
+    command:
+      - python
+      - -c
+      - |
+        import json, os, tempfile
+        from pathlib import Path
+        if not os.environ.get("DOCLING_SERVE_API_KEY", "").strip():
+            raise SystemExit("DOCLING_SERVE_API_KEY is required")
+        source = Path("/models/active/docling-standard")
+        required = [
+            "config.json", "preprocessor_config.json", "model.safetensors",
+            "rapidocr/PP-OCRv6_det_small.pth", "rapidocr/PP-OCRv6_rec_small.pth",
+            "rapidocr/ch_ppocr_mobile_v2.0_cls_mobile.pth", "rapidocr/ppocrv6_dict.txt",
+            "tableformer/model_artifacts/tableformer/accurate/tableformer_accurate.safetensors",
+            "tableformer/model_artifacts/tableformer/accurate/tm_config.json",
+        ]
+        missing = [name for name in required if not (source / name).is_file()]
+        if missing:
+            raise SystemExit("Incomplete Docling model bundle: " + ", ".join(missing))
+        artifacts = Path(tempfile.mkdtemp(prefix="docling-models-"))
+        (artifacts / "docling-project--docling-layout-heron").symlink_to(source)
+        (artifacts / "docling-project--docling-models").symlink_to(source / "tableformer")
+        os.environ["DOCLING_SERVE_ARTIFACTS_PATH"] = str(artifacts)
+        ocr = {
+            "kind": "rapidocr", "backend": "torch", "lang": ["ch"],
+            "det_model_path": str(source / "rapidocr/PP-OCRv6_det_small.pth"),
+            "rec_model_path": str(source / "rapidocr/PP-OCRv6_rec_small.pth"),
+            "cls_model_path": str(source / "rapidocr/ch_ppocr_mobile_v2.0_cls_mobile.pth"),
+            "rec_keys_path": str(source / "rapidocr/ppocrv6_dict.txt"),
+        }
+        os.environ["DOCLING_SERVE_CUSTOM_OCR_PRESETS"] = json.dumps({"default": ocr, "auto": ocr})
+        os.execvp("docling-serve", ["docling-serve", "run"])
     ports:
       - "${INFERENCE_BIND_ADDRESS:-127.0.0.1}:${DOCLING_STANDARD_PORT:-8011}:8011"
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      DOCLING_STANDARD_API_KEY: ${DOCLING_STANDARD_API_KEY-}
+      DOCLING_SERVE_API_KEY: ${DOCLING_SERVE_API_KEY-}
+      UVICORN_HOST: "0.0.0.0"
+      UVICORN_PORT: "8011"
+      UVICORN_WORKERS: "1"
+      DOCLING_DEVICE: cuda
+      DOCLING_SERVE_ENG_KIND: local
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"
+      DOCLING_SERVE_MAX_NUM_PAGES: "${DOCLING_SERVE_MAX_NUM_PAGES:-250}"
+      DOCLING_SERVE_MAX_FILE_SIZE: "20971520"
+      DOCLING_SERVE_MAX_SOURCES_PER_REQUEST: "3"
+      DOCLING_SERVE_MAX_SYNC_WAIT: "360"
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: "300"
+      DOCLING_SERVE_ENABLE_REMOTE_SERVICES: "false"
+      DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "false"
+      DOCLING_SERVE_ENABLE_UI: "false"
+      DOCLING_SERVE_DEFAULT_LAYOUT_KIND: layout_object_detection
+      DOCLING_SERVE_DEFAULT_LAYOUT_PRESET: layout_object_detection
+      DOCLING_SERVE_ALLOWED_LAYOUT_KINDS: '["layout_object_detection"]'
+      DOCLING_SERVE_ALLOWED_LAYOUT_PRESETS: '["default"]'
+      DOCLING_SERVE_DEFAULT_TABLE_STRUCTURE_KIND: docling_tableformer
+      DOCLING_SERVE_DEFAULT_TABLE_STRUCTURE_PRESET: tableformer_v1_accurate
+      DOCLING_SERVE_ALLOWED_TABLE_STRUCTURE_KINDS: '["docling_tableformer"]'
+      DOCLING_SERVE_ALLOWED_TABLE_STRUCTURE_PRESETS: '["tableformer_v1_accurate"]'
+      DOCLING_SERVE_DEFAULT_OCR_KIND: rapidocr
+      DOCLING_SERVE_DEFAULT_OCR_PRESET: rapidocr
+      DOCLING_SERVE_ALLOWED_OCR_KINDS: '["rapidocr"]'
+      DOCLING_SERVE_ALLOWED_OCR_PRESETS: '["default", "auto"]'
+      DOCLING_SERVE_ALLOWED_SOURCE_TYPES: '["file"]'
+      DOCLING_SERVE_ALLOWED_TARGET_TYPES: '["inbody", "zip"]'
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
     healthcheck:
-      test: [CMD, python, -c, "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8011/health',timeout=5))['device']=='cuda'"]
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/ready',timeout=5).close()"]
       interval: 15s
       timeout: 10s
       start_period: 180s

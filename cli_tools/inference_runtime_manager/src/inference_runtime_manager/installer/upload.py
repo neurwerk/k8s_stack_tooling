@@ -284,9 +284,9 @@ def provision(
     if (
         docker is not None
         and "docling-standard" in enabled
-        and not docker.settings.api_key_for("docling-standard")
+        and not (docker.settings.api_key_for("docling-standard") or "").strip()
     ):
-        raise ValueError("Set DOCLING_STANDARD_API_KEY before activating standard Docling")
+        raise ValueError("Set DOCLING_SERVE_API_KEY before activating official Docling Serve")
     if docker is not None and "llm-general" in enabled:
         docker.settings.validate_llm_context(configured["llm-general"]["model_id"])
     desired = snapshots(state_root, docker.settings) if docker is not None and not dry_run else {}

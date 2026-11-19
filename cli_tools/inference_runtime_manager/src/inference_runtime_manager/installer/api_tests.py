@@ -324,7 +324,10 @@ request = json.loads(sys.stdin.buffer.readline())
 headers = {}
 key = os.environ.get("INFERENCE_API_KEY")
 if key:
-    headers["Authorization"] = "Bearer " + key
+    if request["auth_header"] == "X-Api-Key":
+        headers["X-Api-Key"] = key
+    else:
+        headers["Authorization"] = "Bearer " + key
 body = None
 if request["audio"] is not None:
     audio = __import__("base64").b64decode(request["audio"])
@@ -358,6 +361,7 @@ sys.stdout.buffer.write(data + b"\n" + json.dumps(metadata).encode())
             json.dumps(
                 {
                     "url": f"http://127.0.0.1:{port}{path}",
+                    "auth_header": "X-Api-Key" if alias == "docling-standard" else "Authorization",
                     "payload": payload,
                     "audio": base64.b64encode(audio).decode() if audio is not None else None,
                     "fields": fields,
@@ -713,7 +717,41 @@ def _test_service(
     describe_assignment(docker, alias, preset, running)
     request(docker, alias, preset["health_path"])
     if alias == "docling-standard":
-        docker.run("exec", "-T", preset["service"], "python", "/app/smoke.py", check=True)
+        result = json.loads(
+            request(
+                docker,
+                alias,
+                "/v1/convert/source",
+                payload={
+                    "options": {
+                        "from_formats": ["image"],
+                        "to_formats": ["md"],
+                        "pipeline": "standard",
+                        "layout_preset": "default",
+                        "table_structure_preset": "default",
+                        "ocr_preset": "default",
+                        "do_ocr": True,
+                        "do_table_structure": True,
+                        "include_images": False,
+                    },
+                    "sources": [
+                        {
+                            "kind": "file",
+                            "filename": "sample.png",
+                            "base64_string": base64.b64encode(sample_image()).decode(),
+                        }
+                    ],
+                },
+            )
+        )
+        markdown = result.get("document", {}).get("md_content")
+        if (
+            result.get("status") != "success"
+            or not isinstance(markdown, str)
+            or "TEST" not in markdown.upper()
+        ):
+            raise ValueError("Docling Serve did not successfully convert the synthetic OCR image")
+        print("Docling Serve: synthetic image converted with the server-owned standard presets.")
     elif alias in {"llm-general", "vlm-general", "vlm-images", "vlm-documents"}:
         if alias == "vlm-images":
             if prompt is not None and preset["runtime"] != "llama.cpp-ocr-proxy":
