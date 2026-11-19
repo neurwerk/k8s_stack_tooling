@@ -25,6 +25,9 @@ MAPPING_OWNER_SUBTYPE = "k8s-stack-tooling.group-mapping.v1"
 MAPPING_TRANSITION_SUBTYPE = "k8s-stack-tooling.group-reconciliation-pending.v1"
 MANAGED_PROVIDER_SUBTYPE = "k8s-stack-tooling.active-directory.v1"
 MAPPING_NAME_PREFIX = "approved group: "
+DIRECTORY_GROUP_MAPPER_NAME = "directory groups"
+DIRECTORY_GROUP_OWNER_SUBTYPE = "k8s-stack-tooling.directory-groups.v1"
+DIRECTORY_GROUP_PATH = "/ldap_groups"
 GROUP_TARGET_PATTERN = re.compile(r"^/access/neurwerk-[a-z][a-z0-9-]{0,40}$")
 CANONICAL_GROUP_PATHS = frozenset(
     f"/access/neurwerk-{name}"
@@ -89,6 +92,8 @@ class ActiveDirectoryConfig:
     connection_timeout_ms: int = 5000
     read_timeout_ms: int = 10000
     addon_group_targets: tuple[str, ...] = ()
+    import_directory_groups: bool = False
+    directory_group_exclude_prefixes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_config(self)
@@ -163,6 +168,24 @@ def _validate_config(config: ActiveDirectoryConfig) -> None:
 
     if config.username_attribute not in {"sAMAccountName", "userPrincipalName"}:
         raise ValueError("username attribute must be sAMAccountName or userPrincipalName")
+    if type(config.import_directory_groups) is not bool:
+        raise ValueError("directoryGroups.enabled must be a boolean")
+    prefixes = config.directory_group_exclude_prefixes
+    if (
+        not isinstance(prefixes, tuple)
+        or any(
+            not isinstance(prefix, str)
+            or not 1 <= len(prefix) <= 64
+            or prefix != prefix.strip()
+            or _contains_control_character(prefix)
+            for prefix in prefixes
+        )
+        or len({prefix.casefold() for prefix in prefixes}) != len(prefixes)
+    ):
+        raise ValueError(
+            "directoryGroups.excludePrefixes must contain unique nonempty literal prefixes "
+            "of at most 64 characters, without controls or outer whitespace"
+        )
     if bool(config.group_names) == bool(config.group_mappings):
         raise ValueError("exactly one nonempty groupNames or groupMappings list is required")
     if len({mapping.source_name.casefold() for mapping in config.group_mappings}) != len(
@@ -237,6 +260,17 @@ def _group_dns(config: ActiveDirectoryConfig) -> tuple[str, ...]:
 def _or_filter(attribute: str, values: tuple[str, ...]) -> str:
     clauses = "".join(f"({attribute}={_escape_ldap_filter(value)})" for value in values)
     return clauses if len(values) == 1 else f"(|{clauses})"
+
+
+def _directory_group_filter(config: ActiveDirectoryConfig) -> str:
+    access_names = (
+        tuple(mapping.source_name for mapping in config.group_mappings) or config.group_names
+    )
+    excluded = [f"(cn={_escape_ldap_filter(name)})" for name in access_names]
+    excluded.extend(
+        f"(cn={_escape_ldap_filter(prefix)}*)" for prefix in config.directory_group_exclude_prefixes
+    )
+    return f"(!(|{''.join(excluded)}))"
 
 
 def _provider_config(config: ActiveDirectoryConfig) -> dict[str, list[str]]:
@@ -350,8 +384,8 @@ def _mapper_representations(
             },
         )
     )
+    legacy = next(mapper for mapper in mappers if mapper["name"] == "approved groups")
     if config.group_mappings:
-        legacy = next(mapper for mapper in mappers if mapper["name"] == "approved groups")
         mappers.remove(legacy)
         for mapping, source_dn in zip(config.group_mappings, _group_dns(config), strict=True):
             mappers.append(
@@ -372,6 +406,21 @@ def _mapper_representations(
                     },
                 }
             )
+    if config.import_directory_groups:
+        mappers.append(
+            {
+                **legacy,
+                "name": DIRECTORY_GROUP_MAPPER_NAME,
+                "subType": DIRECTORY_GROUP_OWNER_SUBTYPE,
+                "config": {
+                    **legacy["config"],
+                    "groups.path": [DIRECTORY_GROUP_PATH],
+                    "groups.ldap.filter": [_directory_group_filter(config)],
+                    "mapped.group.attributes": [],
+                    "user.roles.retrieve.strategy": ["LOAD_GROUPS_BY_MEMBER_ATTRIBUTE"],
+                },
+            }
+        )
     return tuple(mappers)
 
 
@@ -757,6 +806,97 @@ def _select_exact_group(groups: Any, group_name: str) -> dict[str, Any]:
     return matching[0]
 
 
+def _verify_directory_group_roles(
+    session: requests.Session, groups_url: str, group_id: str
+) -> None:
+    roles = _request_json(
+        session,
+        "GET",
+        f"{groups_url}/{quote(group_id, safe='')}/role-mappings",
+        expected_statuses={200},
+    )
+    if not isinstance(roles, dict):
+        raise ActiveDirectoryError("Keycloak returned invalid directory group role mappings")
+    realm_roles = roles.get("realmMappings", [])
+    client_roles = roles.get("clientMappings", {})
+    if (
+        not isinstance(realm_roles, list)
+        or not isinstance(client_roles, dict)
+        or realm_roles
+        or client_roles
+    ):
+        raise ActiveDirectoryError("groups under /ldap_groups must not grant application roles")
+
+
+def _directory_group_parent(
+    session: requests.Session,
+    keycloak_url: str,
+    realm_name: str,
+    *,
+    create: bool = False,
+) -> str:
+    groups_url = f"{keycloak_url.rstrip('/')}/admin/realms/{quote(realm_name, safe='')}/groups"
+    params = {
+        "search": DIRECTORY_GROUP_PATH.removeprefix("/"),
+        "exact": "true",
+        "populateHierarchy": "false",
+        "briefRepresentation": "false",
+        "max": "2",
+    }
+    groups = _request_json(session, "GET", groups_url, expected_statuses={200}, params=params)
+    if groups == [] and create:
+        _request_json(
+            session,
+            "POST",
+            groups_url,
+            expected_statuses={201, 204, 409},
+            json={"name": DIRECTORY_GROUP_PATH.removeprefix("/")},
+        )
+        return _directory_group_parent(session, keycloak_url, realm_name)
+    if (
+        not isinstance(groups, list)
+        or len(groups) != 1
+        or not isinstance(groups[0], dict)
+        or groups[0].get("name") != DIRECTORY_GROUP_PATH.removeprefix("/")
+        or groups[0].get("path") != DIRECTORY_GROUP_PATH
+        or groups[0].get("parentId") is not None
+        or not isinstance(groups[0].get("id"), str)
+        or not groups[0]["id"]
+    ):
+        raise ActiveDirectoryError("Keycloak /ldap_groups has an unexpected ID, path or parent")
+    parent_id = groups[0]["id"]
+    _verify_directory_group_roles(session, groups_url, parent_id)
+    first = 0
+    seen_ids = {parent_id}
+    while True:
+        children = _request_json(
+            session,
+            "GET",
+            f"{groups_url}/{quote(parent_id, safe='')}/children",
+            expected_statuses={200},
+            params={"first": str(first), "max": "100", "briefRepresentation": "false"},
+        )
+        if not isinstance(children, list):
+            raise ActiveDirectoryError("Keycloak returned invalid directory group children")
+        for child in children:
+            if (
+                not isinstance(child, dict)
+                or not isinstance(child.get("id"), str)
+                or not child["id"]
+                or child["id"] in seen_ids
+                or not isinstance(child.get("name"), str)
+                or not child["name"]
+                or child.get("path") != f"{DIRECTORY_GROUP_PATH}/{child['name']}"
+                or child.get("parentId") != parent_id
+            ):
+                raise ActiveDirectoryError("Keycloak directory group has an unexpected ID or path")
+            seen_ids.add(child["id"])
+            _verify_directory_group_roles(session, groups_url, child["id"])
+        if len(children) < 100:
+            return parent_id
+        first += len(children)
+
+
 def _verify_access_group_bindings(
     session: requests.Session,
     keycloak_url: str,
@@ -797,7 +937,7 @@ def _sync_group_mapper(
     realm_name: str,
     provider_id: str,
     mapper_id: str,
-    approved_group_count: int,
+    approved_group_count: int | None,
     *,
     allow_missing: bool = False,
 ) -> bool:
@@ -823,7 +963,7 @@ def _sync_group_mapper(
     processed = result["added"] + result["updated"]
     if allow_missing and approved_group_count == 1 and processed == 0:
         return False
-    if processed != approved_group_count:
+    if approved_group_count is not None and processed != approved_group_count:
         raise ActiveDirectoryError("Keycloak Active Directory group sync failed")
     return True
 
@@ -894,6 +1034,7 @@ def _owned_group_mappers(
     provider_id: str,
     *,
     mapping_mode: bool,
+    directory_mode: bool = False,
 ) -> list[dict[str, Any]]:
     components = _get_components(
         session,
@@ -913,7 +1054,11 @@ def _owned_group_mappers(
             name.startswith(MAPPING_NAME_PREFIX)
             or component.get("subType") == MAPPING_OWNER_SUBTYPE
         )
-        if name == "approved groups" or is_mapping:
+        is_directory = (
+            name == DIRECTORY_GROUP_MAPPER_NAME
+            or component.get("subType") == DIRECTORY_GROUP_OWNER_SUBTYPE
+        )
+        if name == "approved groups" or is_mapping or is_directory:
             if (
                 component.get("providerId") != "group-ldap-mapper"
                 or not isinstance(component.get("id"), str)
@@ -929,7 +1074,16 @@ def _owned_group_mappers(
                     )
                 )
                 or (
+                    is_directory
+                    and (
+                        name != DIRECTORY_GROUP_MAPPER_NAME
+                        or component.get("subType") != DIRECTORY_GROUP_OWNER_SUBTYPE
+                        or settings.get("groups.path") != [DIRECTORY_GROUP_PATH]
+                    )
+                )
+                or (
                     not is_mapping
+                    and not is_directory
                     and (
                         component.get("subType") is not None
                         or settings.get("groups.path") != ["/access"]
@@ -943,17 +1097,26 @@ def _owned_group_mappers(
                 raise ActiveDirectoryError("duplicate managed group mappers exist")
             owned.append(component)
             mapping_mode |= is_mapping
+            directory_mode |= is_directory
         elif component.get("providerId") == "group-ldap-mapper":
             manual.append(component)
-    if mapping_mode:
+    if mapping_mode or directory_mode:
         for component in manual:
             paths = component["config"].get("groups.path", ["/"])
             if not isinstance(paths, list) or len(paths) != 1 or not isinstance(paths[0], str):
                 raise ActiveDirectoryError("manual group mapper has an unverifiable groups path")
             path = "/" + paths[0].strip().strip("/")
-            if path == "/" or path == "/access" or path.startswith("/access/"):
+            if mapping_mode and (path == "/" or path == "/access" or path.startswith("/access/")):
                 raise ActiveDirectoryError(
                     "manual group mapper overlaps /access; review it before retrying"
+                )
+            if directory_mode and (
+                path == "/"
+                or path == DIRECTORY_GROUP_PATH
+                or path.startswith(DIRECTORY_GROUP_PATH + "/")
+            ):
+                raise ActiveDirectoryError(
+                    "manual group mapper overlaps /ldap_groups; review it before retrying"
                 )
     return owned
 
@@ -1018,8 +1181,10 @@ def reconcile_active_directory(
         _verify_access_groups(session, keycloak_url, realm_name, tuple(sorted(config.group_names)))
     _preflight_connection(session, keycloak_url, realm_name, config)
 
-    mapping_transition = bool(config.group_mappings) or (
-        existing is not None and existing.get("subType") == MAPPING_TRANSITION_SUBTYPE
+    mapping_transition = (
+        bool(config.group_mappings)
+        or config.import_directory_groups
+        or (existing is not None and existing.get("subType") == MAPPING_TRANSITION_SUBTYPE)
     )
     owned_groups = []
     if existing is not None:
@@ -1030,8 +1195,14 @@ def reconcile_active_directory(
             components_url,
             existing["id"],
             mapping_mode=mapping_transition,
+            directory_mode=config.import_directory_groups,
         )
     mapping_transition |= any(mapper["name"] != "approved groups" for mapper in owned_groups)
+    directory_parent_id = None
+    if config.import_directory_groups:
+        directory_parent_id = _directory_group_parent(
+            session, keycloak_url, realm_name, create=True
+        )
 
     desired_provider: dict[str, Any] = {
         "name": MANAGED_PROVIDER_NAME,
@@ -1112,18 +1283,19 @@ def reconcile_active_directory(
     }
     synchronized_sources: set[str] = set()
     for mapper_id, mapper in group_mappers:
+        directory_mapper = mapper["name"] == DIRECTORY_GROUP_MAPPER_NAME
         synchronized = _sync_group_mapper(
             session,
             keycloak_url,
             realm_name,
             provider_id,
             mapper_id,
-            1 if config.group_mappings else len(config.group_names),
-            allow_missing=bool(config.group_mappings),
+            None if directory_mapper else 1 if config.group_mappings else len(config.group_names),
+            allow_missing=bool(config.group_mappings) and not directory_mapper,
         )
         if mapping_transition:
             _verify_component_readback(session, components_url, mapper, expected_id=mapper_id)
-        if config.group_mappings:
+        if config.group_mappings and not directory_mapper:
             mapping = mappings_by_name[mapper["name"]]
             if synchronized:
                 synchronized_sources.add(mapping.source_name)
@@ -1141,12 +1313,17 @@ def reconcile_active_directory(
         )
     else:
         _verify_access_group_bindings(session, keycloak_url, realm_name, config)
+    if directory_parent_id is not None and directory_parent_id != _directory_group_parent(
+        session, keycloak_url, realm_name
+    ):
+        raise ActiveDirectoryError("Keycloak /ldap_groups changed during reconciliation")
     if mapping_transition:
         remaining = _owned_group_mappers(
             session,
             components_url,
             provider_id,
             mapping_mode=True,
+            directory_mode=config.import_directory_groups,
         )
         if {mapper["id"] for mapper in remaining} != {item[0] for item in group_mappers}:
             raise ActiveDirectoryError("managed group mapper set changed during reconciliation")
