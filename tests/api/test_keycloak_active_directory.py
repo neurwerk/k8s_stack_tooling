@@ -241,6 +241,18 @@ def test_provider_config_builds_exact_direct_membership_filter(mapped: bool) -> 
     assert provider["fullSyncPeriod"] == ["-1"]
 
 
+@pytest.mark.parametrize("suffix", ["llm-default-users", "mcp-default-users"])
+def test_default_bundle_mapping_targets(suffix: str) -> None:
+    target = f"/access/neurwerk-{suffix}"
+    config = _config(group_names=(), group_mappings=(GroupMapping("CORP_Default", target),))
+    mapper = next(
+        item
+        for item in _mapper_representations("provider-id", config)
+        if item["providerId"] == "group-ldap-mapper"
+    )
+    assert mapper["config"]["groups.path"] == [target]
+
+
 def test_dn_values_are_escaped_before_filter_escaping() -> None:
     assert _escape_dn_value(" admins,prod ") == r"\ admins\,prod\ "
 

@@ -37,7 +37,9 @@ CANONICAL_GROUP_PATHS = frozenset(
         "platform-admins",
         "studio-users",
         "llm-all-users",
+        "llm-default-users",
         "mcp-all-users",
+        "mcp-default-users",
     )
 )
 
