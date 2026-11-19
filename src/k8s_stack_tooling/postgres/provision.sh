@@ -99,7 +99,7 @@ SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = :'application_user');
 SQL
 )
 export DOCUMENTDB_ROLE_EXISTS
-DOCUMENTDB_PREFLIGHT=true mongo /runtime/provision.js
+(DOCUMENTDB_PREFLIGHT=true mongo /runtime/provision.js)
 
 revoke_authorization() {
   cleanup_status=0

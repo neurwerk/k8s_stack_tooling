@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,6 +64,7 @@ def test_enabled_environment_builds_valid_config(mapped: bool, insecure: bool) -
         assert config.group_mappings[0].source_name == "CORP_USERS"
         assert config.group_mappings[0].target_parent == "/access/neurwerk-studio-users"
     assert config.email_verified is True
+    assert config.import_directory_groups is False
     assert "do-not-log-this" not in repr(config)
 
 
@@ -127,6 +129,10 @@ def test_approved_addon_inventory_reaches_reconciliation() -> None:
             '[{"sourceName":"CORP_SAMPLE","targetParent":"/access/neurwerk-sample-users"}]'
         ),
         "KC_ACTIVE_DIRECTORY_ADDON_GROUP_TARGETS": '["/access/neurwerk-sample-users"]',
+        "KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_ENABLED": "true",
+        "KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_EXCLUDE_PREFIXES": json.dumps(
+            ["Platform_", "Ops*(West)\\"]
+        ),
     }
     with (
         patch.dict("os.environ", environment, clear=True),
@@ -142,12 +148,19 @@ def test_approved_addon_inventory_reaches_reconciliation() -> None:
         config = reconcile.call_args.args[3]
         assert config.addon_group_targets == ("/access/neurwerk-sample-users",)
         assert config.group_mappings[0].target_parent == config.addon_group_targets[0]
+        assert config.import_directory_groups is True
+        assert config.directory_group_exclude_prefixes == ("Platform_", "Ops*(West)\\")
 
 
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
         ("KC_ACTIVE_DIRECTORY_ENABLED", "yes", "must be true or false"),
+        ("KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_ENABLED", "yes", "must be true or false"),
+        ("KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_EXCLUDE_PREFIXES", "invalid", "JSON array"),
+        ("KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_EXCLUDE_PREFIXES", "null", "JSON array"),
+        ("KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_EXCLUDE_PREFIXES", "[1]", "JSON array"),
+        ("KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_EXCLUDE_PREFIXES", '[""]', "literal prefixes"),
         ("KC_ACTIVE_DIRECTORY_GROUP_NAMES", "studio-users", "JSON array"),
         ("KC_ACTIVE_DIRECTORY_GROUP_NAMES", '["ok", 1]', "JSON array"),
         ("KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED", "false", "emailVerified"),
