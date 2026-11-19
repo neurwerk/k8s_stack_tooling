@@ -1,5 +1,60 @@
 schemaVersion: 1
 models:
+  - id: docling-standard
+    category: ocr
+    menuGroup: document-parsing
+    displayName: Standard Docling (Heron + TableFormer + RapidOCR)
+    description: Remote model inference only; PDF parsing, rendering, cell matching and document assembly stay in the caller.
+    source: docling-project/docling-layout-heron
+    revision: 8f39ad3c0b4c58e9c2d2c84a38465abf757272d8
+    license:
+      name: Apache-2.0 AND CDLA-Permissive-2.0
+      url: https://huggingface.co/docling-project/docling-models/tree/fc0f2d45e2218ea24bce5045f58a389aed16dc23
+      commercialUse: true
+      noticeRequired: true
+      notes: Heron and RapidOCR are Apache-2.0; TableFormer weights are CDLA-Permissive-2.0. Retain each upstream model card.
+    metadata:
+      architecture: heron-tableformer-rapidocr
+      languages: [multilingual]
+      intendedUse: standard-document-model-inference
+    variants:
+      - id: cuda
+        format: pytorch
+        precision: fp32
+        estimatedDownloadBytes: 400000000
+        runtimes: [docling-standard-cuda]
+        include: [config.json, preprocessor_config.json, model.safetensors, README.md]
+        compatibilityNotes: Requires CUDA with FP32 support. Target GPU acceptance is required; no CPU fallback.
+        runtimeNotes: Heron layout, TableFormer Accurate and PP-OCRv6 small with mobile orientation classification. Preserves the baseline ch recognition configuration; no language-specific checkpoint switching.
+        companions:
+          - directory: tableformer
+            source: docling-project/docling-models
+            revision: fc0f2d45e2218ea24bce5045f58a389aed16dc23
+            include:
+              - model_artifacts/tableformer/accurate/tableformer_accurate.safetensors
+              - model_artifacts/tableformer/accurate/tm_config.json
+              - README.md
+        httpFiles:
+          - path: rapidocr/README.md
+            url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/README.md
+            size: 1140
+            sha256: 3dc91bb3cb667df783178917d69b38bfabb8c935596f34243a1c9f0d36916b6e
+          - path: rapidocr/PP-OCRv6_det_small.pth
+            url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/torch/PP-OCRv6/det/PP-OCRv6_det_small.pth
+            size: 10248727
+            sha256: fbdc74c97ea7b770ab22cbdc1bba01a52bdf1975efcf3442057356d622b05d54
+          - path: rapidocr/PP-OCRv6_rec_small.pth
+            url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/torch/PP-OCRv6/rec/PP-OCRv6_rec_small.pth
+            size: 21326017
+            sha256: 0107b2ad694ccc9b1db7cf9ed3ffbc93d1795d9e08d9cf823127243a87bce516
+          - path: rapidocr/ch_ppocr_mobile_v2.0_cls_mobile.pth
+            url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/torch/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.pth
+            size: 588638
+            sha256: bfe13860824b3365c0c7f7ccfcddc8ff11645c60051739ff18bc9913f60c98e1
+          - path: rapidocr/ppocrv6_dict.txt
+            url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt
+            size: 74947
+            sha256: b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d
   - id: deepseek-r1-32b
     category: llm
     displayName: DeepSeek R1 Distill Qwen 32B (Ollama archive)
