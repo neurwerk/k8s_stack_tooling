@@ -1,0 +1,1129 @@
+# SPDX-FileCopyrightText: The Docling Contributors
+# SPDX-License-Identifier: MIT
+
+from base64 import b64encode
+from email.headerregistry import HeaderRegistry
+from email.message import EmailMessage
+from email.utils import getaddresses
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+from docling_core.types.doc import (
+    ContentLayer,
+    DocItemLabel,
+    DoclingDocument,
+    TextItem,
+)
+
+from docling.backend.email_backend import EmailDocumentBackend
+from docling.datamodel.backend_options import EmailBackendOptions
+from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.document import InputDocument
+from docling.document_converter import DocumentConverter, EmailFormatOption
+
+
+def test_convert_email_backend_from_path():
+    in_path = Path("tests/data/email/sources/eml_simple.eml")
+    in_doc = InputDocument(
+        path_or_stream=in_path,
+        format=InputFormat.EMAIL,
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=in_path)
+
+    assert backend.is_valid()
+
+    doc = backend.convert()
+    markdown = doc.export_to_markdown()
+
+    assert "Simple Email" in markdown
+    assert "From: Alice Example &lt;alice@example.com&gt;" in markdown
+    assert "To: Bob Example &lt;bob@example.com&gt;" in markdown
+    assert "Hello Bob," in markdown
+    assert "This is a simple email body." in markdown
+
+
+def test_convert_email_backend_from_stream():
+    raw_email = Path("tests/data/email/sources/eml_simple.eml").read_bytes()
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="eml_simple.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(
+        in_doc=in_doc,
+        path_or_stream=BytesIO(raw_email),
+    )
+
+    assert backend.is_valid()
+    assert "Simple Email" in backend.convert().export_to_markdown()
+
+
+def test_email_document_converter():
+    converter = DocumentConverter(allowed_formats=[InputFormat.EMAIL])
+    result = converter.convert(Path("tests/data/email/sources/eml_simple.eml"))
+
+    markdown = result.document.export_to_markdown()
+    assert "Simple Email" in markdown
+    assert "This is a simple email body." in markdown
+
+
+def test_email_with_attachment_excludes_encoded_content():
+    """Test that base64-encoded attachment content is not included in the converted document."""
+    in_path = Path("tests/data/email/sources/eml_with_attachment.eml")
+    in_doc = InputDocument(
+        path_or_stream=in_path,
+        format=InputFormat.EMAIL,
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=in_path)
+
+    assert backend.is_valid()
+
+    doc = backend.convert()
+    markdown = doc.export_to_markdown()
+
+    # Verify email metadata and body are present
+    assert "Email with Attachment" in markdown
+    assert "From: Alice Example &lt;alice@example.com&gt;" in markdown
+    assert "To: Bob Example &lt;bob@example.com&gt;" in markdown
+    assert "This email contains an attachment." in markdown
+
+    # Verify base64-encoded attachment content is NOT in the document
+    assert (
+        "VGhpcyBpcyBhIHRlc3QgYXR0YWNobWVudCBmaWxlLgpJdCBjb250YWlucyBzb21lIGR1bW15IGNv"
+        not in markdown
+    )
+    assert "bnRlbnQuCg==" not in markdown
+
+    # Verify decoded attachment content is also NOT in the document
+    assert "This is a test attachment file." not in markdown
+    assert "It contains some dummy content." not in markdown
+
+
+def test_email_backend_preserves_body_paragraphs_and_date():
+    raw_email = b"""From: Alice Example <alice@example.com>
+To: Bob Example <bob@example.com>
+Subject: Paragraph Email
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Hello Bob,
+
+This is a second paragraph.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="paragraph.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    doc = backend.convert()
+    text_items = [item for item in doc.texts if isinstance(item, TextItem)]
+
+    assert [item.text for item in text_items] == [
+        "Paragraph Email",
+        "From: Alice Example <alice@example.com>",
+        "To: Bob Example <bob@example.com>",
+        "Date: 2026-05-20T10:30:00+00:00",
+        "Hello Bob,",
+        "This is a second paragraph.",
+    ]
+    assert [item.label for item in text_items[1:]] == [DocItemLabel.TEXT] * 5
+
+
+def test_email_backend_keeps_cc_recipients():
+    """Cc recipients are part of who the message was addressed to."""
+    raw_email = b"""From: Alice Example <alice@example.com>
+To: Bob Example <bob@example.com>
+Cc: Carol Example <carol@example.com>, dave@example.com
+Subject: Copied Email
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Hello all.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="copied.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    doc = backend.convert()
+    text_items = [item for item in doc.texts if isinstance(item, TextItem)]
+
+    assert [item.text for item in text_items] == [
+        "Copied Email",
+        "From: Alice Example <alice@example.com>",
+        "To: Bob Example <bob@example.com>",
+        "Cc: Carol Example <carol@example.com>, dave@example.com",
+        "Date: 2026-05-20T10:30:00+00:00",
+        "Hello all.",
+    ]
+
+
+def test_email_backend_quotes_display_names_holding_specials():
+    """A name holding specials is quoted so the list parses back as itself."""
+    raw_email = b"""From: "Doe, John" <john@example.com>
+To: "Smith, Jane" <jane@example.com>, "Roe, Richard" <rich@example.com>
+Subject: Quarterly Report
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Numbers attached.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="specials.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    rendered = [
+        item.text for item in backend.convert().texts if isinstance(item, TextItem)
+    ]
+    to_line = next(text for text in rendered if text.startswith("To: "))
+
+    assert 'From: "Doe, John" <john@example.com>' in rendered
+    assert getaddresses([to_line.removeprefix("To: ")]) == [
+        ("Smith, Jane", "jane@example.com"),
+        ("Roe, Richard", "rich@example.com"),
+    ]
+
+
+def test_email_backend_leaves_plain_display_names_unquoted():
+    """A period or an apostrophe parses back unquoted, so the name is left alone."""
+    raw_email = b"""From: John A. Smith <john@example.com>
+To: O'Brien <obrien@example.com>
+Subject: Plain Names
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Body.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="plain_names.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    rendered = [
+        item.text for item in backend.convert().texts if isinstance(item, TextItem)
+    ]
+
+    assert "From: John A. Smith <john@example.com>" in rendered
+    assert "To: O'Brien <obrien@example.com>" in rendered
+
+
+def test_email_backend_escapes_quotes_inside_display_names():
+    """A quote inside a name is escaped instead of closing the string early."""
+    raw_email = b"""From: "John \\"JD\\" Doe" <jd@example.com>
+To: bob@example.com
+Subject: Embedded Quotes
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Body.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="embedded_quotes.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    rendered = [
+        item.text for item in backend.convert().texts if isinstance(item, TextItem)
+    ]
+    from_line = next(text for text in rendered if text.startswith("From: "))
+
+    assert getaddresses([from_line.removeprefix("From: ")]) == [
+        ('John "JD" Doe', "jd@example.com")
+    ]
+
+
+def test_email_backend_collapses_line_breaks_in_headers():
+    """A crafted name, subject or attachment filename cannot forge a header line.
+
+    Attachment listing is off by default, so the invariant only covers the
+    filename path with it enabled.
+    """
+    raw_email = (
+        b"From: =?utf-8?q?Attacker=0D=0ADate=3A_1999-01-01=0D=0ATo=3A_ceo=40corp?="
+        b" <evil@example.com>\r\n"
+        b"To: real@example.com\r\n"
+        b"Subject: =?utf-8?q?Hi=0D=0AFrom=3A_boss=40corp?=\r\n"
+        b"Date: Tue, 20 May 2026 10:30:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/mixed; boundary="BOUNDARY"\r\n'
+        b"\r\n"
+        b"--BOUNDARY\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n'
+        b"\r\n"
+        b"Body.\r\n"
+        b"--BOUNDARY\r\n"
+        b"Content-Type: text/plain\r\n"
+        b"Content-Disposition: attachment;"
+        b' filename="=?utf-8?q?evil=0D=0AFrom=3A_boss=40corp?=.txt"\r\n'
+        b"\r\n"
+        b"payload\r\n"
+        b"--BOUNDARY--\r\n"
+    )
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="crlf.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(
+        in_doc=in_doc,
+        path_or_stream=BytesIO(raw_email),
+        options=EmailBackendOptions(list_attachments=True),
+    )
+
+    rendered = [
+        item.text for item in backend.convert().texts if isinstance(item, TextItem)
+    ]
+
+    assert not any("\r" in text or "\n" in text for text in rendered)
+    assert (
+        'From: "Attacker Date: 1999-01-01 To: ceo@corp" <evil@example.com>' in rendered
+    )
+    assert "Hi From: boss@corp" in rendered
+    assert "evil From: boss@corp.txt (text/plain)" in rendered
+
+
+def test_email_backend_collapses_non_crlf_line_breaks_in_headers():
+    """Every break ``str.splitlines()`` recognises is collapsed, not only CR/LF."""
+    for break_char in ("\x0b", "\x0c", "\x1c", "\x85", "\u2028"):
+        encoded = b64encode(f"Hi{break_char}From: boss@corp".encode()).decode()
+        raw_email = (
+            b"From: sender@example.com\r\n"
+            b"To: real@example.com\r\n"
+            b"Subject: =?utf-8?b?" + encoded.encode() + b"?=\r\n"
+            b"MIME-Version: 1.0\r\n"
+            b'Content-Type: text/plain; charset="utf-8"\r\n'
+            b"\r\n"
+            b"Body.\r\n"
+        )
+        in_doc = InputDocument(
+            path_or_stream=BytesIO(raw_email),
+            format=InputFormat.EMAIL,
+            filename="breaks.eml",
+            backend=EmailDocumentBackend,
+        )
+        backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+        title = next(
+            item.text
+            for item in backend.convert().texts
+            if isinstance(item, TextItem) and item.label == DocItemLabel.TITLE
+        )
+
+        assert title == "Hi From: boss@corp"
+        assert title.splitlines() == [title]
+
+
+def test_email_backend_unfolds_folded_headers_to_single_spaces():
+    """A folded header renders with one space, not a run of three."""
+    raw_email = (
+        b"From: sender@example.com\r\n"
+        b"To: real@example.com\r\n"
+        b"Subject: A very long subject that is\r\n folded across lines\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n'
+        b"\r\n"
+        b"Body.\r\n"
+    )
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="folded.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    title = next(
+        item.text
+        for item in backend.convert().texts
+        if isinstance(item, TextItem) and item.label == DocItemLabel.TITLE
+    )
+
+    assert title == "A very long subject that is folded across lines"
+
+
+def test_email_backend_quotes_display_names_holding_a_backslash():
+    """A Windows-style name is quoted; unquoted the parser loses the address."""
+    raw_email = b"""From: =?utf-8?q?CORP=5Cjsmith?= <jsmith@example.com>
+To: real@example.com
+Subject: Backslash Name
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Body.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="backslash.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    rendered = [
+        item.text for item in backend.convert().texts if isinstance(item, TextItem)
+    ]
+    from_line = next(text for text in rendered if text.startswith("From: "))
+
+    header = HeaderRegistry()("To", from_line.removeprefix("From: "))
+    assert [
+        (address.display_name, address.addr_spec)
+        for group in header.groups
+        for address in group.addresses
+    ] == [("CORP\\jsmith", "jsmith@example.com")]
+
+
+def test_email_backend_keeps_non_ascii_display_names_readable():
+    """A non-ASCII name is quoted when needed but never RFC 2047 re-encoded."""
+    raw_email = b"""From: =?utf-8?b?5byg5LiJ?= <zhang@example.com>
+To: =?utf-8?q?M=C3=BCller=2C_Anna?= <anna@example.com>
+Subject: Non-ASCII Names
+Date: Tue, 20 May 2026 10:30:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Body.
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="non_ascii.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    rendered = [
+        item.text for item in backend.convert().texts if isinstance(item, TextItem)
+    ]
+
+    assert "From: \u5f20\u4e09 <zhang@example.com>" in rendered
+    assert 'To: "M\xfcller, Anna" <anna@example.com>' in rendered
+
+
+def test_email_backend_converts_html_body_to_text_paragraphs():
+    raw_email = b"""From: Alice Example <alice@example.com>
+To: Bob Example <bob@example.com>
+Subject: HTML Email
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<html><body><p>Hello <strong>Bob</strong>,</p><p>This is HTML.</p></body></html>
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="html.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    markdown = backend.convert().export_to_markdown()
+
+    # No invented separator between the bold run and the comma.
+    assert "Hello **Bob**," in markdown
+    assert "This is HTML." in markdown
+    assert "<strong>" not in markdown
+
+
+def test_email_backend_escapes_html_body_text_once():
+    raw_email = b"""From: Alice Example <alice@example.com>
+To: Bob Example <bob@example.com>
+Subject: HTML Email
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<html><body><p>Fish &amp; chips for a&lt;b, see my_file_name.txt</p></body></html>
+"""
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="html.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    doc = backend.convert()
+
+    assert "Fish & chips for a<b, see my_file_name.txt" in [
+        item.text for item in doc.texts
+    ]
+    assert "Fish &amp; chips for a&lt;b, see my\\_file\\_name.txt" in (
+        doc.export_to_markdown()
+    )
+    assert "Fish & chips for a<b, see my_file_name.txt" in doc.export_to_text()
+
+
+@pytest.mark.parametrize("plain_body", [None, " \n"], ids=["html-only", "blank-plain"])
+def test_email_html_body_keeps_furniture_outside_the_body(plain_body: str | None):
+    """Email furniture stays available, as it does for a standalone HTML file."""
+    html = (
+        "<html><body><p>Body: 1 &lt; 2 &amp; 3 &gt; 2, a_b.</p>"
+        "<footer>Footer: terms &amp; conditions, c_d.</footer></body></html>"
+    )
+    message = EmailMessage()
+    message["Subject"] = "HTML furniture"
+    if plain_body is None:
+        message.set_content(html, subtype="html")
+    else:
+        message.set_content(plain_body)
+        message.add_alternative(html, subtype="html")
+
+    converter = DocumentConverter(allowed_formats=[InputFormat.EMAIL, InputFormat.HTML])
+    doc = converter.convert(
+        DocumentStream(name="furniture.eml", stream=BytesIO(message.as_bytes()))
+    ).document
+    html_doc = converter.convert(
+        DocumentStream(name="furniture.html", stream=BytesIO(html.encode("utf-8")))
+    ).document
+
+    footer = "Footer: terms & conditions, c_d."
+    for converted in (doc, html_doc):
+        footer_items = [item for item in converted.texts if item.text == footer]
+        assert len(footer_items) == 1
+        assert footer_items[0].content_layer == ContentLayer.FURNITURE
+        assert "Footer:" not in converted.export_to_markdown()
+        all_layers = converted.export_to_markdown(
+            included_content_layers={ContentLayer.BODY, ContentLayer.FURNITURE}
+        )
+        assert all_layers.count("Footer: terms &amp; conditions, c\\_d.") == 1
+        assert "Body: 1 &lt; 2 &amp; 3 &gt; 2, a\\_b." in all_layers
+        serialized_footers = [
+            item
+            for item in converted.export_to_dict()["texts"]
+            if item["text"] == footer
+        ]
+        assert len(serialized_footers) == 1
+        assert serialized_footers[0]["content_layer"] == "furniture"
+
+
+@pytest.mark.parametrize("plain_body", [None, " \n"], ids=["html-only", "blank-plain"])
+def test_email_with_only_html_furniture_does_not_fall_back_to_raw_html(
+    plain_body: str | None,
+):
+    """A footer is content even when there are no BODY paragraphs."""
+    html = "<html><body><footer>Footer only.</footer></body></html>"
+    message = EmailMessage()
+    message["Subject"] = "Footer only email"
+    if plain_body is None:
+        message.set_content(html, subtype="html")
+    else:
+        message.set_content(plain_body)
+        message.add_alternative(html, subtype="html")
+
+    doc = (
+        DocumentConverter(allowed_formats=[InputFormat.EMAIL])
+        .convert(
+            DocumentStream(name="footer-only.eml", stream=BytesIO(message.as_bytes()))
+        )
+        .document
+    )
+
+    assert [(item.text, item.content_layer) for item in doc.texts] == [
+        ("Footer only email", ContentLayer.BODY),
+        ("Footer only.", ContentLayer.FURNITURE),
+    ]
+    assert doc.export_to_markdown() == "# Footer only email"
+    assert (
+        doc.export_to_markdown(
+            included_content_layers={ContentLayer.BODY, ContentLayer.FURNITURE}
+        )
+        == "# Footer only email\n\nFooter only."
+    )
+
+
+def test_email_keeps_nonempty_plain_body_instead_of_html_furniture():
+    """The HTML alternative must not add a second copy of the plain body."""
+    message = EmailMessage()
+    message["Subject"] = "Plain preferred"
+    message.set_content("Plain body.\n\nShared footer.")
+    message.add_alternative(
+        "<html><body><p>HTML body.</p><footer>Shared footer.</footer></body></html>",
+        subtype="html",
+    )
+
+    doc = (
+        DocumentConverter(allowed_formats=[InputFormat.EMAIL])
+        .convert(
+            DocumentStream(
+                name="plain-preferred.eml", stream=BytesIO(message.as_bytes())
+            )
+        )
+        .document
+    )
+
+    assert [(item.text, item.content_layer) for item in doc.texts] == [
+        ("Plain preferred", ContentLayer.BODY),
+        ("Plain body.", ContentLayer.BODY),
+        ("Shared footer.", ContentLayer.BODY),
+    ]
+    assert (
+        doc.export_to_markdown(
+            included_content_layers={ContentLayer.BODY, ContentLayer.FURNITURE}
+        )
+        == "# Plain preferred\n\nPlain body.\n\nShared footer."
+    )
+
+
+def test_email_keeps_furniture_from_each_html_part_once():
+    """Each selected HTML part contributes its body and its furniture once."""
+    message = EmailMessage()
+    message["Subject"] = "Multipart HTML"
+    message.make_mixed()
+    for html in (
+        "<html><body> </body></html>",
+        "<html><body><p>First body.</p><footer>First footer.</footer></body></html>",
+        "<html><body><p>Second body.</p><footer>Second footer.</footer></body></html>",
+    ):
+        part = EmailMessage()
+        part.set_content(html, subtype="html")
+        message.attach(part)
+
+    doc = (
+        DocumentConverter(allowed_formats=[InputFormat.EMAIL])
+        .convert(
+            DocumentStream(name="multipart.eml", stream=BytesIO(message.as_bytes()))
+        )
+        .document
+    )
+
+    assert [(item.text, item.content_layer) for item in doc.texts] == [
+        ("Multipart HTML", ContentLayer.BODY),
+        ("First body.", ContentLayer.BODY),
+        ("First footer.", ContentLayer.FURNITURE),
+        ("Second body.", ContentLayer.BODY),
+        ("Second footer.", ContentLayer.FURNITURE),
+    ]
+    assert doc.export_to_markdown() == "# Multipart HTML\n\nFirst body.\n\nSecond body."
+
+
+_INVITATION_ICS = (
+    "BEGIN:VCALENDAR\r\n"
+    "VERSION:2.0\r\n"
+    "PRODID:-//Docling//Invitation test//EN\r\n"
+    "METHOD:REQUEST\r\n"
+    "BEGIN:VEVENT\r\n"
+    "UID:planning-2026@example.com\r\n"
+    "SEQUENCE:0\r\n"
+    "DTSTAMP:20261113T080000Z\r\n"
+    "DTSTART;TZID=Europe/Berlin:20261120T100000\r\n"
+    "DTEND;TZID=Europe/Berlin:20261120T110000\r\n"
+    "SUMMARY:Quarterly planning\r\n"
+    "LOCATION:Room 4\r\n"
+    "ORGANIZER;CN=Alice Example:mailto:alice@example.com\r\n"
+    "ATTENDEE;CN=Bob Example;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n"
+    "DESCRIPTION:Agenda: budget and hiring.\r\n"
+    "END:VEVENT\r\n"
+    "END:VCALENDAR\r\n"
+)
+
+_INVITATION_MARKDOWN = (
+    "### Calendar\n\n"
+    "Message type: Invitation\n\n"
+    "#### Quarterly planning\n\n"
+    "Start: 2026-11-20 10:00 Europe/Berlin\n\n"
+    "End: 2026-11-20 11:00 Europe/Berlin\n\n"
+    "Location: Room 4\n\n"
+    "Organizer: Alice Example &lt;alice@example.com&gt;\n\n"
+    "Agenda: budget and hiring.\n\n"
+    "##### Attendees\n\n"
+    "- Bob Example &lt;bob@example.com&gt; (required, awaiting response)"
+)
+
+
+def _convert_email(
+    message: EmailMessage, options: EmailBackendOptions | None = None
+) -> DoclingDocument:
+    converter = DocumentConverter(
+        allowed_formats=[InputFormat.EMAIL],
+        format_options={
+            InputFormat.EMAIL: EmailFormatOption(
+                backend_options=options or EmailBackendOptions()
+            )
+        },
+    )
+    stream = DocumentStream(name="invitation.eml", stream=BytesIO(message.as_bytes()))
+    return converter.convert(stream, raises_on_error=True).document
+
+
+def _invitation_email(subject: str, body: str) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = "Alice Example <alice@example.com>"
+    message["To"] = "bob@example.com"
+    message.set_content(body)
+    return message
+
+
+def test_email_backend_preserves_calendar_body_as_text():
+    """With calendar parsing off, keep another text MIME subtype as text."""
+    calendar_body = (
+        "BEGIN:VCALENDAR\n"
+        "VERSION:2.0\n"
+        "PRODID:-//Docling//Email fallback test//EN\n"
+        "BEGIN:VEVENT\n"
+        "UID:synthetic@example.org\n"
+        "DTSTAMP:20261107T000000Z\n"
+        "DTSTART:20261108T090000Z\n"
+        "DESCRIPTION:Review <terms> & conditions for a_b.\n"
+        "END:VEVENT\n"
+        "END:VCALENDAR"
+    )
+    message = EmailMessage()
+    message["Subject"] = "Calendar body"
+    message.set_content(calendar_body, subtype="calendar")
+
+    doc = _convert_email(message, EmailBackendOptions(parse_calendar_invitations=False))
+
+    assert [(item.text, item.content_layer) for item in doc.texts] == [
+        ("Calendar body", ContentLayer.BODY),
+        (calendar_body, ContentLayer.BODY),
+    ]
+    escaped_body = calendar_body.replace(
+        "<terms> & conditions for a_b.", "&lt;terms&gt; &amp; conditions for a\\_b."
+    ).replace("\n", "  \n")
+    assert doc.export_to_markdown() == f"# Calendar body\n\n{escaped_body}"
+
+
+def test_email_adds_the_events_of_an_inline_invitation():
+    """Outlook sends an invitation as a text/calendar part beside the body.
+
+    mailparser does not handle that part, so its time, location, organizer
+    and attendees were dropped.
+    """
+    message = _invitation_email("Quarterly planning", "When: 20 November, 10:00.")
+    message.add_alternative(
+        _INVITATION_ICS, subtype="calendar", params={"method": "REQUEST"}
+    )
+
+    markdown = _convert_email(message).export_to_markdown()
+
+    assert markdown.endswith("When: 20 November, 10:00.\n\n" + _INVITATION_MARKDOWN)
+
+
+def test_email_adds_an_invitation_sent_inline_and_attached_once():
+    """Gmail sends the same invitation inline and as an invite.ics attachment."""
+    message = _invitation_email(
+        "Invitation: Quarterly planning", "You are invited to Quarterly planning."
+    )
+    message.add_alternative(
+        "<p>You are invited to Quarterly planning.</p>", subtype="html"
+    )
+    message.add_alternative(
+        _INVITATION_ICS, subtype="calendar", params={"method": "REQUEST"}
+    )
+    message.add_attachment(
+        _INVITATION_ICS.encode(),
+        maintype="application",
+        subtype="ics",
+        filename="invite.ics",
+    )
+
+    markdown = _convert_email(
+        message, EmailBackendOptions(list_attachments=True)
+    ).export_to_markdown()
+
+    assert markdown.endswith(
+        "You are invited to Quarterly planning.\n\n"
+        + _INVITATION_MARKDOWN
+        + "\n\n### Attachments\n\n- invite.ics (application/ics)"
+    )
+
+
+def test_email_reads_a_calendar_attachment_from_its_bytes():
+    """An .ics attachment is found by its name and unfolded before decoding.
+
+    RFC 5545 lets a folded line split a UTF-8 character. The calendar name
+    must not become a second title.
+    """
+    calendar = (
+        b"BEGIN:VCALENDAR\r\n"
+        b"VERSION:2.0\r\n"
+        b"X-WR-CALNAME:Team\r\n"
+        b"BEGIN:VEVENT\r\n"
+        b"UID:offsite@example.com\r\n"
+        b"DTSTART;VALUE=DATE:20270115\r\n"
+        b"SUMMARY:Planung f\xc3\r\n \xbcr 2027\r\n"
+        b"END:VEVENT\r\n"
+        b"END:VCALENDAR\r\n"
+    )
+    message = _invitation_email("Team calendar", "The calendar is attached.")
+    message.add_attachment(
+        calendar,
+        maintype="application",
+        subtype="octet-stream",
+        filename="team.ics",
+    )
+
+    doc = _convert_email(message)
+
+    assert [item.text for item in doc.texts if item.label == DocItemLabel.TITLE] == [
+        "Team calendar"
+    ]
+    assert doc.export_to_markdown().endswith(
+        "The calendar is attached.\n\n"
+        "### Calendar\n\n"
+        "Calendar name: Team\n\n"
+        "#### Planung für 2027\n\n"
+        "Date: 2027-01-15 (all day)"
+    )
+
+
+def test_email_calendar_body_is_not_kept_as_raw_text():
+    """mailparser also puts a calendar part into its fallback body text."""
+    message = EmailMessage()
+    message["Subject"] = "Quarterly planning"
+    message.set_content(
+        _INVITATION_ICS, subtype="calendar", params={"method": "REQUEST"}
+    )
+
+    markdown = _convert_email(message).export_to_markdown()
+
+    assert markdown == "# Quarterly planning\n\n" + _INVITATION_MARKDOWN
+
+
+def test_email_adds_the_name_of_a_calendar_without_entries():
+    """The .ics backend shows the name and description of such a calendar."""
+    message = EmailMessage()
+    message["Subject"] = "Team calendar"
+    message.set_content(
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "X-WR-CALNAME:Team\r\n"
+        "X-WR-CALDESC:Shared team dates.\r\n"
+        "END:VCALENDAR\r\n",
+        subtype="calendar",
+    )
+
+    markdown = _convert_email(message).export_to_markdown()
+
+    assert markdown == (
+        "# Team calendar\n\n### Calendar\n\nCalendar name: Team\n\nShared team dates."
+    )
+
+
+def test_email_keeps_a_calendar_part_with_nothing_to_show_as_text():
+    """A part leaves the body text only when it is added as a calendar."""
+    message = EmailMessage()
+    message["Subject"] = "Time zone"
+    message.set_content(
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VTIMEZONE\r\n"
+        "TZID:Europe/Berlin\r\n"
+        "END:VTIMEZONE\r\n"
+        "END:VCALENDAR\r\n",
+        subtype="calendar",
+    )
+
+    markdown = _convert_email(message).export_to_markdown()
+
+    assert "TZID:Europe/Berlin" in markdown
+    assert "### Calendar" not in markdown
+
+
+def test_email_skips_a_calendar_part_that_cannot_be_decoded():
+    message = _invitation_email("Quarterly planning", "See the invitation.")
+    message.add_attachment(
+        _INVITATION_ICS.encode(),
+        maintype="text",
+        subtype="calendar",
+        params={"charset": "x-unknown"},
+        filename="invite.ics",
+    )
+
+    markdown = _convert_email(message).export_to_markdown()
+
+    assert markdown.endswith("See the invitation.")
+
+
+@pytest.mark.parametrize(
+    ("mime_charset", "meta", "text"),
+    [
+        (
+            "iso-8859-1",
+            '<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">',
+            "Café crème",
+        ),
+        ("utf-8", '<meta charset="iso-8859-1">', "日本語 café"),
+    ],
+    ids=["latin1", "utf8-with-latin1-meta"],
+)
+def test_email_backend_decodes_html_body_with_meta_charset_once(
+    mime_charset: str, meta: str, text: str
+):
+    # Mail clients keep the <meta> charset of the original HTML in the part
+    html = f"<html><head>{meta}</head><body><p>{text}</p></body></html>"
+    raw_email = (
+        b"From: Alice Example <alice@example.com>\r\n"
+        b"Subject: Menu\r\n"
+        b"MIME-Version: 1.0\r\n"
+        + f'Content-Type: text/html; charset="{mime_charset}"\r\n'.encode()
+        + b"Content-Transfer-Encoding: 8bit\r\n\r\n"
+        + html.encode(mime_charset)
+    )
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_email),
+        format=InputFormat.EMAIL,
+        filename="html.eml",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+    assert text in backend.convert().export_to_markdown()
+
+
+def test_email_backend_normalises_body_line_endings():
+    """A CRLF or lone-CR body leaves no carriage return inside a paragraph."""
+    for terminator in ("\r\n", "\r"):
+        body = (
+            f"First paragraph line one.{terminator}First paragraph line two."
+            f"{terminator}{terminator}Second paragraph.{terminator}"
+        )
+        raw_email = (
+            "From: alice@example.com\r\n"
+            "Subject: Line Endings\r\n"
+            "MIME-Version: 1.0\r\n"
+            'Content-Type: text/plain; charset="utf-8"\r\n'
+            "\r\n" + body
+        ).encode()
+        in_doc = InputDocument(
+            path_or_stream=BytesIO(raw_email),
+            format=InputFormat.EMAIL,
+            filename="line_endings.eml",
+            backend=EmailDocumentBackend,
+        )
+        backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=BytesIO(raw_email))
+
+        text_items = [
+            item for item in backend.convert().texts if isinstance(item, TextItem)
+        ]
+
+        assert [item.text for item in text_items] == [
+            "Line Endings",
+            "From: alice@example.com",
+            "First paragraph line one.\nFirst paragraph line two.",
+            "Second paragraph.",
+        ]
+
+
+def test_convert_msg_backend_from_path():
+    in_path = Path("tests/data/email/sources/msg_simple.msg")
+    in_doc = InputDocument(
+        path_or_stream=in_path,
+        format=InputFormat.EMAIL,
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=in_path)
+
+    assert backend.is_valid()
+    assert backend.is_msg
+
+    markdown = backend.convert().export_to_markdown()
+
+    assert "Simple Email" in markdown
+    assert "From: Alice Example &lt;alice@example.com&gt;" in markdown
+    assert "To: Bob Example &lt;bob@example.com&gt;" in markdown
+    assert "Hello Bob," in markdown
+    assert "This is a simple email body." in markdown
+
+
+def test_convert_msg_backend_from_stream():
+    raw_msg = Path("tests/data/email/sources/msg_simple.msg").read_bytes()
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(raw_msg),
+        format=InputFormat.EMAIL,
+        filename="msg_simple.msg",
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(
+        in_doc=in_doc,
+        path_or_stream=BytesIO(raw_msg),
+    )
+
+    assert backend.is_valid()
+    assert backend.is_msg
+    assert "Simple Email" in backend.convert().export_to_markdown()
+
+
+def test_msg_document_converter():
+    converter = DocumentConverter(allowed_formats=[InputFormat.EMAIL])
+    result = converter.convert(Path("tests/data/email/sources/msg_simple.msg"))
+
+    markdown = result.document.export_to_markdown()
+    assert "Simple Email" in markdown
+    assert "This is a simple email body." in markdown
+
+
+def test_msg_with_attachment_excludes_content_and_names_by_default():
+    in_path = Path("tests/data/email/sources/msg_with_attachment.msg")
+    in_doc = InputDocument(
+        path_or_stream=in_path,
+        format=InputFormat.EMAIL,
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(in_doc=in_doc, path_or_stream=in_path)
+
+    markdown = backend.convert().export_to_markdown()
+
+    assert "Email with Attachment" in markdown
+    assert "This email contains an attachment." in markdown
+
+    # Decoded attachment content is never embedded.
+    assert "This is a test attachment file." not in markdown
+    # Attachment names are only listed when the option is enabled.
+    assert "test.txt" not in markdown
+    assert "report.pdf" not in markdown
+    assert "Attachments" not in markdown
+
+
+def test_email_backend_lists_attachments_when_enabled():
+    in_path = Path("tests/data/email/sources/eml_with_attachment.eml")
+    in_doc = InputDocument(
+        path_or_stream=in_path,
+        format=InputFormat.EMAIL,
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(
+        in_doc=in_doc,
+        path_or_stream=in_path,
+        options=EmailBackendOptions(list_attachments=True),
+    )
+
+    markdown = backend.convert().export_to_markdown()
+
+    assert "Attachments" in markdown
+    assert "test.txt" in markdown
+    # Listing names must not pull in the encoded or decoded payload.
+    assert "This is a test attachment file." not in markdown
+    assert (
+        "VGhpcyBpcyBhIHRlc3QgYXR0YWNobWVudCBmaWxlLgpJdCBjb250YWlucyBzb21lIGR1bW15IGNv"
+        not in markdown
+    )
+
+
+def test_msg_backend_lists_attachments_when_enabled():
+    in_path = Path("tests/data/email/sources/msg_with_attachment.msg")
+    in_doc = InputDocument(
+        path_or_stream=in_path,
+        format=InputFormat.EMAIL,
+        backend=EmailDocumentBackend,
+    )
+    backend = EmailDocumentBackend(
+        in_doc=in_doc,
+        path_or_stream=in_path,
+        options=EmailBackendOptions(list_attachments=True),
+    )
+
+    markdown = backend.convert().export_to_markdown()
+
+    assert "Attachments" in markdown
+    assert "test.txt (text/plain)" in markdown
+    assert "report.pdf (application/pdf)" in markdown
+    assert "This is a test attachment file." not in markdown
+
+
+def test_msg_document_converter_lists_attachments_via_format_option():
+    converter = DocumentConverter(
+        allowed_formats=[InputFormat.EMAIL],
+        format_options={
+            InputFormat.EMAIL: EmailFormatOption(
+                backend_options=EmailBackendOptions(list_attachments=True)
+            )
+        },
+    )
+    result = converter.convert(Path("tests/data/email/sources/msg_with_attachment.msg"))
+
+    markdown = result.document.export_to_markdown()
+    assert "Attachments" in markdown
+    assert "test.txt" in markdown
+    assert "report.pdf" in markdown
+
+
+def test_email_falls_back_to_html_when_the_plain_part_is_blank():
+    """A part being present is not the same as a part holding text.
+
+    A multipart/alternative message can carry a whitespace-only text/plain
+    part beside a real text/html one, which many senders generate
+    automatically. Returning the empty result from the plain branch drops the
+    whole body.
+    """
+    from docling.datamodel.document import DocumentStream
+
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"To: Bob <bob@example.com>\r\n"
+        b"Subject: Blank Plain Part\r\n"
+        b'Content-Type: multipart/alternative; boundary="B"\r\n'
+        b"\r\n"
+        b"--B\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        # a single space: present, truthy, and holding no paragraph
+        b" \r\n"
+        b"--B\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"\r\n"
+        b"<html><body><p>Real content that should appear.</p></body></html>\r\n"
+        b"--B--\r\n"
+    )
+
+    converter = DocumentConverter(allowed_formats=[InputFormat.EMAIL])
+    doc = converter.convert(
+        DocumentStream(name="blank_plain.eml", stream=BytesIO(raw)),
+        raises_on_error=True,
+    ).document
+
+    assert "Real content that should appear." in doc.export_to_markdown()
+
+
+def test_msg_to_rfc822_keeps_attachment_metadata_without_payload():
+    from oxmsg import Message as OxMsgMessage
+
+    data = Path("tests/data/email/sources/msg_with_attachment.msg").read_bytes()
+    payloads = [a.file_bytes for a in OxMsgMessage.load(data).attachments]
+    assert len(payloads) == 2
+
+    rfc822 = EmailDocumentBackend._msg_to_rfc822_bytes(data)
+    lowered = rfc822.lower()
+
+    for name, mime in (
+        (b"test.txt", b"text/plain"),
+        (b"report.pdf", b"application/pdf"),
+    ):
+        assert name in rfc822
+        assert mime in lowered
+
+    meaningful = [p for p in payloads if p and len(p) >= 16]
+    assert meaningful, (
+        "fixture must contain at least one non-trivial attachment payload"
+    )
+    flat = rfc822.replace(b"\r\n", b"").replace(b"\n", b"")
+    for payload in meaningful:
+        assert payload not in rfc822
+        assert b64encode(payload) not in flat

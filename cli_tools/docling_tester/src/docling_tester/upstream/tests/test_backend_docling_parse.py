@@ -1,0 +1,1067 @@
+# SPDX-FileCopyrightText: The Docling Contributors
+# SPDX-License-Identifier: MIT
+
+import sys
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+import pypdfium2 as pdfium
+import pytest
+from docling_core.types.doc import CoordOrigin
+from docling_core.types.doc.page import PdfCellRenderingMode
+from docling_parse.pdf_parser import ContentLevel, ThreadedPdfParserConfig
+from PIL import Image, ImageDraw, ImageStat
+
+import docling.backend.docling_parse_backend as docling_parse_backend_module
+from docling.backend.docling_parse_backend import (
+    DoclingParseDocumentBackend,
+    ThreadedDoclingParseDocumentBackend,
+    ThreadedDoclingParsePageBackend,
+)
+from docling.backend.pdf_backend import PdfDocumentBackend, iter_pdf_page_backends
+from docling.datamodel.backend_options import ThreadedDoclingParseBackendOptions
+from docling.datamodel.base_models import BoundingBox, InputFormat
+from docling.datamodel.document import InputDocument
+from docling.datamodel.pipeline_options import PdfBackend, normalize_pdf_backend
+from docling.datamodel.settings import (
+    DEFAULT_PAGE_RANGE,
+    DocumentLimits,
+    PageRange,
+)
+
+
+@pytest.fixture
+def test_doc_path():
+    return Path("./tests/data/pdf/sources/2206.01062.pdf")
+
+
+@pytest.fixture
+def ruled_table_path():
+    return Path("./tests/data/pdf/sources/2305.03393v1-pg9.pdf")
+
+
+def _get_backend(
+    pdf_doc,
+    page_range: PageRange = DEFAULT_PAGE_RANGE,
+    backend_options: ThreadedDoclingParseBackendOptions | None = None,
+):
+    """Open a document with the threaded backend, optionally narrowed to a page range.
+
+    The threaded parser yields results in completion order, not page order, so
+    ``next(iter_pages())`` is whichever page finished first. Tests that assert on the
+    content of a specific page must narrow the range to that page.
+    """
+    in_doc = InputDocument(
+        path_or_stream=pdf_doc,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        backend_options=backend_options,
+        limits=DocumentLimits(page_range=page_range),
+    )
+
+    doc_backend = in_doc._backend
+    return doc_backend
+
+
+def test_text_cell_counts():
+    pdf_doc = Path("./tests/data/pdf/sources/redp5110_sampled.pdf")
+
+    doc_backend = _get_backend(pdf_doc)
+
+    page_backend = next(doc_backend.iter_pages())
+    cells = list(page_backend.get_text_cells())
+
+    assert cells
+
+    # Explicitly clean up document backend to prevent race conditions in CI
+    doc_backend.unload()
+
+
+def test_get_text_from_rect(test_doc_path):
+    doc_backend = _get_backend(test_doc_path, page_range=(1, 1))
+    page_backend = next(doc_backend.iter_pages())
+    assert page_backend.page_no == 1
+
+    # Get the title text of the DocLayNet paper
+    textpiece = page_backend.get_text_in_rect(
+        bbox=BoundingBox(l=102, t=77, r=511, b=124)
+    )
+    ref = "DocLayNet: A Large Human-Annotated Dataset for Document-Layout Analysis"
+
+    assert textpiece.strip() == ref
+
+    # Explicitly clean up resources
+    page_backend.unload()
+    doc_backend.unload()
+
+
+def test_crop_page_image(test_doc_path):
+    doc_backend = _get_backend(test_doc_path, page_range=(1, 1))
+    page_backend = next(doc_backend.iter_pages())
+    assert page_backend.page_no == 1
+
+    # Crop out "Figure 1" from the DocLayNet paper
+    page_backend.get_page_image(
+        scale=2, cropbox=BoundingBox(l=317, t=246, r=574, b=527)
+    )
+    # im.show()
+
+    # Explicitly clean up resources
+    page_backend.unload()
+    doc_backend.unload()
+
+
+def test_num_pages(test_doc_path):
+    doc_backend = _get_backend(test_doc_path)
+    assert doc_backend.page_count() == 9
+
+    # Explicitly clean up resources to prevent race conditions in CI
+    doc_backend.unload()
+
+
+def test_iter_pages_yields_each_requested_page_once(test_doc_path):
+    """The threaded backend yields every requested page exactly once.
+
+    Order is deliberately not asserted: the threaded parser yields each page as its
+    worker finishes, which is the point of parsing in threads. Production does not
+    depend on the order either -- ``iter_pdf_page_backends`` matches results against a
+    set of page numbers. Narrow the range instead when a test needs a specific page.
+    """
+    doc_backend = _get_backend(test_doc_path, page_range=(1, 3))
+
+    page_numbers = []
+    page_backends = []
+    try:
+        for page_backend in doc_backend.iter_pages():
+            page_numbers.append(page_backend.page_no)
+            page_backends.append(page_backend)
+    finally:
+        for page_backend in page_backends:
+            page_backend.unload()
+        doc_backend.unload()
+
+    assert sorted(page_numbers) == [1, 2, 3]
+
+
+class _FakeThreadedResult:
+    def __init__(
+        self,
+        *,
+        page_number: int,
+        success: bool = True,
+        page_width: float = 100.0,
+        page_height: float = 200.0,
+    ) -> None:
+        self.page_number = page_number
+        self.success = success
+        self.page_width = page_width
+        self.page_height = page_height
+        self.cropboxes: list[BoundingBox | None] = []
+        self.scales: list[float] = []
+
+    def get_page(self) -> Any:
+        raise AssertionError("get_page() is not expected in this test")
+
+    def get_image(
+        self,
+        *,
+        scale: float | None = None,
+        canvas_size=None,
+        cropbox: BoundingBox | None = None,
+    ):
+        from PIL import Image
+
+        assert canvas_size is None
+        self.scales.append(1.0 if scale is None else scale)
+        self.cropboxes.append(cropbox)
+        width = round(self.page_width if cropbox is None else cropbox.width)
+        height = round(self.page_height if cropbox is None else cropbox.height)
+        scaled_width = max(1, round(width * (1.0 if scale is None else scale)))
+        scaled_height = max(1, round(height * (1.0 if scale is None else scale)))
+        return Image.new("RGBA", (scaled_width, scaled_height), (255, 255, 255, 255))
+
+
+class _FakeThreadedParser:
+    created: "_FakeThreadedParser | None" = None
+
+    def __init__(self, parser_config=None, decode_config=None) -> None:
+        self.parser_config = parser_config
+        self.decode_config = decode_config
+        self.load_calls: list[tuple[int, int] | None] = []
+        self.unload_calls: list[str] = []
+        _FakeThreadedParser.created = self
+
+    def load(
+        self,
+        path_or_stream,
+        password=None,
+        page_numbers=None,
+        *,
+        page_range=None,
+    ) -> str:
+        assert page_numbers is None
+        self.load_calls.append(page_range)
+        return "doc-key"
+
+    def page_count(self, doc_key: str) -> int:
+        assert doc_key == "doc-key"
+        return 5
+
+    def iterate_results(self):
+        yield _FakeThreadedResult(page_number=3)
+        yield _FakeThreadedResult(page_number=2)
+
+    def get_annotations(self, doc_key: str):
+        assert doc_key == "doc-key"
+        return None
+
+    def has_tasks(self) -> bool:
+        return False
+
+    def get_task(self):
+        raise AssertionError("get_task must not be called once has_tasks() is False")
+
+    def unload(self, doc_key: str) -> bool:
+        self.unload_calls.append(doc_key)
+        return True
+
+
+def test_deprecated_document_backend_delegates_to_threaded_parser(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    with pytest.warns(DeprecationWarning, match="ThreadedDoclingParseDocumentBackend"):
+        in_doc = InputDocument(
+            path_or_stream=test_doc_path,
+            format=InputFormat.PDF,
+            backend=DoclingParseDocumentBackend,
+        )
+
+    assert isinstance(in_doc._backend, ThreadedDoclingParseDocumentBackend)
+    assert _FakeThreadedParser.created is not None
+    in_doc._backend.unload()
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        PdfBackend.DLPARSE_V1,
+        PdfBackend.DLPARSE_V2,
+        PdfBackend.DLPARSE_V4,
+    ],
+)
+def test_deprecated_pdf_backend_values_map_to_threaded(backend: PdfBackend) -> None:
+    with pytest.warns(DeprecationWarning, match="THREADED_DOCLING_PARSE"):
+        normalized = normalize_pdf_backend(backend)
+
+    assert normalized is PdfBackend.THREADED_DOCLING_PARSE
+
+
+def test_threaded_backend_iterates_requested_pages_and_unloads(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        limits=DocumentLimits(page_range=(2, 3)),
+    )
+
+    doc_backend = in_doc._backend
+    assert isinstance(doc_backend, ThreadedDoclingParseDocumentBackend)
+    assert doc_backend.page_count() == 5
+
+    page_numbers = [page_backend.page_no for page_backend in doc_backend.iter_pages()]
+    assert page_numbers == [3, 2]
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.load_calls == [(2, 3)]
+
+    doc_backend.unload()
+    assert parser.unload_calls == ["doc-key"]
+
+
+def test_threaded_backend_open_ended_page_range_is_clipped_to_document(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        limits=DocumentLimits(page_range=(2, sys.maxsize)),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.load_calls == [(2, sys.maxsize)]
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_rewinds_stream_before_deriving_document_key(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Resolving a page range must leave a stream input rewound.
+
+    The threaded parser derives its document key by hashing from the current stream
+    offset, so a page-count probe that consumes the stream would key the document on a
+    partial read. A stream left at EOF hashes identically for every document.
+    """
+    stream_positions: list[int] = []
+
+    class _StreamPositionRecordingParser(_FakeThreadedParser):
+        def load(
+            self,
+            path_or_stream,
+            password=None,
+            page_numbers=None,
+            *,
+            page_range=None,
+        ) -> str:
+            stream_positions.append(path_or_stream.tell())
+            return super().load(
+                path_or_stream,
+                password=password,
+                page_numbers=page_numbers,
+                page_range=page_range,
+            )
+
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _StreamPositionRecordingParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=BytesIO(test_doc_path.read_bytes()),
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        filename=test_doc_path.name,
+        limits=DocumentLimits(page_range=(2, 3)),
+    )
+
+    assert stream_positions == [0]
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_bounded_page_range_is_clipped_to_document(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        limits=DocumentLimits(page_range=(2, 99)),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.load_calls == [(2, 99)]
+
+    in_doc._backend.unload()
+
+
+def test_standard_pipeline_threaded_backend_loads_only_requested_page_range(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        limits=DocumentLimits(page_range=(2, 2)),
+    )
+    doc_backend = in_doc._backend
+    assert isinstance(doc_backend, PdfDocumentBackend)
+
+    try:
+        page_backends = list(iter_pdf_page_backends(doc_backend, page_nos=[2]))
+
+        parser = _FakeThreadedParser.created
+        assert parser is not None
+        assert parser.load_calls == [(2, 2)]
+        assert [page_backend.page_no for page_backend in page_backends] == [2]
+        assert doc_backend.supports_random_page_access is False
+    finally:
+        doc_backend.unload()
+
+
+def test_threaded_backend_forwards_default_page_range(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        # no limits → default page_range (1, sys.maxsize)
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.load_calls == [(1, sys.maxsize)]
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_uses_backend_option_thread_count(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    class _FakeAcceleratorOptions:
+        def __init__(self) -> None:
+            self.num_threads = 7
+
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.AcceleratorOptions",
+        _FakeAcceleratorOptions,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        backend_options=ThreadedDoclingParseBackendOptions(parser_threads=11),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.parser_config is not None
+    assert parser.parser_config.threads == 11
+    assert parser.parser_config.page_content_config is not None
+    assert (
+        parser.parser_config.page_content_config.char_cells_content_level
+        == ContentLevel.COMPUTE
+    )
+    assert (
+        parser.parser_config.page_content_config.word_cells_content_level
+        == ContentLevel.COMPUTE_AND_MATERIALIZE
+    )
+    assert (
+        parser.parser_config.page_content_config.line_cells_content_level
+        == ContentLevel.COMPUTE_AND_MATERIALIZE
+    )
+    assert (
+        parser.parser_config.page_content_config.shapes_content_level
+        == ContentLevel.COMPUTE
+    )
+    assert (
+        parser.parser_config.page_content_config.bitmaps_content_level
+        == ContentLevel.COMPUTE_AND_MATERIALIZE
+    )
+    assert parser.parser_config.page_content_config.include_bitmap_bytes is False
+    assert parser.decode_config is not None
+    assert parser.decode_config.enforce_same_font is True
+    assert parser.decode_config.release_native_memory_every_n_pages == 128
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_uses_backend_option_native_memory_release_interval(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        backend_options=ThreadedDoclingParseBackendOptions(
+            release_native_memory_every_n_pages=64
+        ),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.parser_config is not None
+    assert parser.parser_config.page_content_config is not None
+    assert parser.parser_config.page_content_config.include_bitmap_bytes is False
+    assert parser.decode_config is not None
+    assert parser.decode_config.release_native_memory_every_n_pages == 64
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_allows_disabling_native_memory_release(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        backend_options=ThreadedDoclingParseBackendOptions(
+            release_native_memory_every_n_pages=0
+        ),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.parser_config is not None
+    assert parser.parser_config.page_content_config is not None
+    assert parser.parser_config.page_content_config.include_bitmap_bytes is False
+    assert parser.decode_config is not None
+    assert parser.decode_config.release_native_memory_every_n_pages == 0
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_keeps_parser_default_read_ahead_when_unset(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        backend_options=ThreadedDoclingParseBackendOptions(),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.parser_config is not None
+    assert (
+        parser.parser_config.max_concurrent_results
+        == ThreadedPdfParserConfig().max_concurrent_results
+    )
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_uses_backend_option_max_concurrent_results(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+        backend_options=ThreadedDoclingParseBackendOptions(max_concurrent_results=1),
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.parser_config is not None
+    assert parser.parser_config.max_concurrent_results == 1
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_rejects_non_positive_max_concurrent_results():
+    with pytest.raises(ValueError):
+        ThreadedDoclingParseBackendOptions(max_concurrent_results=0)
+
+
+def test_threaded_backend_uses_accelerator_thread_count_when_unset(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+):
+    class _FakeAcceleratorOptions:
+        def __init__(self) -> None:
+            self.num_threads = 7
+
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.AcceleratorOptions",
+        _FakeAcceleratorOptions,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+
+    parser = _FakeThreadedParser.created
+    assert parser is not None
+    assert parser.parser_config is not None
+    assert parser.parser_config.threads == 7
+    assert parser.parser_config.page_content_config is not None
+    assert parser.parser_config.page_content_config.include_bitmap_bytes is False
+    assert parser.decode_config is not None
+
+    in_doc._backend.unload()
+
+
+def test_threaded_backend_creates_fresh_default_options_per_instance(
+    test_doc_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "docling.backend.docling_parse_backend.DoclingThreadedPdfParser",
+        _FakeThreadedParser,
+    )
+
+    first_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    second_doc = InputDocument(
+        path_or_stream=test_doc_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+
+    try:
+        assert first_doc._backend.options is not second_doc._backend.options
+    finally:
+        first_doc._backend.unload()
+        second_doc._backend.unload()
+
+
+def test_threaded_page_backend_delegates_image_access() -> None:
+    result = _FakeThreadedResult(page_number=4, page_width=120.0, page_height=90.0)
+    page_backend = ThreadedDoclingParsePageBackend(result)
+    cropbox = BoundingBox(l=10, t=5, r=40, b=25)
+
+    image = page_backend.get_page_image(scale=2.0, cropbox=cropbox)
+
+    assert page_backend.page_no == 4
+    assert page_backend.get_size().width == 120.0
+    assert page_backend.get_size().height == 90.0
+    assert page_backend.is_valid() is True
+    assert image.size == (60, 40)
+    assert result.scales == [2.0]
+    assert result.cropboxes == [cropbox]
+
+
+def test_threaded_page_backend_disables_bitmap_materialization() -> None:
+    class _FakeCell:
+        text = orig = "text"
+
+        def to_top_left_origin(self, _page_height: float) -> "_FakeCell":
+            return self
+
+    class _FakeDimension:
+        height = 200.0
+
+    class _FakeSegmentedPage:
+        dimension = _FakeDimension()
+        textline_cells = [_FakeCell()]
+        char_cells = [_FakeCell()]
+        word_cells = [_FakeCell()]
+        widgets: list = []
+        bitmap_resources: list[Any] = []
+
+    result = _FakeThreadedResult(page_number=4)
+    result.get_page = lambda: _FakeSegmentedPage()
+
+    page_backend = ThreadedDoclingParsePageBackend(result)
+
+    cells = list(page_backend.get_text_cells())
+
+    assert len(cells) == 1
+
+
+def test_threaded_page_backend_replaces_nul_with_replacement_char() -> None:
+    """An unmapped glyph (U+0000) becomes U+FFFD, so the loss stays visible."""
+
+    class _FakeCell:
+        def __init__(self) -> None:
+            self.text = self.orig = "mg.mL \x00 1"
+
+        def to_top_left_origin(self, _page_height: float) -> "_FakeCell":
+            return self
+
+    class _FakeDimension:
+        height = 200.0
+
+    class _FakeSegmentedPage:
+        dimension = _FakeDimension()
+        textline_cells = [_FakeCell()]
+        char_cells = [_FakeCell()]
+        word_cells = [_FakeCell()]
+
+    result = _FakeThreadedResult(page_number=1)
+    result.get_page = lambda: _FakeSegmentedPage()
+
+    seg_page = ThreadedDoclingParsePageBackend(result).get_segmented_page()
+
+    assert seg_page is not None
+    for cell in (*seg_page.textline_cells, *seg_page.char_cells, *seg_page.word_cells):
+        assert cell.text == cell.orig == "mg.mL \ufffd 1"
+
+
+def _create_black_square_pdf(path: Path) -> None:
+    image = Image.new("RGB", (100, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 40, 49, 69), fill="black")
+    image.save(path, "PDF", resolution=72.0)
+
+
+@pytest.mark.parametrize("scale", [1, 2], ids=["scale_1", "scale_2"])
+def test_get_page_image_crop_contains_black_square(tmp_path: Path, scale: int) -> None:
+    pdf_path = tmp_path / "black_square.pdf"
+    _create_black_square_pdf(pdf_path)
+
+    cropbox = BoundingBox(
+        l=21,
+        t=41,
+        r=49,
+        b=69,
+        coord_origin=CoordOrigin.TOPLEFT,
+    )
+    full_square_cropbox = BoundingBox(
+        l=20,
+        t=40,
+        r=50,
+        b=70,
+        coord_origin=CoordOrigin.TOPLEFT,
+    )
+    white_cropbox = BoundingBox(
+        l=0,
+        t=0,
+        r=10,
+        b=10,
+        coord_origin=CoordOrigin.TOPLEFT,
+    )
+
+    in_doc = InputDocument(
+        path_or_stream=pdf_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    doc_backend = in_doc._backend
+    page_backend = next(doc_backend.iter_pages())
+
+    try:
+        black_crop = page_backend.get_page_image(scale=scale, cropbox=cropbox).convert(
+            "RGB"
+        )
+        white_crop = page_backend.get_page_image(
+            scale=scale, cropbox=white_cropbox
+        ).convert("RGB")
+    finally:
+        page_backend.unload()
+        doc_backend.unload()
+
+    assert black_crop.size == (28 * scale, 28 * scale)
+    assert white_crop.size == (10 * scale, 10 * scale)
+    assert full_square_cropbox.width == 30
+    assert full_square_cropbox.height == 30
+
+    black_extrema = black_crop.getextrema()
+    assert black_extrema is not None
+    assert all(channel_max <= 8 for _, channel_max in black_extrema)
+
+    black_mean = ImageStat.Stat(black_crop).mean
+    white_mean = ImageStat.Stat(white_crop).mean
+    assert all(channel_mean < 5.0 for channel_mean in black_mean)
+    assert all(channel_mean > 250.0 for channel_mean in white_mean)
+
+
+def test_threaded_backend_reports_shape_geometry_in_top_left_origin(ruled_table_path):
+    """The ruled table on this page must surface as axis-aligned stroked segments."""
+    in_doc = InputDocument(
+        path_or_stream=ruled_table_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    doc_backend = in_doc._backend
+    assert isinstance(doc_backend, ThreadedDoclingParseDocumentBackend)
+
+    try:
+        page_backend = next(iter(doc_backend.iter_pages()))
+        page_size = page_backend.get_size()
+
+        lines = page_backend.get_shape_lines()
+        assert lines, "the ruled table must produce stroked segments"
+        for line in lines:
+            assert line.coord_origin == CoordOrigin.TOPLEFT
+            assert 0 <= line.l <= line.r <= page_size.width
+            assert 0 <= line.t <= line.b <= page_size.height
+            # Axis-aligned segments come back as degenerate boxes.
+            assert line.l == pytest.approx(line.r) or line.t == pytest.approx(line.b)
+
+        regions = page_backend.get_connected_shape_bounding_boxes()
+        assert len(regions) == 1
+        table_region = regions[0]
+        assert table_region.coord_origin == CoordOrigin.TOPLEFT
+        for line in lines:
+            assert table_region.l <= line.l and line.r <= table_region.r
+            assert table_region.t <= line.t and line.b <= table_region.b
+    finally:
+        doc_backend.unload()
+
+
+def _pdf_with_filled_rectangles() -> bytes:
+    """One 200 x 200 pt page filling a 0.5 pt tall rule and a 20 pt tall bar."""
+    content = b"0 0 0 rg 20 150 160 0.5 re f 20 50 160 20 re f"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+    ]
+    pdf = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(pdf)
+    pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    pdf += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+    return pdf
+
+
+def test_threaded_backend_reports_thin_filled_shapes(tmp_path):
+    """A rule drawn as a thin filled rectangle surfaces; a thicker fill does not.
+
+    Stroked segments alone miss such rules, which many forms use for borders.
+    """
+    path = tmp_path / "filled_rules.pdf"
+    path.write_bytes(_pdf_with_filled_rectangles())
+    in_doc = InputDocument(
+        path_or_stream=path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    doc_backend = in_doc._backend
+    assert isinstance(doc_backend, ThreadedDoclingParseDocumentBackend)
+
+    try:
+        page_backend = next(iter(doc_backend.iter_pages()))
+        assert page_backend.get_shape_lines() == []
+
+        (rule,) = page_backend.get_thin_shape_boxes(max_thickness=3.5)
+        assert rule.coord_origin == CoordOrigin.TOPLEFT
+        assert (rule.l, rule.t, rule.r, rule.b) == pytest.approx((20, 49.5, 180, 50))
+    finally:
+        doc_backend.unload()
+
+
+def test_threaded_backend_intersects_only_where_content_is(ruled_table_path):
+    """`has_content_in` must discriminate between the ruled table and a blank margin."""
+    in_doc = InputDocument(
+        path_or_stream=ruled_table_path,
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    doc_backend = in_doc._backend
+
+    try:
+        page_backend = next(iter(doc_backend.iter_pages()))
+
+        blank_margin = BoundingBox(
+            l=0, t=0, r=20, b=20, coord_origin=CoordOrigin.TOPLEFT
+        )
+        table = BoundingBox(
+            l=150, t=350, r=460, b=460, coord_origin=CoordOrigin.TOPLEFT
+        )
+
+        assert page_backend.has_content_in(bbox=table) is True
+        assert page_backend.has_content_in(bbox=blank_margin) is False
+        assert (
+            page_backend.has_content_in(
+                bbox=blank_margin, chars=True, shapes=False, bitmaps=False
+            )
+            is False
+        )
+    finally:
+        doc_backend.unload()
+
+
+def test_invisible_text_cells_report_rendering_mode():
+    """docling-parse must surface `rendering_mode` so invisible text can be told apart."""
+    doc_backend = _get_backend(Path("./tests/data/pdf/invisible_text_layer.pdf"))
+
+    try:
+        page_backend = next(doc_backend.iter_pages())
+        cells = {cell.text: cell for cell in page_backend.get_text_cells()}
+
+        assert set(cells) == {"Visible heading line", "Invisible OCR text layer"}
+
+        visible = cells["Visible heading line"]
+        invisible = cells["Invisible OCR text layer"]
+
+        # No `Tr` operator precedes the first line, so it keeps the UNKNOWN default, which
+        # means the PDF default mode 0 (fill).
+        assert visible.rendering_mode is PdfCellRenderingMode.UNKNOWN
+        assert invisible.rendering_mode is PdfCellRenderingMode.INVISIBLE
+
+        visible_texts = {
+            cell.text for cell in page_backend.get_visible_text_cells() or []
+        }
+        assert visible_texts == {"Visible heading line"}
+    finally:
+        doc_backend.unload()
+
+
+def test_threaded_backend_filters_invisible_text_cells():
+    """The threaded backend must answer `get_visible_text_cells()` like the paged one."""
+    in_doc = InputDocument(
+        path_or_stream=Path("./tests/data/pdf/invisible_text_layer.pdf"),
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    doc_backend = in_doc._backend
+
+    try:
+        page_backend = next(iter(doc_backend.iter_pages()))
+
+        assert {cell.text for cell in page_backend.get_text_cells()} == {
+            "Visible heading line",
+            "Invisible OCR text layer",
+        }
+        assert {cell.text for cell in page_backend.get_visible_text_cells() or []} == {
+            "Visible heading line"
+        }
+    finally:
+        doc_backend.unload()
+
+
+def _widget_offsets_from_text(backend_cls: Any, pdf_path: Path) -> list[tuple]:
+    """Each widget's top-left corner relative to the page's first word."""
+    in_doc = InputDocument(
+        path_or_stream=pdf_path, format=InputFormat.PDF, backend=backend_cls
+    )
+    doc_backend = in_doc._backend
+    page_backend = next(doc_backend.iter_pages())
+    try:
+        page = page_backend.get_segmented_page()
+        word = next(c for c in page.word_cells if c.text.strip()).rect.to_bounding_box()
+        widgets = [
+            w.rect.to_bounding_box().to_top_left_origin(page.dimension.height)
+            for w in page.widgets
+        ]
+    finally:
+        page_backend.unload()
+        doc_backend.unload()
+    return [(round(b.l - word.l, 2), round(b.t - word.t, 2)) for b in widgets]
+
+
+def test_widgets_move_with_the_text_when_the_crop_box_is_offset(
+    tmp_path: Path,
+) -> None:
+    backend_cls = ThreadedDoclingParseDocumentBackend
+    # Text cells are relative to the visible page (crop box); widget rectangles
+    # must be too, or they sit off their field keys when the crop box does not
+    # start at the PDF origin.
+    source = Path("tests/data/pdf/sources/acroform_sample.pdf")
+    shifted = tmp_path / "shifted_crop.pdf"
+    pdf = pdfium.PdfDocument(source)
+    left, bottom, right, top = pdf[0].get_mediabox()
+    pdf[0].set_cropbox(left + 20, bottom + 30, right, top)
+    pdf.save(shifted)
+    pdf.close()
+
+    expected = _widget_offsets_from_text(backend_cls, source)
+    assert len(expected) == 4
+    assert _widget_offsets_from_text(backend_cls, shifted) == expected
+
+
+def test_docling_parse_exposes_complete_widget_contract_in_native_order() -> None:
+    input_doc = InputDocument(
+        path_or_stream=Path("tests/data/pdf/sources/acroform_sample.pdf"),
+        format=InputFormat.PDF,
+        backend=ThreadedDoclingParseDocumentBackend,
+    )
+    backend = input_doc._backend
+    page = next(backend.iter_pages())
+    try:
+        segmented_page = page.get_segmented_page()
+        assert segmented_page is not None
+        assert [widget.widget_field_name for widget in segmented_page.widgets] == [
+            "applicant_name",
+            "agree_terms",
+            "newsletter",
+            "mail_optin",
+        ]
+        assert [widget.index for widget in segmented_page.widgets] == [0, 1, 2, 3]
+        assert segmented_page.widgets[0].widget_text == "Ada Lovelace"
+        assert segmented_page.widgets[0].widget_description == "Full legal name"
+        assert segmented_page.widgets[0].widget_field_type == "/Tx"
+        assert segmented_page.widgets[0].widget_field_flags == 2
+        assert segmented_page.widgets[1].widget_appearance_state == "/Yes"
+        assert segmented_page.widgets[2].widget_appearance_state == "/Off"
+        assert segmented_page.widgets[3].widget_text in {None, ""}
+        assert segmented_page.widgets[3].widget_appearance_state == "/On"
+    finally:
+        page.unload()
+        backend.unload()
+
+
+def test_extract_single_embedded_image():
+    doc_backend: ThreadedDoclingParseDocumentBackend = _get_backend(
+        Path("tests/data/pdf/sources/picture_classification.pdf"),
+        page_range=(1, 1),
+        backend_options=ThreadedDoclingParseBackendOptions(include_bitmap_images=True),
+    )
+    try:
+        page_backend = next(doc_backend.iter_pages())
+        bitmap_bbox = next(iter(page_backend.get_bitmap_rects()))
+
+        image = page_backend.get_embedded_image(bitmap_bbox)
+
+        assert image is not None
+        assert image.size == (768, 474)
+    finally:
+        doc_backend.unload()
+
+
+def test_reject_embedded_image_with_overlapping_page_content():
+    doc_backend: ThreadedDoclingParseDocumentBackend = _get_backend(
+        Path("tests/data/pdf/sources/amt_handbook_sample.pdf"),
+        page_range=(1, 1),
+        backend_options=ThreadedDoclingParseBackendOptions(include_bitmap_images=True),
+    )
+    try:
+        page_backend = next(doc_backend.iter_pages())
+        bitmap_bbox = next(iter(page_backend.get_bitmap_rects()))
+
+        assert page_backend.get_embedded_image(bitmap_bbox) is None
+    finally:
+        doc_backend.unload()

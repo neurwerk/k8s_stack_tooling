@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+dist/
+results/
+*.pyc
+settings.local.jsonc
+.settings-*.tmp
