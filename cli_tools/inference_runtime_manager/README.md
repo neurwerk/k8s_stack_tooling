@@ -34,17 +34,9 @@ docker --context ai-server info
 
 ## Workflow
 
-**Configuration → NER precision / Docling GPU memory** sets English and German
-NER precision independently (`float32` or `float16`) and Docling's GPU memory
-fraction. Values are saved in the workstation configuration and override matching
-environment settings. Saving does not restart a service unless you accept the
-apply prompt; otherwise use **Review / apply assignments** later. Failed immediate
-application restores the previous saved settings and recreates the previous recipe.
-FP16 needs recognition checks on the target GPU; the memory fraction is not a hard
-VRAM limit. Neither service settings nor activation automatically evict a reader.
-The menu recommends FP16 after target-GPU checks and a `0.18` Docling starting
-fraction. FP32 and `0.25` remain the unset defaults until live service checks justify
-changing them; lower memory targets must still support the configured context.
+**Configuration → NER precision / Docling GPU memory** sets English and German NER precision independently (`float32` or `float16`) and the `vlm-documents` Granite GPU memory fraction. This memory setting applies only to the independent Granite runtime. Values are saved in the workstation configuration and override matching environment settings. Saving does not restart a service unless you accept the apply prompt; otherwise use **Review / apply assignments** later. Failed immediate application restores the previous saved settings and recreates the previous recipe.
+
+FP16 needs recognition checks on the target GPU; the memory fraction is not a hard VRAM limit. Neither service settings nor activation automatically evict a reader. The menu recommends FP16 after target-GPU checks and a `0.18` Granite starting fraction. FP32 and `0.25` remain the unset defaults until live service checks justify changing them; lower memory targets must still support the configured context.
 
 1. Choose a stable service alias, shown with a short purpose description, and review its
    saved model, runtime, local artifacts and live target state.
@@ -135,6 +127,7 @@ the endpoint test checks that the service actually responds.
 
 | Alias | Runtime | Host port | Default |
 | --- | --- | ---: | --- |
+| `docling-standard` | Official Docling Serve GPU | 8011 | disabled |
 | `vlm-documents` | vLLM | 8000 | enabled |
 | `llm-general` | llama.cpp | 8001 | disabled |
 | `vlm-general` | llama.cpp | 8002 | disabled |
@@ -157,7 +150,13 @@ changing an assignment does not require a client configuration change.
 For `vlm-images`, applying one recipe stops the other image-reader containers but
 keeps their verified model files and runtime images available for later switching.
 
-Each stable service alias has an independent optional key setting in `.env`.
+`docling-standard` runs the native Docling Serve API from the pinned official GPU image, using cached Heron layout, accurate TableFormer and Torch RapidOCR models on CUDA. It requires the existing Docling key in nonempty `DOCLING_SERVE_API_KEY`; callers authenticate with `X-Api-Key`. `DOCLING_STANDARD_PORT` defaults to `8011`.
+
+The page limit defaults to 250 and is configurable through `DOCLING_SERVE_MAX_NUM_PAGES` or the profile's `docling_max_pages` setting. Native Serve enforces 20 MiB per file and 3 sources per request, with a 360-second sync wait and 300-second document timeout. The gateway retains the 40 MiB aggregate limit; direct native Serve requests have no aggregate-size limit.
+
+`vlm-documents` remains an independent, optional Granite model runtime. Its GPU-memory and concurrency settings apply only to Granite. Remove a non-null `docling_standard_concurrency` from older profile `config.json` files before using the manager; standard Serve uses one document worker.
+
+Other stable service aliases have independent optional key settings in `.env`.
 An empty setting disables authentication for that service, and operators may use
 the same value in several settings until separate rotation is needed. vLLM,
 llama.cpp, Speaches and the package-owned Kokoro adapter enforce their configured

@@ -18,4 +18,8 @@ Complete installable source verification and the staged selection comparison pre
 
 Ordinary preparation preserves valid keys and does not provision or restart applications. Use separate `addon refresh`, `addon provision`, and `addon restart` commands with the verified source arguments. Data retention and custody safeguards remain in force; accepted downtime does not authorize storage resets.
 
+Docling selection comes from `monitor-agentgateway-extproc/client-values`: `docling.enabled` and `docling.mode: internal|external`. Reconciliation creates a missing `docling/internal.apiKey`, preserves an existing key, and mirrors it to `monitor-agentgateway-extproc/internal.doclingApiKey` for approved External Secrets delivery. Internal mode delivers the key to `docling/docling-api` and `monitor-agentgateway-extproc/monitor-agentgateway-extproc-docling-secret`, both in field `api-key`.
+
+External mode needs the extProc delivery and secure operator staging of the same key as `DOCLING_SERVE_API_KEY` on the Serve host; it does not require a local Docling workload Secret. Serve uses native `X-Api-Key` authentication. The retired `secret set docling-inference` command is unavailable; existing bearer-token records are preserved and unused.
+
 The authoritative procedures are shared [OpenBao operations](https://github.com/neurwerk/docs/blob/main/dev/operations/openbao.md) and [recovery custody](https://github.com/neurwerk/docs/blob/main/dev/operations/recovery-custody.md). See [release adoption](../../docs/releases.md) for the separate SDK/setup publication boundary and the selected release's exact prerequisites. Unsupported older add-on definitions and historical add-on record migrations have no fallback.

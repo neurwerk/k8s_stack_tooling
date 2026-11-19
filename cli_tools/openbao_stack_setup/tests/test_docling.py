@@ -1,42 +1,27 @@
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import call, patch
 
 import pytest
 from fake import FakeSession, StoredSecret
 from kubernetes.client.exceptions import ApiException
 from test_cluster import cluster
 from test_main import selected_run
+from test_recovery import initialized_kit
 
 from openbao_stack_setup.catalog import DOCLING_NAMESPACES
 from openbao_stack_setup.client import OpenBaoClient, OpenBaoError
-from openbao_stack_setup.cluster import ClusterError
+from openbao_stack_setup.cluster import ClusterError, StackIdentity
 from openbao_stack_setup.credentials import plan_bootstrap_passwords
-from openbao_stack_setup.main import (
-    SetupError,
-    _bootstrap,
-    _reconcile,
-    _refresh_provider,
-    _set_provider,
-)
-from openbao_stack_setup.providers import MANAGED_CREDENTIALS, PROVIDERS, update_provider
+from openbao_stack_setup.main import _bootstrap, _reconcile, main
 from openbao_stack_setup.reconcile import ReconciliationIdentity, reconcile_openbao
-
-SELECTED = """docling:
-  enabled: true
-  apiKeySecretRef: {name: docling-api, key: api-key}
-  inference:
-    tokenSecretRef: {name: docling-inference, key: token}
-"""
+from openbao_stack_setup.recovery import with_checkpoint, write_new
 
 
 def test_selection_fails_before_confirmation_or_secret_access() -> None:
     target = cluster()
-    internal = SELECTED.replace(
-        "tokenSecretRef: {name: docling-inference, key: token}", "mode: internal-standard"
-    )
-    private = SELECTED.replace("inference:", "inference:\n    mode: private-standard")
     with (
         patch("openbao_stack_setup.main.Cluster", return_value=target),
         patch.object(target, "identity"),
@@ -48,148 +33,71 @@ def test_selection_fails_before_confirmation_or_secret_access() -> None:
         patch("openbao_stack_setup.main._openbao") as openbao,
     ):
         for text in [
-            "{}",
-            "docling: {enabled: false}",
             "docling: {enabled: 1}",
             'docling: {enabled: "true"}',
             "docling: null",
             "[]",
             "[",
             "",
-            "docling: {enabled: true}",
-            private.replace("key: token", "key: wrong"),
-            SELECTED.replace("name: docling-api", "name: other"),
-            SELECTED.replace("key: api-key", "key: api-key, extra: value"),
-            SELECTED.replace("tokenSecretRef: {name: docling-inference, key: token}", "null"),
-            internal,
-            internal.replace("name: docling-api", "name: other"),
+            "docling: {enabled: true, inference: {mode: private-standard}}",
+            "docling: {enabled: false, inference: null}",
             *[
-                internal.replace("mode: internal-standard", f"mode: {mode}")
-                for mode in ("null", "true", "1", "[]", "{}", "other", "cpu", "remote")
+                f"docling: {{enabled: true, mode: {mode}}}"
+                for mode in (
+                    "null",
+                    "true",
+                    "1",
+                    "[]",
+                    "{}",
+                    "other",
+                    "internal-standard",
+                    "private-standard",
+                    "private-vlm",
+                )
             ],
         ]:
             target.core.read_namespaced_config_map.return_value = SimpleNamespace(
                 data={"values.yaml": text}
             )
-            if text not in ("{}", "docling: {enabled: false}", internal):
+            for operation in (
+                target.docling_enabled,
+                lambda: _bootstrap("ctx", "client", None, run=selected_run()),
+                lambda: _reconcile("ctx", "client", None, None, run=selected_run()),
+            ):
                 with pytest.raises(ClusterError, match="Docling"):
-                    target.docling_enabled()
-            with pytest.raises((SetupError, ClusterError), match="Docling"):
-                _set_provider("ctx", "client", "docling-inference")
-        for status in (404, 403):
-            target.core.read_namespaced_config_map.side_effect = ApiException(status=status)
-            with pytest.raises((SetupError, ClusterError), match="Docling"):
-                _set_provider("ctx", "client", "docling-inference")
-        for operation in (
-            lambda: _bootstrap("ctx", "client", None, run=selected_run()),
-            lambda: _reconcile("ctx", "client", None, None, run=selected_run()),
-        ):
-            with pytest.raises(ClusterError, match="Docling"):
-                operation()
+                    operation()
+        target.core.read_namespaced_config_map.side_effect = ApiException(status=403)
+        with pytest.raises(ClusterError, match="Docling"):
+            target.docling_enabled()
+        target.core.read_namespaced_config_map.side_effect = ApiException(status=404)
+        assert target.docling_enabled() is False
         confirm.assert_not_called()
         prompt.assert_not_called()
         openbao.assert_not_called()
         target.core.create_namespaced_service_account_token.assert_not_called()
-    target.core.read_namespaced_config_map.side_effect = None
-    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": SELECTED}
-    )
-    assert target.docling_enabled() is True
-    for text, mode in (
-        (SELECTED, "internal-standard"),
-        (private, "private-standard"),
-        (internal, "internal-standard"),
-    ):
-        target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-            data={"values.yaml": text}
-        )
-        before = target.core.read_namespaced_config_map.call_count
-        assert target.docling_inference_mode() == mode
-        assert target.core.read_namespaced_config_map.call_count == before + 1
-        assert target.docling_enabled() is True
-    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": internal.replace("name: docling-api", "name: other")}
-    )
-    with pytest.raises(ClusterError, match="Docling"):
-        target.docling_enabled()
     assert all(
-        c == call("docling-product-values", "docling")
+        c == call("client-values", "monitor-agentgateway-extproc")
         for c in target.core.read_namespaced_config_map.call_args_list
     )
 
 
-@pytest.mark.parametrize("mode", [None, "private-standard", "private-vlm", "internal-standard"])
+@pytest.mark.parametrize("mode", [None, "internal", "external"])
 @pytest.mark.parametrize("enabled", [True, False])
-def test_modes_and_provider_gate(mode: str | None, enabled: bool) -> None:
+def test_modes_and_shared_selection(mode: str | None, enabled: bool) -> None:
     target = cluster()
-    text = SELECTED if enabled else "docling:\n  enabled: false\n  inference: {}\n"
+    text = f"docling:\n  enabled: {str(enabled).lower()}\n"
     if mode is not None:
-        text = text.replace("inference:", f"inference:\n    mode: {mode}").replace(" {}", "")
-    internal = mode in (None, "internal-standard")
-    if internal:
-        text = text.replace("    tokenSecretRef: {name: docling-inference, key: token}\n", "")
-        if mode is None:
-            text = text.replace("  inference:\n", "  inference: {}\n")
+        text += f"  mode: {mode}\n"
     target.core.read_namespaced_config_map.return_value = SimpleNamespace(
         data={"values.yaml": text}
     )
-    expected = mode or "internal-standard"
+    expected = mode or "internal"
     assert target.docling_inference_mode() == (expected if enabled else None)
     assert target.docling_enabled() is enabled
-    with (
-        patch("openbao_stack_setup.main.Cluster", return_value=target),
-        patch.object(target, "identity"),
-        patch(
-            "openbao_stack_setup.main._confirm", side_effect=SetupError("confirmation reached")
-        ) as confirm,
-        patch("openbao_stack_setup.main._prompt_provider") as prompt,
-        patch("openbao_stack_setup.main._openbao") as openbao,
-    ):
-        allowed = enabled and not internal
-        with pytest.raises(SetupError, match="confirmation reached" if allowed else "private-vlm"):
-            _set_provider("ctx", "client", "docling-inference")
-        assert confirm.call_count == int(allowed)
-        prompt.assert_not_called()
-        openbao.assert_not_called()
-        target.core.create_namespaced_service_account_token.assert_not_called()
-
-
-@pytest.mark.parametrize("mode", ["private-standard", "private-vlm"])
-@pytest.mark.parametrize(
-    "reference",
-    [
-        None,
-        "{}",
-        "{name: other, key: token}",
-        "{name: docling-inference, key: other}",
-        "{name: docling-inference, key: token, extra: value}",
-    ],
-)
-def test_private_inference_requires_exact_token_reference(mode: str, reference: str | None) -> None:
-    target = cluster()
-    text = SELECTED.replace("inference:", f"inference:\n    mode: {mode}")
-    if reference is None:
-        text = text.replace("    tokenSecretRef: {name: docling-inference, key: token}\n", "")
-    else:
-        text = text.replace("{name: docling-inference, key: token}", reference)
-    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
-        data={"values.yaml": text}
-    )
-    with pytest.raises(ClusterError, match="exact managed Secret references"):
-        target.docling_inference_mode()
-    with (
-        patch("openbao_stack_setup.main.Cluster", return_value=target),
-        patch.object(target, "identity"),
-        patch("openbao_stack_setup.main._confirm") as confirm,
-        patch("openbao_stack_setup.main._prompt_provider") as prompt,
-        patch("openbao_stack_setup.main._openbao") as openbao,
-    ):
-        with pytest.raises(ClusterError, match="exact managed Secret references"):
-            _set_provider("ctx", "client", "docling-inference")
-        confirm.assert_not_called()
-        prompt.assert_not_called()
-        openbao.assert_not_called()
-        target.core.create_namespaced_service_account_token.assert_not_called()
+    assert target.core.mock_calls == [
+        call.read_namespaced_config_map("client-values", "monitor-agentgateway-extproc"),
+        call.read_namespaced_config_map("client-values", "monitor-agentgateway-extproc"),
+    ]
 
 
 def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> None:
@@ -201,6 +109,10 @@ def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> 
     assert not any("docling/internal" in r.path for r in session.calls)
     source = "docling/internal"
     destination = "monitor-agentgateway-extproc/internal"
+    session.secrets["docling/external"] = StoredSecret(
+        {"inferenceToken": "retired-token", "sibling": "keep"}
+    )
+    legacy = deepcopy(session.secrets["docling/external"])
     session.secrets[source] = StoredSecret({"sibling": "keep"})
     session.secrets[destination] = StoredSecret({"sibling": "keep", "doclingApiKey": "conflict"})
     state = deepcopy(session.secrets["stack-setup/reconciliation-state"])
@@ -220,7 +132,8 @@ def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> 
     assert session.secrets[source] == saved
     assert session.secrets[destination].values == {"sibling": "keep", "doclingApiKey": "generated"}
     assert session.secrets["stack-setup/reconciliation-state"] == state
-    assert "docling/external" not in session.secrets
+    assert session.secrets["docling/external"] == legacy
+    assert not any("docling/external" in r.path for r in session.calls)
     for namespace in DOCLING_NAMESPACES:
         role = next(r for r in session.calls if r.path == f"auth/kubernetes/role/{namespace}")
         assert isinstance(role.body, dict)
@@ -230,6 +143,7 @@ def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> 
     reconcile_openbao(api, identity)
     assert not any(any(ns in r.path for ns in DOCLING_NAMESPACES) for r in session.calls)
     assert session.secrets[source] == saved
+    assert session.secrets["docling/external"] == legacy
     for value in ("", " ", "key\r", "key\n"):
         session.secrets[source].values["apiKey"] = value
         before = deepcopy(session.secrets)
@@ -238,28 +152,90 @@ def test_generation_mirror_retry_conflict_and_optional_roles(tmp_path: Path) -> 
         assert session.secrets == before
 
 
-def test_provider_cas_siblings_and_header_safety(tmp_path: Path) -> None:
-    session = FakeSession()
-    api = OpenBaoClient("https://bao.test", "operator", tmp_path / "ca", session)
-    assert "docling-inference" not in PROVIDERS
-    provider = MANAGED_CREDENTIALS["docling-inference"]
-    assert provider.paths == ("docling/external",)
-    assert provider.fields == ("inferenceToken",)
-    for value in ("", "token\r", "token\n"):
-        with pytest.raises(OpenBaoError):
-            update_provider(api, provider, {"inferenceToken": value})
-    assert session.calls == []
-    update_provider(api, provider, {"inferenceToken": "first"})
-    session.secrets["docling/external"].values["sibling"] = "keep"
-    update_provider(api, provider, {"inferenceToken": "second"})
-    assert session.secrets["docling/external"] == StoredSecret(
-        {"inferenceToken": "second", "sibling": "keep"}, 2
+def test_retired_token_setter_fails_before_cluster_or_secret_access() -> None:
+    with (
+        patch(
+            "sys.argv",
+            [
+                "stack-setup",
+                "secret",
+                "set",
+                "docling-inference",
+                "--context",
+                "ctx",
+                "--client",
+                "client",
+            ],
+        ),
+        patch("openbao_stack_setup.main.Cluster") as target,
+        patch("openbao_stack_setup.main._prompt_provider") as prompt,
+        patch("openbao_stack_setup.main._openbao") as openbao,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    assert error.value.code == 2
+    target.assert_not_called()
+    prompt.assert_not_called()
+    openbao.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["internal", "external"])
+def test_native_key_workflow_preserves_keys_without_local_secret_dependency(
+    tmp_path: Path, mode: str
+) -> None:
+    target = cluster()
+    target.core.read_namespaced_config_map.return_value = SimpleNamespace(
+        data={"values.yaml": f"docling: {{enabled: true, mode: {mode}}}"}
     )
-
-
-def test_consumer_refresh_never_waits_for_external_token_or_application() -> None:
-    target = MagicMock()
-    _refresh_provider(target, MANAGED_CREDENTIALS["docling-inference"])
-    assert target.mock_calls == [
-        call.force_external_secret_refresh("docling-inference", "docling", "docling-inference")
+    session = FakeSession()
+    api = OpenBaoClient("https://bao.test", "root", tmp_path / "ca", session)
+    api.write_secret("stack-setup/providers/smtp", {"smtpUsername": "", "smtpPassword": ""}, 0)
+    session.secrets["docling/internal"] = StoredSecret({"apiKey": "native-key", "sibling": "keep"})
+    session.secrets["docling/external"] = StoredSecret({"inferenceToken": "retired-token"})
+    before = deepcopy(session.secrets)
+    kit = with_checkpoint(with_checkpoint(initialized_kit(), "seeded"), "complete")
+    recovery = tmp_path / "recovery.json"
+    write_new(recovery, kit)
+    with (
+        patch("openbao_stack_setup.main.Cluster", return_value=target),
+        patch.object(
+            target, "identity", return_value=StackIdentity("client", "cluster", "namespace")
+        ),
+        patch.object(target, "tailscale_enabled", return_value=False),
+        patch.object(target, "glitchtip_enabled", return_value=False),
+        patch.object(target, "rejection_debug_enabled", return_value=False),
+        patch.object(target, "contextforge_admin_email", return_value=None),
+        patch.object(target, "studio_mcp_ids", return_value=None),
+        patch.object(target, "wait_openbao_endpoint"),
+        patch.object(target, "force_external_secret_refresh") as refresh,
+        patch.object(target, "force_reconcile") as reconcile,
+        patch(
+            "openbao_stack_setup.main.prepare_custody_paths",
+            return_value=SimpleNamespace(seal_file=recovery),
+        ),
+        patch(
+            "openbao_stack_setup.main._required_package_paths",
+            return_value=(Path("one"), Path("two")),
+        ),
+        patch("openbao_stack_setup.main._decrypt_custodian_packages", return_value=("one", "two")),
+        patch.object(api, "create_recovery_root_token", return_value="synthetic-root"),
+        patch("openbao_stack_setup.main._openbao", return_value=nullcontext(api)),
+        patch("openbao_stack_setup.main._deliver_bootstrap_passwords"),
+        patch("openbao_stack_setup.main._verify_secret_operator"),
+        patch("openbao_stack_setup.main._revoke_other_root_tokens"),
+    ):
+        _reconcile("ctx", "client", tmp_path, [], "client", run=selected_run())
+        mirrored = deepcopy(session.secrets["monitor-agentgateway-extproc/internal"])
+        _reconcile("ctx", "client", tmp_path, [], "client", run=selected_run())
+    assert session.secrets["docling/internal"] == before["docling/internal"]
+    assert session.secrets["docling/external"] == before["docling/external"]
+    assert mirrored.values == {"doclingApiKey": "native-key"}
+    assert session.secrets["monitor-agentgateway-extproc/internal"] == mirrored
+    assert not any("docling/external" in r.path for r in session.calls)
+    assert session.calls[-1].path == "auth/token/revoke-self"
+    assert target.core.mock_calls == [
+        call.read_namespaced_config_map("client-values", "monitor-agentgateway-extproc"),
+        call.read_namespaced_config_map("client-values", "monitor-agentgateway-extproc"),
     ]
+    refresh.assert_not_called()
+    reconcile.assert_not_called()

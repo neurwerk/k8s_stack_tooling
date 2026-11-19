@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
+
+RETIRED_DOCLING_CONCURRENCY_MESSAGE = (
+    "Remove docling_standard_concurrency from this profile's config.json. "
+    "Official Docling Serve uses one document worker; the old model-stage "
+    "concurrency setting cannot be reused."
+)
 
 
 class RuntimeConfig(BaseModel):
@@ -27,11 +34,24 @@ class RuntimeConfig(BaseModel):
     ner_multilingual_dtype: Literal["float32", "float16"] | None = None
     vllm_granite_gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
     vllm_granite_max_num_seqs: int | None = Field(default=None, ge=1)
-    docling_standard_concurrency: int | None = Field(default=None, ge=1, le=3)
+    docling_max_pages: int | None = Field(default=None, ge=1)
     olmocr_gpu_layers: int | None = Field(default=None, ge=0, le=999)
     olmocr_context_tokens: int | None = Field(default=None, ge=256, le=128000)
     gliner_threshold: float | None = Field(default=None, gt=0, lt=1)
     gliner_labels: list[str] | None = Field(default=None, min_length=1, max_length=25)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_docling_concurrency(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "docling_standard_concurrency" in value:
+            if value["docling_standard_concurrency"] is not None:
+                raise PydanticCustomError(
+                    "retired_docling_concurrency", RETIRED_DOCLING_CONCURRENCY_MESSAGE
+                )
+            value = {
+                key: item for key, item in value.items() if key != "docling_standard_concurrency"
+            }
+        return value
 
     @field_validator("gliner_labels")
     @classmethod
