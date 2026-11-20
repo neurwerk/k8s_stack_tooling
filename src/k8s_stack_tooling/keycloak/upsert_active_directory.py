@@ -12,6 +12,8 @@ provider-specific contract is:
   ``userPrincipalName``.
 - Exactly one nonempty JSON array: ``KC_ACTIVE_DIRECTORY_GROUP_NAMES`` (legacy)
   or ``KC_ACTIVE_DIRECTORY_GROUP_MAPPINGS`` with ``sourceName`` / ``targetParent`` objects.
+- ``KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_ENABLED``: import other groups without roles;
+  ``KC_ACTIVE_DIRECTORY_DIRECTORY_GROUPS_EXCLUDE_PREFIXES``: JSON literal-prefix exclusions.
 - ``KC_ACTIVE_DIRECTORY_BIND_DN``: an AD bind DN or UPN principal, plus
   ``KC_ACTIVE_DIRECTORY_BIND_CREDENTIAL``.
 - ``KC_ACTIVE_DIRECTORY_EMAIL_VERIFIED``: required to be ``true``.
@@ -120,6 +122,17 @@ def config_from_environment(
         _die(f"{ENV_PREFIX}ADDON_GROUP_TARGETS must be a JSON array of strings")
 
     try:
+        directory_prefixes = json.loads(
+            environment.get(f"{ENV_PREFIX}DIRECTORY_GROUPS_EXCLUDE_PREFIXES", "[]")
+        )
+    except json.JSONDecodeError:
+        _die(f"{ENV_PREFIX}DIRECTORY_GROUPS_EXCLUDE_PREFIXES must be a JSON array of strings")
+    if not isinstance(directory_prefixes, list) or not all(
+        isinstance(prefix, str) for prefix in directory_prefixes
+    ):
+        _die(f"{ENV_PREFIX}DIRECTORY_GROUPS_EXCLUDE_PREFIXES must be a JSON array of strings")
+
+    try:
         return ActiveDirectoryConfig(
             connection_url=environment.get(f"{ENV_PREFIX}CONNECTION_URL", ""),
             users_dn=_required(environment, f"{ENV_PREFIX}USERS_DN"),
@@ -142,6 +155,11 @@ def config_from_environment(
                 environment.get(f"{ENV_PREFIX}CONNECTION_TIMEOUT_MS", "5000")
             ),
             read_timeout_ms=int(environment.get(f"{ENV_PREFIX}READ_TIMEOUT_MS", "10000")),
+            import_directory_groups=_parse_bool(
+                environment.get(f"{ENV_PREFIX}DIRECTORY_GROUPS_ENABLED", "false"),
+                f"{ENV_PREFIX}DIRECTORY_GROUPS_ENABLED",
+            ),
+            directory_group_exclude_prefixes=tuple(directory_prefixes),
         )
     except ValueError as exc:
         _die(str(exc))

@@ -107,7 +107,7 @@ CATEGORY_GUIDES = {
     ),
     "document-parsing": (
         "Structured document parsing",
-        "Standard layout/table/OCR inference or full-page VLM document parsing.",
+        "Standard layout/OCR inference or full-page VLM document parsing.",
         "vlm-documents",
     ),
     "asr": ("Speech recognition", "Converts spoken audio into text.", "stt-general"),
@@ -155,7 +155,7 @@ CATEGORY_GUIDES = {
 }
 
 RUNTIME_NAMES = {
-    "docling-standard-cuda": "Standard Docling CUDA",
+    "docling-standard-cuda": "Official Docling Serve CUDA",
     "vllm": "vLLM",
     "llama.cpp": "llama.cpp",
     "speaches": "Speaches",
@@ -420,7 +420,7 @@ def guided_models() -> None:
             "Document parsing approach",
             choices=[
                 questionary.Choice(
-                    "Standard Docling — Heron + TableFormer + RapidOCR", value="docling-standard"
+                    "Docling Serve — Heron + TableFormer + RapidOCR", value="docling-standard"
                 ),
                 questionary.Choice("VLM — Granite-Docling", value="vlm-documents"),
                 questionary.Choice("Back", value="back"),
@@ -929,7 +929,7 @@ def runtime_configuration() -> None:
     configured = load_workstation_config()
     settings = DeploymentSettings()
     options = {
-        "docling_standard_concurrency": ("Docling standard model concurrency", "docling-standard"),
+        "docling_max_pages": ("Docling Serve maximum document pages", "docling-standard"),
         "ner_german_dtype": ("German NER precision", "ner-german"),
         "ner_english_dtype": ("English NER precision", "ner-english"),
         "ner_multilingual_dtype": ("Multilingual GLiNER precision", "ner-multilingual"),
@@ -967,11 +967,15 @@ def runtime_configuration() -> None:
             ],
             default=getattr(settings, name),
         ).ask()
-    elif name == "docling_standard_concurrency":
+    elif name == "docling_max_pages":
         value = questionary.text(
-            "Active model stages (1–3; one request per model, layout batches up to 4):",
-            default=str(settings.docling_standard_concurrency),
-            validate=lambda text: True if text in {"1", "2", "3"} else "Enter 1, 2 or 3.",
+            "Maximum pages per document (positive integer; default 250):",
+            default=str(settings.docling_max_pages),
+            validate=lambda text: (
+                True
+                if text.isascii() and text.isdigit() and int(text) >= 1
+                else "Enter a positive whole number."
+            ),
         ).ask()
     elif name == "vllm_granite_max_num_seqs":
         value = questionary.text(

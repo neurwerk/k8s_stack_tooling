@@ -149,10 +149,6 @@ jobs:
       - name: Build
         run: uv build
 
-      - name: Test managed Docling inference contracts
-        if: matrix.project == 'cli_tools/docling_tester'
-        run: uv run --frozen python -m unittest discover -s ../inference_runtime_manager/src/inference_runtime_manager/resources/docling_standard/tests
-
       - name: Install non-editable document tester
         if: matrix.project == 'cli_tools/docling_tester'
         run: uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl

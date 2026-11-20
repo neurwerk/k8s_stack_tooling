@@ -99,6 +99,23 @@ class Corpus:
             raise ValueError("Reference is not a DoclingDocument")
         return value
 
+    def markdown_reference(self, case: Case) -> str | None:
+        # Upstream test_backend_asciidoc.test_asciidocs_examples uses this
+        # exact export contract; other formats need their own compatibility review.
+        if case.format != "asciidoc":
+            return None
+        source = Path(case.path)
+        path = (source.parent.parent / "groundtruth" / (source.name + ".md")).as_posix()
+        if self.files.get(path, {}).get("role") != "expected":
+            return None
+        return path
+
+    def read_markdown(self, path: str) -> str:
+        data = contained(self.root, path).read_bytes()
+        if hashlib.sha256(data).hexdigest() != self.files[path]["sha256"]:
+            raise ValueError("Reference checksum changed")
+        return data.decode("utf-8")
+
 
 def reference_for(case: Case, profile: str) -> dict[str, str] | None:
     return next((ref for ref in case.references if ref["profile"] == profile), None)

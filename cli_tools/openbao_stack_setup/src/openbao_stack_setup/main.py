@@ -940,8 +940,6 @@ def _set_provider(context: str, client: str, provider_name: str) -> None:
             raise SetupError("Approved Tailscale OAuth ExternalSecret is missing")
     if provider_name.startswith("glitchtip-") and not cluster.glitchtip_enabled():
         raise SetupError("GlitchTip is not selected for the client")
-    if provider_name == "docling-inference" and cluster.docling_inference_mode() != "private-vlm":
-        raise SetupError("Docling private-vlm inference is not selected for the client")
     if provider_name == "active-directory" and not cluster.active_directory_required():
         raise SetupError("Active Directory federation is disabled for the selected client")
     _confirm(context, client, f"Update {provider_name} credentials")

@@ -13,6 +13,15 @@ from docling_tester.runner import Settings, run
 from docling_tester.settings import DEFAULT_PATH, SECRETS, load, save, validate
 
 
+def setting_label(key: str) -> str:
+    return {
+        "direct_url": "docling-serve endpoint",
+        "direct_api_key": "docling-serve API key",
+        "gateway_url": "agentgateway endpoint",
+        "gateway_api_key": "agentgateway API key",
+    }.get(key, key.replace("_", " ").title())
+
+
 class Runner:
     def __init__(self, path: Path):
         self.path = path.resolve()
@@ -24,7 +33,7 @@ class Runner:
         keys = keys if keys is not None else list(self.settings)
         while True:
             labels = [
-                key.replace("_", " ").title()
+                setting_label(key)
                 + " · "
                 + (
                     ("Saved" if self.settings[key] else "Not set")
@@ -41,7 +50,7 @@ class Runner:
             if type(values[key]) is bool:
                 values[key] = not values[key]
             else:
-                prompt = key.replace("_", " ").title() + " (blank clears): "
+                prompt = setting_label(key) + " (blank clears): "
                 text = getpass.getpass(prompt) if key in SECRETS else input(prompt).strip()
                 values[key] = int(text) if type(values[key]) is int else text
             validate(values)
@@ -51,15 +60,12 @@ class Runner:
     def launch(self, cases: list[Case]) -> None:
         if not cases:
             return
-        mode_index = choose("Choose conversion mode", ["Direct Docling", "AgentGateway", "Cancel"])
+        mode_index = choose("Choose endpoint", ["docling-serve", "agentgateway", "Cancel"])
         if mode_index == 2:
             return
         mode = ("direct", "gateway")[mode_index]
         values = self.settings
-        local = mode == "direct" and values["direct_transport"] == "docker"
-        if (not local and not values[mode + "_url"]) or (
-            mode == "gateway" and not values["gateway_model"]
-        ):
+        if not values[mode + "_url"] or (mode == "gateway" and not values["gateway_model"]):
             print("Configure the service URL and Gateway model in Setup first.")
             return
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -75,17 +81,14 @@ class Runner:
             capture_url=values["capture_url"] if mode == "gateway" else "",
             capture_key=values["capture_api_key"],
             timeout=values["timeout"],
-            pipeline="vlm" if local else values["pipeline"],
-            ocr=values["ocr"],
-            ocr_preset=values["ocr_preset"],
-            vlm_preset=values["vlm_preset"],
+            document_timeout=values["document_timeout"],
+            direct_page_limit=values["direct_page_limit"],
+            gateway_page_limit=values["gateway_page_limit"],
+            skip_audio=values["skip_audio"],
             reference_profile=values["reference_profile"],
             runtime_label=values["runtime_label"],
             expectations=self.path.parent / expectation_path if expectation_path else None,
             case_ids=tuple(case.path for case in cases),
-            direct_transport=values["direct_transport"],
-            docker_context=values["docker_context"],
-            docker_container=values["docker_container"],
         )
         report, _ = asyncio.run(run(settings, self.corpus))
         for result in report["results"]:
@@ -140,9 +143,6 @@ class Runner:
                 else:
                     self.configure(
                         [
-                            "direct_transport",
-                            "docker_context",
-                            "docker_container",
                             "direct_url",
                             "direct_api_key",
                             "gateway_url",

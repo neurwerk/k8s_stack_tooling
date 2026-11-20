@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from itertools import count
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,8 @@ import pytest
 import requests
 
 from k8s_stack_tooling.api.keycloak_active_directory import (
+    DIRECTORY_GROUP_MAPPER_NAME,
+    DIRECTORY_GROUP_OWNER_SUBTYPE,
     LDAP_ENTRY_DN_ATTRIBUTE,
     LDAP_MAPPER_PROVIDER_TYPE,
     MANAGED_PROVIDER_SUBTYPE,
@@ -21,8 +24,10 @@ from k8s_stack_tooling.api.keycloak_active_directory import (
     GroupMapping,
     _component_needs_update,
     _create_component,
+    _directory_group_parent,
     _escape_dn_value,
     _mapper_representations,
+    _owned_group_mappers,
     _preflight_connection,
     _provider_config,
     _remove_conflicting_full_name_mapper,
@@ -198,7 +203,10 @@ def test_active_directory_config_accepts_existing_agreed_group_name() -> None:
 
 
 @pytest.mark.parametrize("mapped", [False, True])
-def test_provider_config_builds_exact_direct_membership_filter(mapped: bool) -> None:
+@pytest.mark.parametrize("directory_import", [False, True])
+def test_provider_config_builds_exact_direct_membership_filter(
+    mapped: bool, directory_import: bool
+) -> None:
     config = _config(group_names=("neurwerk-studio-users", "neurwerk-studio.admins"))
     if mapped:
         config = _config(
@@ -208,6 +216,11 @@ def test_provider_config_builds_exact_direct_membership_filter(mapped: bool) -> 
                 GroupMapping("CORP_ADMINS", "/access/neurwerk-platform-admins"),
             ),
         )
+    config = replace(
+        config,
+        import_directory_groups=directory_import,
+        directory_group_exclude_prefixes=("Platform_", "Literal*(Ops)\\"),
+    )
 
     provider = _provider_config(config)
 
@@ -221,7 +234,11 @@ def test_provider_config_builds_exact_direct_membership_filter(mapped: bool) -> 
             r"OU=Access,DC=example,DC=com)"
             r"(memberOf=CN=CORP_ADMINS,OU=Access,DC=example,DC=com))"
         ]
-        mapper = _mapper_representations("provider-id", config)[-2]
+        mapper = next(
+            item
+            for item in _mapper_representations("provider-id", config)
+            if item["name"] == MAPPING_NAME_PREFIX + "neurwerk-studio-users"
+        )
         assert mapper["config"]["groups.ldap.filter"] == [
             r"(&(cn=CORP_Users, Ops+\28A\29\2a\5cB)"
             r"(distinguishedName=CN=CORP_Users\5c, Ops\5c+\28A\29\2a\5c\5cB,"
@@ -239,6 +256,47 @@ def test_provider_config_builds_exact_direct_membership_filter(mapped: bool) -> 
     assert provider["cachePolicy"] == ["NO_CACHE"]
     assert provider["changedSyncPeriod"] == ["-1"]
     assert provider["fullSyncPeriod"] == ["-1"]
+    directory_mappers = [
+        item
+        for item in _mapper_representations("provider-id", config)
+        if item["name"] == DIRECTORY_GROUP_MAPPER_NAME
+    ]
+    if not directory_import:
+        assert directory_mappers == []
+        return
+    sources = (
+        r"(cn=CORP_Users, Ops+\28A\29\2a\5cB)(cn=CORP_ADMINS)"
+        if mapped
+        else "(cn=neurwerk-studio-users)(cn=neurwerk-studio.admins)"
+    )
+    assert directory_mappers[0]["config"]["groups.ldap.filter"] == [
+        rf"(!(|{sources}(cn=Platform_*)(cn=Literal\2a\28Ops\29\5c*)))"
+    ]
+    without_prefixes = replace(config, directory_group_exclude_prefixes=())
+    directory_mapper = next(
+        item
+        for item in _mapper_representations("provider-id", without_prefixes)
+        if item["name"] == DIRECTORY_GROUP_MAPPER_NAME
+    )
+    assert directory_mapper["config"]["groups.ldap.filter"] == [f"(!(|{sources}))"]
+
+
+@pytest.mark.parametrize("prefixes", [("",), (" padded",), ("line\nbreak",), (1,), ("X", "x")])
+def test_directory_prefixes_cannot_broaden_or_silently_disable_import(prefixes: Any) -> None:
+    with pytest.raises(ValueError, match="excludePrefixes"):
+        _config(import_directory_groups=True, directory_group_exclude_prefixes=prefixes)
+
+
+@pytest.mark.parametrize("suffix", ["llm-default-users", "mcp-default-users"])
+def test_default_bundle_mapping_targets(suffix: str) -> None:
+    target = f"/access/neurwerk-{suffix}"
+    config = _config(group_names=(), group_mappings=(GroupMapping("CORP_Default", target),))
+    mapper = next(
+        item
+        for item in _mapper_representations("provider-id", config)
+        if item["providerId"] == "group-ldap-mapper"
+    )
+    assert mapper["config"]["groups.path"] == [target]
 
 
 def test_dn_values_are_escaped_before_filter_escaping() -> None:
@@ -866,11 +924,17 @@ def test_enabled_reconciliation_updates_masked_secret_and_syncs_groups(
         "reserved-collision",
         "foreign-component",
         "legacy-import",
+        "directory",
+        "directory-legacy",
     ],
 )
 def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
     failure: str, caplog: pytest.LogCaptureFixture
 ) -> None:
+    directory_import = failure in {"directory", "directory-legacy"}
+    directory_legacy = failure == "directory-legacy"
+    if directory_import:
+        failure = "none"
     legacy = _config(group_names=("neurwerk-studio-users", "neurwerk-librechat-users"))
     config = _config(
         group_names=(),
@@ -878,7 +942,11 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
             GroupMapping("CORP_USERS", "/access/neurwerk-studio-users"),
             GroupMapping("CORP_CHAT", "/access/neurwerk-librechat-users"),
         ),
+        import_directory_groups=directory_import,
+        directory_group_exclude_prefixes=("PLATFORM_",) if directory_import else (),
     )
+    if directory_legacy:
+        config = replace(legacy, import_directory_groups=True)
     provider: dict[str, Any] = {
         "id": "provider-id",
         "name": "microsoft-active-directory",
@@ -941,6 +1009,7 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
     canonical = deepcopy(groups)
     synced = False
     activation_failed = False
+    directory_names: list[str] = []
 
     # Keycloak 26.7.2 only exposes/updates registered config properties, not arbitrary markers.
     config_keys = {
@@ -1052,6 +1121,12 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
                 and params.get("name", "").startswith(MAPPING_NAME_PREFIX)
             ):
                 raise requests.ConnectionError("lost deletion readback")
+            if (
+                failure == "directory-disable-retry"
+                and not result
+                and params.get("name") == DIRECTORY_GROUP_MAPPER_NAME
+            ):
+                raise requests.ConnectionError("lost directory mapper deletion readback")
             if failure == "foreign-component" and result:
                 result[0]["parentId"] = "other-provider"
             if failure == "mapper-readback":
@@ -1106,6 +1181,36 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
             assert settings["preserve.group.inheritance"] == ["false"]
             if mapper["name"] == "approved groups":
                 return FakeResponse(200, {"added": 0, "updated": 2, "removed": 0, "failed": 0})
+            if mapper["name"] == DIRECTORY_GROUP_MAPPER_NAME:
+                assert mapper["subType"] == DIRECTORY_GROUP_OWNER_SUBTYPE
+                assert settings["groups.path"] == ["/ldap_groups"]
+                assert settings["groups.dn"] == [legacy.groups_dn]
+                assert settings["user.roles.retrieve.strategy"] == [
+                    "LOAD_GROUPS_BY_MEMBER_ATTRIBUTE"
+                ]
+                added = 0
+                for name in directory_names:
+                    group_id = f"directory-{name}"
+                    added += group_id not in groups
+                    groups.setdefault(
+                        group_id,
+                        {
+                            "id": group_id,
+                            "name": name,
+                            "path": f"/ldap_groups/{name}",
+                            "parentId": "directory-root",
+                        },
+                    )
+                synced = True
+                return FakeResponse(
+                    200,
+                    {
+                        "added": added,
+                        "updated": len(directory_names) - added,
+                        "removed": 0,
+                        "failed": 1 if failure == "directory-sync-failed" else 0,
+                    },
+                )
             mapping = next(
                 item
                 for item in config.group_mappings
@@ -1137,16 +1242,38 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
                     "failed": 1 if failure == "sync-failed" else 0,
                 },
             )
+        if url.endswith("/groups") and method == "POST":
+            assert json == {"name": "ldap_groups"}
+            groups["directory-root"] = {
+                "id": "directory-root",
+                "name": "ldap_groups",
+                "path": "/ldap_groups",
+            }
+            return FakeResponse(201)
         if "/groups" in url and method == "GET":
             if url.endswith("/groups"):
-                return FakeResponse(200, [deepcopy(groups["access-id"])])
+                return FakeResponse(
+                    200,
+                    [
+                        deepcopy(group)
+                        for group in groups.values()
+                        if group.get("parentId") is None
+                        and ("search" not in params or group["name"] == params["search"])
+                    ],
+                )
+            if url.endswith("/role-mappings"):
+                return FakeResponse(200, {})
             if url.endswith("/children"):
                 parent_id = url.split("/")[-2]
                 result = [
                     deepcopy(item)
                     for item in groups.values()
-                    if item.get("parentId") == parent_id and item["name"] == params["search"]
+                    if item.get("parentId") == parent_id
+                    and ("search" not in params or item["name"] == params["search"])
                 ]
+                if "first" in params:
+                    start = int(params["first"])
+                    result = result[start : start + int(params["max"])]
                 if failure == "parent-changed" and synced and parent_id == "access-id" and result:
                     result[0]["id"] = "changed-id"
                 return FakeResponse(200, result)
@@ -1198,6 +1325,61 @@ def test_mapping_reconciliation_transitions_are_scoped_and_fail_closed(
     reconcile_active_directory("https://corp.example", "platform", session, config)
     assert provider["config"]["enabled"] == ["true"]
     assert provider["subType"] == MANAGED_PROVIDER_SUBTYPE
+    if directory_import:
+        root = deepcopy(groups["directory-root"])
+        first_ids = {name: item["id"] for name, item in components.items()}
+        assert (
+            provider["config"]["customUserSearchFilter"]
+            == _provider_config(replace(config, import_directory_groups=False))[
+                "customUserSearchFilter"
+            ]
+        )
+        # Reuse a populated target and discover future names without an explicit inventory.
+        groups["retained"] = {
+            "id": "retained",
+            "name": "Existing",
+            "path": "/ldap_groups/Existing",
+            "parentId": "directory-root",
+        }
+        directory_names.extend(["Team_Example", "Support West", "Développement"])
+        for _ in range(2):
+            reconcile_active_directory("https://corp.example", "platform", session, config)
+            assert {name: item["id"] for name, item in components.items()} == first_ids
+            assert groups["directory-root"] == root
+        assert all(f"directory-{name}" in groups for name in directory_names)
+        retained_groups = deepcopy(groups)
+        failure = "directory-sync-failed"
+        with pytest.raises(ActiveDirectoryError, match="group sync failed"):
+            reconcile_active_directory("https://corp.example", "platform", session, config)
+        assert provider["config"]["enabled"] == ["false"]
+        failure = "none"
+        directory_names.clear()
+        config = replace(config, directory_group_exclude_prefixes=("ARCHIVE_",))
+        reconcile_active_directory("https://corp.example", "platform", session, config)
+        assert provider["config"]["enabled"] == ["true"]
+        assert groups == retained_groups
+        assert (
+            "(cn=ARCHIVE_*)"
+            in components[DIRECTORY_GROUP_MAPPER_NAME]["config"]["groups.ldap.filter"][0]
+        )
+        config = replace(config, import_directory_groups=False)
+        failure = "directory-disable-retry"
+        with pytest.raises(requests.ConnectionError):
+            reconcile_active_directory("https://corp.example", "platform", session, config)
+        assert provider["config"]["enabled"] == ["false"]
+        assert DIRECTORY_GROUP_MAPPER_NAME not in components
+        failure = "none"
+        reconcile_active_directory("https://corp.example", "platform", session, config)
+        assert provider["config"]["enabled"] == ["true"]
+        assert groups == retained_groups
+        assert {key: groups[key] for key in canonical} == canonical
+        assert components["manual"] == manual
+        assert {name: item["id"] for name, item in components.items()} == {
+            name: mapper_id
+            for name, mapper_id in first_ids.items()
+            if name != DIRECTORY_GROUP_MAPPER_NAME
+        }
+        return
     assert "approved groups" not in components
     first_ids = {name: item["id"] for name, item in components.items()}
     if failure in {"missing-source", "partial-source"}:
@@ -1325,41 +1507,128 @@ def test_group_sync_requires_every_approved_group_to_be_processed(
 
 
 @pytest.mark.parametrize(
-    "result,expected",
+    "result,expected,directory_expected",
     [
-        ({"added": 0, "updated": 0, "removed": 0, "failed": 0}, False),
-        ({"added": 1, "updated": 0, "removed": 0, "failed": 0}, True),
-        ({"added": 0, "updated": 1, "removed": 0, "failed": 0}, True),
-        ({"added": 0, "updated": 0, "removed": 0, "failed": 1}, None),
-        ({"added": 0, "updated": 0, "removed": 1, "failed": 0}, None),
-        ({"added": 2, "updated": 0, "removed": 0, "failed": 0}, None),
-        ({"added": 0, "updated": True, "removed": 0, "failed": 0}, None),
-        ({"added": 0, "updated": 0, "removed": -1, "failed": 0}, None),
-        ({"added": 0, "updated": 0, "removed": 0}, None),
+        ({"added": 0, "updated": 0, "removed": 0, "failed": 0}, False, True),
+        ({"added": 1, "updated": 0, "removed": 0, "failed": 0}, True, True),
+        ({"added": 0, "updated": 1, "removed": 0, "failed": 0}, True, True),
+        ({"added": 0, "updated": 0, "removed": 0, "failed": 1}, None, None),
+        ({"added": 0, "updated": 0, "removed": 1, "failed": 0}, None, None),
+        ({"added": 2, "updated": 0, "removed": 0, "failed": 0}, None, True),
+        ({"added": 0, "updated": True, "removed": 0, "failed": 0}, None, None),
+        ({"added": 0, "updated": 0, "removed": -1, "failed": 0}, None, None),
+        ({"added": 0, "updated": 0, "removed": 0}, None, None),
     ],
 )
 def test_missing_group_tolerance_preserves_sync_failure_checks(
-    result: dict[str, int], expected: bool | None
+    result: dict[str, int], expected: bool | None, directory_expected: bool | None
 ) -> None:
     session = MagicMock(spec=requests.Session)
     session.request.return_value = FakeResponse(200, result)
 
-    def sync() -> bool:
+    def sync(count: int | None) -> bool:
         return _sync_group_mapper(
             session,
             "https://keycloak.example.com",
             "platform",
             "provider-id",
             "mapper-id",
-            1,
-            allow_missing=True,
+            count,
+            allow_missing=count is not None,
         )
 
-    if expected is None:
-        with pytest.raises(ActiveDirectoryError):
-            sync()
+    for expected_count, outcome in ((1, expected), (None, directory_expected)):
+        if outcome is None:
+            with pytest.raises(ActiveDirectoryError):
+                sync(expected_count)
+        else:
+            assert sync(expected_count) is outcome
+
+
+@pytest.mark.parametrize("role_target", ["parent", "child-realm", "child-client", "late-child"])
+def test_directory_import_rejects_roles_in_existing_groups(role_target: str) -> None:
+    session = MagicMock(spec=requests.Session)
+    checked_roles = []
+    children = [
+        {
+            "id": f"child-{index}",
+            "name": f"Group {index}",
+            "path": f"/ldap_groups/Group {index}",
+            "parentId": "root",
+        }
+        for index in range(101 if role_target == "late-child" else 1)
+    ]
+
+    def request(method: str, url: str, *, params: Any, **kwargs: Any) -> FakeResponse:
+        assert method == "GET"
+        if url.endswith("/groups"):
+            return FakeResponse(
+                200, [{"id": "root", "name": "ldap_groups", "path": "/ldap_groups"}]
+            )
+        if url.endswith("/children"):
+            first = int(params["first"])
+            return FakeResponse(200, children[first : first + int(params["max"])])
+        assert url.endswith("/role-mappings")
+        group_id = url.split("/")[-2]
+        checked_roles.append(group_id)
+        if (
+            (role_target == "parent" and group_id == "root")
+            or (role_target in {"child-realm", "child-client"} and group_id == "child-0")
+            or (role_target == "late-child" and group_id == "child-100")
+        ):
+            return FakeResponse(
+                200,
+                {"clientMappings": {"app": {"mappings": [{"name": "writer"}]}}}
+                if role_target == "child-client"
+                else {"realmMappings": [{"name": "admin"}]},
+            )
+        return FakeResponse(200, {})
+
+    session.request.side_effect = request
+    with pytest.raises(ActiveDirectoryError, match="must not grant application roles"):
+        _directory_group_parent(session, "https://keycloak.example.com", "platform", create=True)
+    if role_target == "late-child":
+        assert checked_roles[-1] == "child-100"
+
+
+def test_directory_group_creation_requires_exact_readback() -> None:
+    session = MagicMock(spec=requests.Session)
+    session.request.side_effect = [
+        FakeResponse(200, []),
+        FakeResponse(201),
+        FakeResponse(200, [{"id": "root", "name": "ldap_groups", "path": "/other/ldap_groups"}]),
+    ]
+    with pytest.raises(ActiveDirectoryError, match="unexpected ID, path or parent"):
+        _directory_group_parent(session, "https://keycloak.example.com", "platform", create=True)
+    assert session.request.call_args_list[1].kwargs["json"] == {"name": "ldap_groups"}
+
+
+@pytest.mark.parametrize("conflict", ["subtype", "path", "manual-overlap"])
+def test_directory_mapper_rejects_foreign_ownership_and_overlapping_targets(conflict: str) -> None:
+    mapper: dict[str, Any] = next(
+        item
+        for item in _mapper_representations("provider-id", _config(import_directory_groups=True))
+        if item["name"] == DIRECTORY_GROUP_MAPPER_NAME
+    )
+    mapper = {"id": "directory-mapper", **mapper}
+    if conflict == "subtype":
+        mapper["subType"] = "unmanaged"
+    elif conflict == "path":
+        mapper["config"]["groups.path"] = ["/other"]
     else:
-        assert sync() is expected
+        mapper["name"] = "manual import"
+        mapper.pop("subType")
+    session = MagicMock(spec=requests.Session)
+    session.request.return_value = FakeResponse(200, [mapper])
+    with pytest.raises(ActiveDirectoryError):
+        _owned_group_mappers(
+            session,
+            "https://keycloak.example.com/components",
+            "provider-id",
+            mapping_mode=True,
+            directory_mode=True,
+        )
+    assert all(call.args[0] == "GET" for call in session.request.call_args_list)
 
 
 def test_group_sync_accepts_exact_approved_group_count() -> None:

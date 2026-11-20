@@ -10,7 +10,6 @@ license = "MIT"
 license-files = ["LICENSE", "src/docling_tester/upstream/LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "docling>=2,<3",
     "httpx>=0.28.1,<0.29",
 ]
 

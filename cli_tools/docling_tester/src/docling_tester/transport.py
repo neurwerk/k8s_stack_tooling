@@ -147,11 +147,36 @@ class Direct:
     async def convert(self, case: Case, data: bytes, trace: dict[str, Any]) -> Reply:
         trace.update(submission="started", remote_job_may_continue=True)
         started = time.perf_counter()
+        options: dict[str, Any] = dict(self.options)
+        if case.format == "asciidoc":
+            options.update(to_formats=["json", "md"], md_compact_tables="true")
+        source_format = {
+            "png": "image",
+            "jpg": "image",
+            "jpeg": "image",
+            "tif": "image",
+            "webp": "image",
+            "txt": "md",
+            "htm": "html",
+        }.get(case.format, case.format)
+        if source_format in {
+            "pdf",
+            "image",
+            "docx",
+            "xlsx",
+            "pptx",
+            "md",
+            "csv",
+            "html",
+            "asciidoc",
+            "vtt",
+        }:
+            options["from_formats"] = source_format
         reply = await self.transport.request(
             "POST",
             self.url + "/v1/convert/file/async",
             headers=self.headers,
-            data=self.options,
+            data=options,
             files={"files": (case.path.rsplit("/", 1)[-1], data, mime(case))},
         )
         trace["submit_seconds"] = reply.seconds

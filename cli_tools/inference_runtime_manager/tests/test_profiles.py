@@ -1,9 +1,10 @@
 """Profiles must not direct saved assignments or runtime settings to another server."""
 
+import io
 import json
 import os
 import sys
-from contextlib import chdir
+from contextlib import chdir, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import override
@@ -150,3 +151,48 @@ class ProfileTests(TestCase):
                 self.assertEqual(result.exception.code, 1)
                 run.assert_not_called()
                 self.assertEqual(json.loads(deployment.read_text())["target"], "old-server")
+
+    def test_cli_reports_retired_docling_setting_without_exposing_validation_values(self) -> None:
+        with (
+            TemporaryDirectory() as base,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": base, "XDG_STATE_HOME": base}, clear=True),
+        ):
+            create_profile("saved-server")
+            select_profile("saved-server")
+            save_workstation_config(WorkstationConfig(docker_context="saved-server"))
+            path = config_path()
+            configured = json.loads(path.read_text())
+            sensitive = "SECRET_SENTINEL"
+            for action, retired in (("status", True), ("configuration", True), ("status", False)):
+                with self.subTest(action=action, retired=retired):
+                    configured["runtime"] = (
+                        {"docling_standard_concurrency": 3, "bind_address": sensitive}
+                        if retired
+                        else {"docling_max_pages": sensitive}
+                    )
+                    path.write_text(json.dumps(configured))
+                    before = path.read_bytes()
+                    output = io.StringIO()
+                    select_profile("default")
+                    with (
+                        patch.object(
+                            sys,
+                            "argv",
+                            ["inference-runtime-manager", "--profile", "saved-server", action],
+                        ),
+                        patch("subprocess.run") as run,
+                        redirect_stdout(output),
+                        self.assertRaises(SystemExit) as result,
+                    ):
+                        cli.main()
+                    self.assertEqual(result.exception.code, 1)
+                    run.assert_not_called()
+                    message = output.getvalue()
+                    self.assertNotIn(sensitive, message)
+                    if retired:
+                        self.assertIn("Remove docling_standard_concurrency", message)
+                        self.assertIn("config.json", message)
+                        self.assertNotIn("use Setup", message)
+                    else:
+                        self.assertIn("Invalid or incomplete settings; use Setup.", message)
+                    self.assertEqual(path.read_bytes(), before)

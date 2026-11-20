@@ -49,11 +49,11 @@ class Settings:
     url: str
     output: Path
     key: str = field(default="", repr=False)
-    timeout: float = 300
-    pipeline: str = "standard"
-    ocr: bool = True
-    ocr_preset: str = "rapidocr"
-    vlm_preset: str = "default"
+    timeout: float = 360
+    document_timeout: float = 300
+    direct_page_limit: int = 250
+    gateway_page_limit: int = 2
+    skip_audio: bool = False
     reference_profile: str = "auto"
     model: str = ""
     auth_header: str = "Authorization"
@@ -65,23 +65,19 @@ class Settings:
     match: str = "*"
     expectations: Path | None = None
     max_response_bytes: int = 64 * 1024 * 1024
-    direct_transport: str = "http"
-    docker_context: str = ""
-    docker_container: str = "local-ai-vlm-documents-1"
 
     def __post_init__(self) -> None:
-        if self.direct_transport not in {"http", "docker"}:
-            raise ValueError("Invalid direct transport")
-        if self.mode == "direct" and self.direct_transport == "docker":
-            self.pipeline = "vlm"
-        if self.mode != "direct" or self.direct_transport == "http":
-            self.url = endpoint(self.url)
+        self.url = endpoint(self.url)
         if self.capture_url:
             self.capture_url = endpoint(self.capture_url)
         if (
             self.mode not in {"direct", "gateway"}
             or self.timeout <= 0
             or not math.isfinite(self.timeout)
+            or self.document_timeout <= 0
+            or not math.isfinite(self.document_timeout)
+            or self.direct_page_limit < 1
+            or self.gateway_page_limit < 1
             or self.max_response_bytes < 1
         ):
             raise ValueError("Invalid run mode or timeout")
@@ -98,8 +94,13 @@ class Settings:
             "image_export_mode": "placeholder",
             "include_images": "false",
             "include_page_images": "false",
-            "pipeline": self.pipeline,
-            "document_timeout": str(self.timeout),
+            "pipeline": "standard",
+            "layout_preset": "default",
+            "ocr_preset": "default",
+            "table_structure_preset": "default",
+            "do_ocr": "true",
+            "do_table_structure": "true",
+            "document_timeout": str(self.document_timeout),
             "do_code_enrichment": "false",
             "do_formula_enrichment": "false",
             "do_chart_extraction": "false",
@@ -107,14 +108,6 @@ class Settings:
             "do_picture_description": "false",
             "do_pdf_heading_hierarchy": "false",
         }
-        if self.pipeline == "standard":
-            value.update(do_ocr=str(self.ocr).lower(), do_table_structure="true")
-            if self.ocr:
-                value["ocr_preset"] = self.ocr_preset
-        elif self.pipeline == "native":
-            value.update(do_ocr="false", pdf_backend="threaded_docling_parse")
-        else:
-            value["vlm_pipeline_preset"] = self.vlm_preset
         return value
 
 
@@ -208,9 +201,7 @@ def profile_for(case: Case, settings: Settings) -> str:
     if settings.reference_profile != "auto":
         return settings.reference_profile
     if case.format in {"pdf", "png", "jpg", "jpeg", "tif", "webp"}:
-        if settings.pipeline == "standard" and not settings.ocr:
-            return "standard-no-ocr"
-        return "unmatched-visual-pipeline"
+        return "standard-default-ocr"
     return "native"
 
 
@@ -239,6 +230,30 @@ def check_direct(
         expected = corpus.read_document(reference)
         details["reference"] = reference["path"]
         details["reference_sha256"] = corpus.files[reference["path"]]["sha256"]
+    elif profile == "native" and (markdown_path := corpus.markdown_reference(case)) is not None:
+        expected_markdown = corpus.read_markdown(markdown_path)
+        actual_markdown = body["document"].get("md_content")
+        details.update(
+            reference=markdown_path,
+            reference_sha256=corpus.files[markdown_path]["sha256"],
+            verification_scope="upstream_markdown_export",
+            markdown_export_options={"compact_tables": True},
+        )
+        if not isinstance(actual_markdown, str):
+            return "FAIL", "markdown_output_missing", details
+        # Upstream verify_export compares exact text after newline normalization.
+        expected_markdown = expected_markdown.replace("\r\n", "\n").replace("\r", "\n")
+        actual_markdown = actual_markdown.replace("\r\n", "\n").replace("\r", "\n")
+        matches = expected_markdown == actual_markdown
+        details["comparison"] = {
+            "matches": matches,
+            "differences": differences(expected_markdown, actual_markdown),
+        }
+        return (
+            ("PASS", "markdown_matches_reference", details)
+            if matches
+            else ("FAIL", "markdown_mismatch", details)
+        )
     else:
         return "UNVERIFIED", "compatible_reference_missing", details
     try:
@@ -333,9 +348,14 @@ async def run(settings: Settings, corpus: Corpus | None = None) -> tuple[dict[st
             "endpoint": settings.url,
             "timeout_seconds": settings.timeout,
             "runtime_label": settings.runtime_label,
+            "skip_audio": settings.skip_audio,
             "document_concurrency": 1,
-            "direct_transport": settings.direct_transport,
-            "timing_scope": "includes local worker startup and Docker transport",
+            "document_timeout_seconds": settings.document_timeout,
+            "declared_server_page_limits": {
+                "direct_per_document": settings.direct_page_limit,
+                "gateway_cumulative_pdf": settings.gateway_page_limit,
+            },
+            "timing_scope": "HTTP upload, service queue, conversion, polling and download",
             "reference_profile": settings.reference_profile,
             "selection": {"formats": settings.formats, "match": settings.match},
             "expectations_sha256": digest(settings.expectations)
@@ -359,11 +379,7 @@ async def run(settings: Settings, corpus: Corpus | None = None) -> tuple[dict[st
             timeout=httpx.Timeout(30), follow_redirects=False, trust_env=False
         ) as client:
             transport = Transport(client, settings.max_response_bytes)
-            direct = (
-                Direct(transport, settings.url, settings.key, settings.options())
-                if settings.mode != "direct" or settings.direct_transport == "http"
-                else None
-            )
+            direct = Direct(transport, settings.url, settings.key, settings.options())
             for index, case in enumerate(cases, 1):
                 current = index - 1
                 rule = expectation(case, settings, rules)
@@ -377,25 +393,20 @@ async def run(settings: Settings, corpus: Corpus | None = None) -> tuple[dict[st
                     "trace": {},
                 }
                 trace = result["trace"]
+                if settings.skip_audio and case.family == "audio":
+                    result.update(status="SKIPPED", reason="audio_disabled")
+                    report["results"].append(result)
+                    current = index
+                    artifacts.json("report.json", report)
+                    print(f"{index}/{len(cases)} SKIPPED {case.path} (audio disabled)", flush=True)
+                    continue
                 correlation = uuid.uuid4().hex
                 case_started = time.perf_counter()
                 try:
                     data = contained(corpus.root, case.path).read_bytes()
                     async with asyncio.timeout(settings.timeout):
                         if settings.mode == "direct":
-                            if settings.direct_transport == "docker":
-                                from docling_tester.local import convert
-
-                                reply = await convert(
-                                    contained(corpus.root, case.path),
-                                    settings.docker_context,
-                                    settings.docker_container,
-                                    settings.timeout,
-                                    trace,
-                                )
-                            else:
-                                assert direct is not None
-                                reply = await direct.convert(case, data, trace)
+                            reply = await direct.convert(case, data, trace)
                         else:
                             trace.update(correlation=correlation, remote_job_may_continue=True)
                             reply = await transport.request(

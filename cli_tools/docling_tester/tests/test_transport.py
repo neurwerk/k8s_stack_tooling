@@ -10,6 +10,7 @@ import pytest
 from conftest import document
 
 from docling_tester.corpus import Case
+from docling_tester.runner import Settings
 from docling_tester.transport import Direct, ProtocolError, Transport
 
 
@@ -22,7 +23,7 @@ def converted():
 
 
 @pytest.mark.parametrize("extension", ["xlsx", "docx", "pptx"])
-def test_binary_upload_pending_poll_and_full_result(http_server, extension):
+def test_binary_upload_pending_poll_and_full_result(http_server, extension, tmp_path):
     calls = []
     payload = b"PK\x03\x04\x00binary\xff\r\nfile"
 
@@ -38,6 +39,25 @@ def test_binary_upload_pending_poll_and_full_result(http_server, extension):
             )
             assert uploaded.get_filename() == f"source.{extension}"
             assert uploaded.get_payload(decode=True) == payload
+            fields = {}
+            for part in message.iter_parts():
+                if part.get_filename() is None:
+                    name = part.get_param("name", header="content-disposition")
+                    content = part.get_payload(decode=True)
+                    assert isinstance(name, str) and isinstance(content, bytes)
+                    fields[name] = content.decode()
+            # Docling 2.142.1 service/options.py, used by Serve 1.38.2.
+            assert fields["from_formats"] == extension
+            assert fields["pipeline"] == "standard"
+            assert fields["document_timeout"] == "300"
+            assert fields["do_ocr"] == fields["do_table_structure"] == "true"
+            assert all(
+                fields[name] == "default"
+                for name in ("layout_preset", "ocr_preset", "table_structure_preset")
+            )
+            assert fields["to_formats"] == "json"
+            assert fields["target_type"] == "inbody"
+            assert not any("vlm" in name for name in fields)
             return 200, task("pending")
         if "/poll/" in path:
             return 200, task("started" if len(calls) == 2 else "success")
@@ -47,7 +67,13 @@ def test_binary_upload_pending_poll_and_full_result(http_server, extension):
 
     async def execute():
         async with httpx.AsyncClient(trust_env=False) as client:
-            adapter = Direct(Transport(client), url, "test-credential", {}, poll_interval=0)
+            adapter = Direct(
+                Transport(client),
+                url,
+                "test-credential",
+                Settings("direct", url, tmp_path).options(),
+                poll_interval=0,
+            )
             trace = {}
             async with asyncio.timeout(5):
                 reply = await adapter.convert(

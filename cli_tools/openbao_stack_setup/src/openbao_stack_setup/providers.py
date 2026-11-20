@@ -45,7 +45,6 @@ MANAGED_CREDENTIALS: dict[str, Provider] = {
     "glitchtip-owner": Provider("glitchtip-owner", ("glitchtip/owner",), ("email", "password")),
     "smtp": SMTP,
     "active-directory": ACTIVE_DIRECTORY,
-    "docling-inference": Provider("docling-inference", ("docling/external",), ("inferenceToken",)),
     "image-inspection": Provider(
         "image-inspection", ("monitor-agentgateway-extproc/external",), ("apiKey",)
     ),
@@ -72,10 +71,6 @@ def update_provider(client: OpenBaoClient, provider: Provider, values: dict[str,
         for value in values.values()
     ):
         raise OpenBaoError("Invalid Tailscale OAuth credentials; values are hidden")
-    if provider.name == "docling-inference" and any(
-        "\r" in value or "\n" in value for value in values.values()
-    ):
-        raise OpenBaoError("Docling inference token must not contain CR or LF")
     if provider.name.startswith("glitchtip-") and any(
         any(ord(char) < 32 or ord(char) == 127 for char in value) for value in values.values()
     ):

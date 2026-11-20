@@ -11,9 +11,6 @@ from docling_tester.transport import strict_json
 
 DEFAULT_PATH = Path("settings.local.jsonc")
 DEFAULTS: dict[str, Any] = {
-    "direct_transport": "docker",
-    "docker_context": "",
-    "docker_container": "local-ai-vlm-documents-1",
     "direct_url": "",
     "direct_api_key": "",
     "gateway_url": "",
@@ -22,17 +19,26 @@ DEFAULTS: dict[str, Any] = {
     "gateway_auth_header": "Authorization",
     "capture_url": "",
     "capture_api_key": "",
-    "pipeline": "standard",
-    "ocr": True,
-    "ocr_preset": "rapidocr",
-    "vlm_preset": "default",
     "reference_profile": "auto",
     "runtime_label": "unknown",
-    "timeout": 300,
+    "timeout": 360,
+    "document_timeout": 300,
+    "direct_page_limit": 250,
+    "gateway_page_limit": 2,
+    "skip_audio": False,
     "expectations": "",
     "output_directory": "results",
 }
 SECRETS = {"direct_api_key", "gateway_api_key", "capture_api_key"}
+RETIRED = {
+    "direct_transport",
+    "docker_context",
+    "docker_container",
+    "pipeline",
+    "ocr",
+    "ocr_preset",
+    "vlm_preset",
+}
 TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*.*?\*/', re.DOTALL)
 
 
@@ -42,17 +48,14 @@ def validate(values: Any) -> None:
     for key, value in values.items():
         if type(value) is not type(DEFAULTS[key]):
             raise ValueError("Invalid setting type")
-    if values.get("direct_transport", "docker") not in {"docker", "http"}:
-        raise ValueError("Invalid direct transport")
-    if values.get("pipeline", "standard") not in {"standard", "native", "vlm"}:
-        raise ValueError("Invalid pipeline")
     if values.get("gateway_auth_header", "Authorization") not in {
         "Authorization",
         "Authorization-Neurwerk",
     }:
         raise ValueError("Invalid authentication header")
-    if values.get("timeout", 300) <= 0:
-        raise ValueError("Timeout must be positive")
+    for key in ("timeout", "document_timeout", "direct_page_limit", "gateway_page_limit"):
+        if values.get(key, DEFAULTS[key]) <= 0:
+            raise ValueError("Limits must be positive")
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -62,6 +65,11 @@ def load(path: Path) -> dict[str, Any]:
     )
     try:
         values = strict_json(text)
+        if isinstance(values, dict):
+            legacy = bool(values.keys() & RETIRED)
+            values = {key: value for key, value in values.items() if key not in RETIRED}
+            if legacy:
+                values["reference_profile"] = "auto"
         validate(values)
     except ValueError:
         raise ValueError("Invalid JSONC settings") from None

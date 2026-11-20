@@ -308,7 +308,7 @@ def test_mixed_run_retains_failures_unverified_timeouts_and_redacts_credentials(
 
 def test_missing_profile_and_empty_selection_are_not_success(tmp_path):
     corpus = tiny_corpus(tmp_path, ("source.pdf",))
-    settings = Settings("direct", "http://example.invalid", tmp_path / "results", pipeline="vlm")
+    settings = Settings("direct", "http://example.invalid", tmp_path / "results")
     status, reason, _ = check_direct(
         corpus,
         corpus.cases[0],

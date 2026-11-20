@@ -392,42 +392,27 @@ class Cluster:
         return enabled
 
     def docling_enabled(self) -> bool:
-        """Return whether either Docling inference mode is selected."""
+        """Return whether the shared client values select Docling."""
         return self.docling_inference_mode() is not None
 
     def docling_inference_mode(self) -> str | None:
-        """Validate managed Secret references and return the canonical mode, or None if disabled."""
-        values = self._product_values("docling-product-values", "docling", "Docling", optional=True)
+        """Read the canonical full-Serve selection without requiring a local Docling workload."""
+        values = self._product_values(
+            "client-values", "monitor-agentgateway-extproc", "Docling", optional=True
+        )
         if not isinstance(values, dict) or not isinstance(values.get("docling", {}), dict):
-            raise ClusterError("Docling product values contain an invalid contract")
+            raise ClusterError("Docling client values contain an invalid contract")
         docling = values.get("docling", {})
         enabled = docling.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ClusterError("Docling enabled value must be a boolean")
-        inference = docling.get("inference", {})
-        if not isinstance(inference, dict):
-            raise ClusterError("Docling inference must be a mapping")
-        mode = inference.get("mode", "private-vlm")
-        modes = {
-            "internal-standard": "internal-standard",
-            "private-vlm": "private-vlm",
-            "cpu": "internal-standard",
-            "remote": "private-vlm",
-        }
-        if not isinstance(mode, str) or mode not in modes:
+        if "inference" in docling:
             raise ClusterError(
-                "Docling inference mode must be internal-standard or private-vlm "
-                "(legacy aliases: cpu or remote)"
+                "Docling inference settings are retired; use docling.mode internal or external"
             )
-        mode = modes[mode]
-        if enabled and (
-            docling.get("apiKeySecretRef") != {"name": "docling-api", "key": "api-key"}
-            or (
-                mode == "private-vlm"
-                and inference.get("tokenSecretRef") != {"name": "docling-inference", "key": "token"}
-            )
-        ):
-            raise ClusterError("Selected Docling requires the exact managed Secret references")
+        mode = docling.get("mode", "internal")
+        if not isinstance(mode, str) or mode not in ("internal", "external"):
+            raise ClusterError("Docling mode must be internal or external")
         return mode if enabled else None
 
     def _product_values(

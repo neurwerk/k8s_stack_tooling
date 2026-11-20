@@ -119,22 +119,10 @@ CONTEXTFORGE_EXTERNAL_SECRETS = (
     ),
 )
 DOCLING_NAMESPACES = ("docling", "monitor-agentgateway-extproc")
-DOCLING_SECRET_STORES = tuple(
-    SecretStoreTarget(f"{namespace}-openbao-secret-store", namespace)
-    for namespace in DOCLING_NAMESPACES
-)
 MONITOR_AGENTGATEWAY_EXTPROC_IMAGE_INSPECTION_EXTERNAL_SECRET = ExternalSecretTarget(
     "monitor-agentgateway-extproc-image-inspection-secret",
     "monitor-agentgateway-extproc",
     "monitor-agentgateway-extproc-image-inspection-secret",
-)
-DOCLING_EXTERNAL_SECRETS = (
-    ExternalSecretTarget("docling-api", "docling", "docling-api"),
-    ExternalSecretTarget(
-        "monitor-agentgateway-extproc-docling-secret",
-        "monitor-agentgateway-extproc",
-        "monitor-agentgateway-extproc-docling-secret",
-    ),
 )
 TAILSCALE_SECRET_STORE = SecretStoreTarget("tailscale-openbao-secret-store", "tailscale")
 TAILSCALE_EXTERNAL_SECRET = ExternalSecretTarget("operator-oauth", "tailscale", "operator-oauth")
@@ -229,11 +217,6 @@ PROVIDER_REFRESH_TARGETS: tuple[ProviderRefreshTarget, ...] = (
         "glitchtip/owner",
         ("email", "password"),
         ExternalSecretTarget("glitchtip-owner", "glitchtip", "glitchtip-owner"),
-    ),
-    ProviderRefreshTarget(
-        "docling/external",
-        ("inferenceToken",),
-        ExternalSecretTarget("docling-inference", "docling", "docling-inference"),
     ),
     ProviderRefreshTarget(
         "monitor-agentgateway-extproc/external",
@@ -342,7 +325,6 @@ def secret_operator_policy(managed_paths: tuple[str, ...]) -> str:
             '["create", "read", "update"]'
             if path
             in (
-                "docling/external",
                 "monitor-agentgateway-extproc/external",
                 CONTEXTFORGE_PROVIDER_APPS_PATH,
                 TAILSCALE_OAUTH_PATH,

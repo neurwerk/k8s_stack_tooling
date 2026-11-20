@@ -47,12 +47,13 @@ EXPECTED_REJECTION: status AND reason match; no claim of successful extraction.
 FAIL: contradictory content, protocol failure, or unexpected status/reason.
 UNVERIFIED: insufficient evidence (no compatible reference or backend capture).
 ERROR: transport failure or timeout. NOT_RUN: interrupted/stopped before completion.
+SKIPPED: explicitly disabled audio transcription fixture (including video containers).
 Exit 0: all selected expectations met. Exit 1: failure/error. Exit 2: incomplete or
 unverified. Exit 130: interrupted. An empty selection is an error.
 
 Direct native-format references apply to Office and other non-visual converters.
-PDF standard-no-ocr references require --pipeline standard --no-ocr. OCR references
-use profiles such as ocr:rapidocr:pdf_aware_layout_regions. --reference-profile is an
+PDF standard-no-ocr references are incompatible with the OCR-enabled standard pipeline.
+Serve owns layout/OCR/table presets (all default). --reference-profile is an
 explicit operator assertion that the service options/version are compatible.
 Record exact service/model versions and page concurrency with --runtime-label.
 No reference is automatically generated or updated. Coordinates, confidence, IDs,
@@ -105,17 +106,36 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     test.add_argument("mode", choices=("direct", "gateway"))
+    test.add_argument(
+        "--skip-audio",
+        action="store_true",
+        help="Skip audio transcription fixtures when the endpoint has no ASR",
+    )
     test.add_argument("--url", required=True, help="Explicit service/binding base URL")
     test.add_argument("--output", type=Path, required=True, help="New private artifact directory")
     test.add_argument(
         "--key-env",
         help="Credential environment variable (default DOCLING_API_KEY/GATEWAY_API_KEY)",
     )
-    test.add_argument("--timeout", type=float, default=300, help="Absolute seconds per input (300)")
-    test.add_argument("--pipeline", choices=("standard", "native", "vlm"), default="standard")
-    test.add_argument("--ocr", action=argparse.BooleanOptionalAction, default=True)
-    test.add_argument("--ocr-preset", default="rapidocr")
-    test.add_argument("--vlm-preset", default="default", help="Named preset on the Docling service")
+    test.add_argument("--timeout", type=float, default=360, help="Absolute seconds per input (360)")
+    test.add_argument(
+        "--document-timeout",
+        type=float,
+        default=300,
+        help="Serve conversion budget, excluding HTTP overhead (300)",
+    )
+    test.add_argument(
+        "--direct-page-limit",
+        type=int,
+        default=250,
+        help="Declared Serve pages/document; metadata only, no automatic rejection",
+    )
+    test.add_argument(
+        "--gateway-page-limit",
+        type=int,
+        default=2,
+        help="Declared Gateway cumulative PDF pages; metadata only",
+    )
     test.add_argument(
         "--reference-profile",
         default="auto",
@@ -192,10 +212,10 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output,
             key=os.environ.get(key_env, ""),
             timeout=args.timeout,
-            pipeline=args.pipeline,
-            ocr=args.ocr,
-            ocr_preset=args.ocr_preset,
-            vlm_preset=args.vlm_preset,
+            document_timeout=args.document_timeout,
+            direct_page_limit=args.direct_page_limit,
+            gateway_page_limit=args.gateway_page_limit,
+            skip_audio=args.skip_audio,
             reference_profile=args.reference_profile,
             runtime_label=args.runtime_label,
             model=args.model,

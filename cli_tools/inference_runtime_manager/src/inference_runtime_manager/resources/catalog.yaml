@@ -3,37 +3,37 @@ models:
   - id: docling-standard
     category: ocr
     menuGroup: document-parsing
-    displayName: Standard Docling (Heron + TableFormer + RapidOCR)
-    description: Remote model inference only; PDF parsing, rendering, cell matching and document assembly stay in the caller.
+    displayName: Docling Serve (Heron + TableFormer + RapidOCR)
+    description: Complete document conversion in official Docling Serve, with local CUDA layout, table structure and Torch OCR.
     source: docling-project/docling-layout-heron
     revision: 8f39ad3c0b4c58e9c2d2c84a38465abf757272d8
     license:
-      name: Apache-2.0 AND CDLA-Permissive-2.0
-      url: https://huggingface.co/docling-project/docling-models/tree/fc0f2d45e2218ea24bce5045f58a389aed16dc23
+      name: Apache-2.0-and-CDLA-Permissive-2.0
+      url: https://huggingface.co/docling-project/docling-layout-heron
       commercialUse: true
       noticeRequired: true
       notes: Heron and RapidOCR are Apache-2.0; TableFormer weights are CDLA-Permissive-2.0. Retain each upstream model card.
     metadata:
       architecture: heron-tableformer-rapidocr
       languages: [multilingual]
-      intendedUse: standard-document-model-inference
+      intendedUse: standard-document-conversion
     variants:
       - id: cuda
         format: pytorch
         precision: fp32
-        estimatedDownloadBytes: 400000000
+        estimatedDownloadBytes: 620000000
         runtimes: [docling-standard-cuda]
         include: [config.json, preprocessor_config.json, model.safetensors, README.md]
         compatibilityNotes: Requires CUDA with FP32 support. Target GPU acceptance is required; no CPU fallback.
-        runtimeNotes: Heron layout, TableFormer Accurate and PP-OCRv6 small with mobile orientation classification. Preserves the baseline ch recognition configuration; no language-specific checkpoint switching.
+        runtimeNotes: Heron layout, accurate TableFormer and Torch PP-OCRv6 small with mobile orientation classification all run locally on CUDA. Server-owned default OCR presets retain lang ch.
         companions:
           - directory: tableformer
             source: docling-project/docling-models
             revision: fc0f2d45e2218ea24bce5045f58a389aed16dc23
             include:
+              - README.md
               - model_artifacts/tableformer/accurate/tableformer_accurate.safetensors
               - model_artifacts/tableformer/accurate/tm_config.json
-              - README.md
         httpFiles:
           - path: rapidocr/README.md
             url: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/README.md
