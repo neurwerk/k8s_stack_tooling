@@ -41,6 +41,7 @@ from docling_tester.transport import (
     gateway_payload,
     reason_code,
 )
+from docling_tester.upstream_assertions import CONTRACTS
 
 
 @dataclass
@@ -243,7 +244,12 @@ def check_direct(
             return "FAIL", "markdown_output_missing", details
         # Upstream verify_export compares exact text after newline normalization.
         expected_markdown = expected_markdown.replace("\r\n", "\n").replace("\r", "\n")
-        actual_markdown = actual_markdown.replace("\r\n", "\n").replace("\r", "\n")
+        if case.format == "md":
+            # Literal contract from test_backend_markdown.test_convert_valid:
+            # only the stored expected export is stripped, never the response.
+            expected_markdown = expected_markdown.rstrip()
+        else:
+            actual_markdown = actual_markdown.replace("\r\n", "\n").replace("\r", "\n")
         matches = expected_markdown == actual_markdown
         details["comparison"] = {
             "matches": matches,
@@ -253,6 +259,31 @@ def check_direct(
             ("PASS", "markdown_matches_reference", details)
             if matches
             else ("FAIL", "markdown_mismatch", details)
+        )
+    elif profile == "native" and case.path in CONTRACTS:
+        contract = CONTRACTS[case.path]
+        source = contract["source"].split("::")[0]
+        details.update(
+            verification_scope="upstream_assertions",
+            full_content_verified=False,
+            assertion_source=contract["source"],
+            assertion_source_sha256=corpus.files[source]["sha256"],
+        )
+        markdown = body["document"].get("md_content")
+        if not isinstance(markdown, str):
+            return "FAIL", "markdown_output_missing", details
+        missing = [text for text in contract["required"] if text not in markdown]
+        forbidden = [text for text in contract["forbidden"] if text in markdown]
+        matches = not missing and not forbidden
+        details["comparison"] = {
+            "matches": matches,
+            "missing_required": missing,
+            "present_forbidden": forbidden,
+        }
+        return (
+            ("PASS", "upstream_assertions_met", details)
+            if matches
+            else ("FAIL", "upstream_assertion_mismatch", details)
         )
     else:
         return "UNVERIFIED", "compatible_reference_missing", details
@@ -393,12 +424,20 @@ async def run(settings: Settings, corpus: Corpus | None = None) -> tuple[dict[st
                     "trace": {},
                 }
                 trace = result["trace"]
-                if settings.skip_audio and case.family == "audio":
-                    result.update(status="SKIPPED", reason="audio_disabled")
+                skip_reason = case.skip_reason or (
+                    "audio_disabled" if settings.skip_audio and case.family == "audio" else None
+                )
+                if skip_reason is not None:
+                    result.update(
+                        status="SKIPPED",
+                        reason=skip_reason,
+                        expected="skip",
+                        effective_expectation={"outcome": "skip", "reason": skip_reason},
+                    )
                     report["results"].append(result)
                     current = index
                     artifacts.json("report.json", report)
-                    print(f"{index}/{len(cases)} SKIPPED {case.path} (audio disabled)", flush=True)
+                    print(f"{index}/{len(cases)} SKIPPED {case.path} ({skip_reason})", flush=True)
                     continue
                 correlation = uuid.uuid4().hex
                 case_started = time.perf_counter()

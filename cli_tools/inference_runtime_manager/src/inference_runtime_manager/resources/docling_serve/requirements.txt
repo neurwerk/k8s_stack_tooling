@@ -1,0 +1,13 @@
+# Overlay resolved against the digest-pinned official Serve image.
+arelle-release==2.47.5 \
+    --hash=sha256:a878610b4804d6fa2eb26b97f0ed8fabbd67e38b68257d8e9bfa5f45d4f26bbe
+bottle==0.13.4 \
+    --hash=sha256:045684fbd2764eac9cdeb824861d1551d113e8b683d8d26e296898d3dd99a12e
+doclang==0.9.1 \
+    --hash=sha256:7b289d126e36b55e5e1c5a20fee3be215705ed827065061170b647ec1dccc06f
+docling-core==2.107.1 \
+    --hash=sha256:12c6af0736098b5e8a7546fdbbf2caf68c1a5e446734efcf6bccae27e184e073
+docling-slim[standard,service-client,models-remote,format-opendocument,format-xml-xbrl]==2.151.1 \
+    --hash=sha256:2af615d4baa797d2263d3229c628bdb639cbf41112e2298ef4d7a7a9683b07d9
+jaconv==0.5.0 \
+    --hash=sha256:2914114fe761ca49fc7089e25e6ad4a400c26f262ffce84e13b176916b71610a

@@ -1,10 +1,42 @@
 {
   "schema_version": 1,
+  "skips": {
+    "tests/data/audio/*": "audio_runtime_unavailable",
+    "tests/data/ebcdic/*": "ebcdic_layout_not_configured",
+    "tests/data/pdf_password/*": "pdf_password_not_configured",
+    "tests/data/json_dots/*": "specialized_adapter_not_configured",
+    "tests/data/json_paddleocr_vl/*": "specialized_adapter_not_configured",
+    "tests/data/html_chandra/*": "specialized_adapter_not_configured",
+    "tests/data/md_deepseek/*": "specialized_adapter_not_configured",
+    "tests/data/latex/sources/*/*": "multi_file_project_context_not_configured",
+    "tests/data/xbrl/sources/*-taxonomy/*": "taxonomy_support_file_not_standalone",
+    "tests/data/uspto/sources/tables_ipa20180000016.xml": "table_fragment_not_standalone",
+    "tests/data/html/sources/example_image_01.png": "html_companion_image_not_standalone"
+  },
   "repository": "https://github.com/docling-project/docling",
   "revision": "0563d23e004f403b61e181fe3a743be06894d52e",
   "copyright": "The Docling Contributors",
   "license": "MIT; complete upstream notice in upstream/LICENSE",
+  "supplemental_sources": [
+    {
+      "path": "supplemental/tensor-network-202-pages.pdf",
+      "title": "Tensor Network Techniques for Quantum Computation",
+      "authors": ["Mario Collura", "Guglielmo Lami", "Nishan Ranabhat", "Alessandro Santini"],
+      "source": "https://arxiv.org/abs/2503.04423v1",
+      "download": "https://arxiv.org/pdf/2503.04423v1",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "changes": "None; complete original 202-page PDF. Not part of the pinned Docling upstream snapshot."
+    }
+  ],
   "files": [
+    {
+      "path": "supplemental/tensor-network-202-pages.pdf",
+      "role": "input",
+      "reason": "Supplemental long-document case; source and separate license recorded in supplemental_sources",
+      "bytes": 15791411,
+      "sha256": "ddd60b3152ce1b3ec81ccefc81dbebd463bec1062f26f1d4e5991d118d577e4c"
+    },
     {
       "path": "LICENSE",
       "role": "support",
@@ -13571,6 +13603,17 @@
         }
       ],
       "notes": []
+    },
+    {
+      "path": "supplemental/tensor-network-202-pages.pdf",
+      "family": "pdf",
+      "format": "pdf",
+      "references": [],
+      "notes": [
+        "Supplemental CC BY 4.0 research document; not an upstream Docling fixture.",
+        "Complete 202-page original; use existing elapsed-time reporting for long-document measurements.",
+        "No independently reviewed content reference is available; successful conversion remains UNVERIFIED."
+      ]
     }
   ]
 }

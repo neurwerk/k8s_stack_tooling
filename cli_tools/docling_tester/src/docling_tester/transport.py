@@ -148,8 +148,10 @@ class Direct:
         trace.update(submission="started", remote_job_may_continue=True)
         started = time.perf_counter()
         options: dict[str, Any] = dict(self.options)
-        if case.format == "asciidoc":
-            options.update(to_formats=["json", "md"], md_compact_tables="true")
+        if case.format in {"asciidoc", "md", "eml", "msg", "mhtml"}:
+            options["to_formats"] = ["json", "md"]
+        if case.format in {"asciidoc", "md"}:
+            options["md_compact_tables"] = "true"
         source_format = {
             "png": "image",
             "jpg": "image",

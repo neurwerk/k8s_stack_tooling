@@ -62,6 +62,7 @@ services:
       UVICORN_PORT: "8011"
       UVICORN_WORKERS: "1"
       DOCLING_DEVICE: cuda
+      DOCLING_ARTIFACTS_PATH: /opt/app-root/src/.cache/docling/models
       DOCLING_SERVE_ENG_KIND: local
       DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
       DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"

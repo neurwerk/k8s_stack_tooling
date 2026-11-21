@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 from collections import Counter
@@ -21,6 +22,7 @@ class Case:
     format: str
     references: tuple[dict[str, str], ...]
     notes: tuple[str, ...]
+    skip_reason: str | None = None
 
 
 def contained(root: Path, name: str) -> Path:
@@ -52,6 +54,15 @@ class Corpus:
                 entry["format"],
                 tuple(entry["references"]),
                 tuple(entry["notes"]),
+                entry.get("skip_reason")
+                or next(
+                    (
+                        reason
+                        for pattern, reason in self.manifest.get("skips", {}).items()
+                        if fnmatch.fnmatchcase(entry["path"], pattern)
+                    ),
+                    None,
+                ),
             )
             for entry in self.manifest["cases"]
         ]
@@ -61,6 +72,10 @@ class Corpus:
         if inputs != {case.path for case in self.cases}:
             raise ValueError("Every input must have exactly one case")
         for case in self.cases:
+            if case.skip_reason is not None and (
+                not isinstance(case.skip_reason, str) or not case.skip_reason.strip()
+            ):
+                raise ValueError("A skipped case needs an explicit reason")
             for reference in case.references:
                 entry = self.files.get(reference["path"], {})
                 if entry.get("role") != "expected":
@@ -100,9 +115,14 @@ class Corpus:
         return value
 
     def markdown_reference(self, case: Case) -> str | None:
-        # Upstream test_backend_asciidoc.test_asciidocs_examples uses this
-        # exact export contract; other formats need their own compatibility review.
-        if case.format != "asciidoc":
+        # test_backend_markdown.test_convert_valid additionally checks YAML
+        # docitems for these two cases; Markdown alone is insufficient.
+        if case.format == "md" and (
+            case.family != "md"
+            or Path(case.path).stem in {"inline_and_formatting", "mixed_without_h1"}
+        ):
+            return None
+        if case.format not in {"asciidoc", "md"}:
             return None
         source = Path(case.path)
         path = (source.parent.parent / "groundtruth" / (source.name + ".md")).as_posix()

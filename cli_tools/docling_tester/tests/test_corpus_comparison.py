@@ -15,7 +15,10 @@ def test_complete_pinned_snapshot_is_accounted_and_unchanged():
     result = corpus.verify()
     assert result["inputs"] == len(corpus.cases)
     assert result["revision"] == "0563d23e004f403b61e181fe3a743be06894d52e"
-    assert result["files"] == 1366  # All 1,365 upstream test files plus its full MIT notice.
+    supplemental = {path for path in corpus.files if path.startswith("supplemental/")}
+    assert supplemental == {"supplemental/tensor-network-202-pages.pdf"}
+    assert len(corpus.files.keys() - supplemental) == 1366  # Complete upstream snapshot.
+    assert result["files"] == 1367
     assert {case.format for case in corpus.cases} >= {"pdf", "xlsx", "xlsm", "docx", "pptx"}
 
 
