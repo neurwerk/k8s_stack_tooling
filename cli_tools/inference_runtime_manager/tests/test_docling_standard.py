@@ -31,7 +31,7 @@ from inference_runtime_manager.installer.docker import (
     resource,
     services,
 )
-from inference_runtime_manager.installer.images import prepare_local_images
+from inference_runtime_manager.installer.images import prepare_local_images, selected_specs
 from inference_runtime_manager.installer.pending import pending_aliases, record_applied, snapshots
 from inference_runtime_manager.installer.upload import provision
 
@@ -104,7 +104,7 @@ class StandardRuntimeTests(TestCase):
             save_deployment(root, Deployment(target="synthetic"))
             self.assertEqual(pending_aliases(root, settings), [])
 
-    def test_official_image_preparation_rejects_lookalikes_and_reuses_verified_cache(self):
+    def test_derived_image_preparation_rejects_lookalikes_and_reuses_verified_cache(self):
         with (
             TemporaryDirectory() as directory,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}, clear=True),
@@ -120,6 +120,9 @@ class StandardRuntimeTests(TestCase):
                 "Architecture": "amd64",
                 "RepoDigests": ["synthetic/custom@sha256:" + "0" * 64],
             }
+            spec = selected_specs(["docling-standard"])[0]
+            self.assertIsNone(spec.source)
+            self.assertEqual(spec.build, "docling_serve")
             mutations = []
 
             def docker_operation(command, **kwargs):
@@ -132,15 +135,31 @@ class StandardRuntimeTests(TestCase):
                 mutations.append(action)
                 if action[:2] == ["image", "rm"]:
                     current.clear()
-                elif action[0] == "pull":
-                    self.assertEqual(action[1:3], ["--platform", "linux/amd64"])
-                    self.assertRegex(
-                        action[3],
-                        r"^ghcr\.io/docling-project/docling-serve-cu128:v1\.38\.2"
-                        r"@sha256:[a-f0-9]{64}$",
+                elif action[:2] == ["buildx", "build"]:
+                    self.assertEqual(
+                        action,
+                        [
+                            "buildx",
+                            "build",
+                            "--platform",
+                            "linux/amd64",
+                            "--pull",
+                            "--load",
+                            "--label",
+                            f"io.neurwerk.runtime-source={spec.digest}",
+                            "--file",
+                            str(spec.build_directory / spec.dockerfile),
+                            "--tag",
+                            spec.tag,
+                            str(spec.build_directory),
+                        ],
                     )
-                    current.update(Os="linux", Architecture="amd64", RepoDigests=[action[3]])
-                elif action[0] != "tag":
+                    label = action[action.index("--label") + 1]
+                    key, value = label.split("=", 1)
+                    current.update(
+                        Os="linux", Architecture="amd64", Config={"Labels": {key: value}}
+                    )
+                else:
                     self.fail(f"Unexpected image operation: {action}")
                 return subprocess.CompletedProcess(command, 0)
 
@@ -149,10 +168,21 @@ class StandardRuntimeTests(TestCase):
                 patch("subprocess.run", side_effect=docker_operation),
             ):
                 prepare_local_images(settings, ["docling-standard"])
-                self.assertEqual([action[0] for action in mutations], ["image", "pull", "tag"])
+                self.assertEqual([action[0] for action in mutations], ["image", "buildx"])
                 mutations.clear()
                 prepare_local_images(settings, ["docling-standard"])
                 self.assertEqual(mutations, [])
+                for architecture, label in (
+                    ("amd64", "sha256:" + "0" * 64),
+                    ("arm64", spec.digest),
+                ):
+                    current.update(
+                        Architecture=architecture,
+                        Config={"Labels": {"io.neurwerk.runtime-source": label}},
+                    )
+                    prepare_local_images(settings, ["docling-standard"])
+                    self.assertEqual([action[0] for action in mutations], ["image", "buildx"])
+                    mutations.clear()
 
     def test_startup_reuses_readonly_cache_and_executes_official_serve(self):
         command = yaml.safe_load(resource("compose.yaml"))["services"]["docling-standard"][

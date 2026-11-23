@@ -1,0 +1,575 @@
+# SPDX-FileCopyrightText: The Docling Contributors
+# SPDX-License-Identifier: MIT
+
+from io import BytesIO
+
+import pytest
+from docling_core.types.doc import BoundingBox, CoordOrigin
+from PIL import Image, TiffImagePlugin
+
+from docling.backend import image_backend
+from docling.backend.image_backend import ImageDocumentBackend, _ImagePageBackend
+from docling.datamodel.backend_options import PdfBackendOptions
+from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.document import (
+    InputDocument,
+    _DocumentConversionInput,
+    _DummyBackend,
+    get_input_rejection_cause,
+)
+from docling.datamodel.settings import DocumentLimits
+from docling.document_converter import DocumentConverter, ImageFormatOption
+from docling.document_extractor import DocumentExtractor
+from docling.exceptions import DocumentLoadError
+from docling.utils.image_utils import to_rgb
+
+_EXIF_ORIENTATION_TAG = 0x0112
+
+
+def _make_png_stream(
+    width: int = 64,
+    height: int = 48,
+    color=(123, 45, 67),
+    dpi: tuple[float, float] | None = None,
+) -> DocumentStream:
+    img = Image.new("RGB", (width, height), color)
+    buf = BytesIO()
+    img.save(buf, format="PNG", **({} if dpi is None else {"dpi": dpi}))
+    buf.seek(0)
+    return DocumentStream(name="test.png", stream=buf)
+
+
+def _make_multipage_tiff_stream(
+    num_pages: int = 3,
+    size=(32, 32),
+    dpi: tuple[float, float] | None = (72, 72),
+) -> DocumentStream:
+    frames = [
+        Image.new("RGB", size, (i * 10 % 255, i * 20 % 255, i * 30 % 255))
+        for i in range(num_pages)
+    ]
+    buf = BytesIO()
+    frames[0].save(
+        buf,
+        format="TIFF",
+        save_all=True,
+        append_images=frames[1:],
+        **({} if dpi is None else {"dpi": dpi}),
+    )
+    buf.seek(0)
+    return DocumentStream(name="test.tiff", stream=buf)
+
+
+def _make_jpeg_stream(
+    width: int = 200,
+    height: int = 100,
+    orientation: int | None = None,
+    dpi: tuple[float, float] | None = None,
+) -> DocumentStream:
+    """A white frame with a black marker in the top-left corner."""
+    img = Image.new("RGB", (width, height), "white")
+    img.paste((0, 0, 0), (0, 0, max(1, width // 4), max(1, height // 4)))
+    save_kwargs: dict = {} if dpi is None else {"dpi": dpi}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[_EXIF_ORIENTATION_TAG] = orientation
+        save_kwargs["exif"] = exif
+    buf = BytesIO()
+    img.save(buf, format="JPEG", **save_kwargs)
+    buf.seek(0)
+    return DocumentStream(name="test.jpg", stream=buf)
+
+
+def test_docs_builder_uses_image_backend_for_image_stream():
+    stream = _make_png_stream()
+    conv_input = _DocumentConversionInput(path_or_stream_iterator=[stream])
+    # Provide format options mapping that includes IMAGE -> ImageFormatOption (which carries ImageDocumentBackend)
+    format_options = {InputFormat.IMAGE: ImageFormatOption()}
+
+    docs = list(conv_input.docs(format_options))
+    assert len(docs) == 1
+    in_doc = docs[0]
+    assert in_doc.format == InputFormat.IMAGE
+    assert isinstance(in_doc._backend, ImageDocumentBackend)
+    assert in_doc.page_count == 1
+
+
+def test_docs_builder_multipage_tiff_counts_frames():
+    stream = _make_multipage_tiff_stream(num_pages=4)
+    conv_input = _DocumentConversionInput(path_or_stream_iterator=[stream])
+    format_options = {InputFormat.IMAGE: ImageFormatOption()}
+
+    in_doc = next(conv_input.docs(format_options))
+    assert isinstance(in_doc._backend, ImageDocumentBackend)
+    assert in_doc.page_count == 4
+
+
+def test_converter_default_maps_image_to_image_backend():
+    converter = DocumentConverter(allowed_formats=[InputFormat.IMAGE])
+    backend_cls = converter.format_to_options[InputFormat.IMAGE].backend
+    assert backend_cls is ImageDocumentBackend
+
+
+def test_extractor_default_maps_image_to_image_backend():
+    extractor = DocumentExtractor(allowed_formats=[InputFormat.IMAGE])
+    backend_cls = extractor.extraction_format_to_options[InputFormat.IMAGE].backend
+    assert backend_cls is ImageDocumentBackend
+
+
+def _get_backend_from_stream(stream: DocumentStream):
+    """Helper to create InputDocument with ImageDocumentBackend from a stream."""
+    in_doc = InputDocument(
+        path_or_stream=stream.stream,
+        format=InputFormat.IMAGE,
+        backend=ImageDocumentBackend,
+        filename=stream.name,
+    )
+    return in_doc._backend
+
+
+def test_num_pages_single():
+    """Test page count for single-page image."""
+    stream = _make_png_stream(width=100, height=80)
+    doc_backend = _get_backend_from_stream(stream)
+    assert doc_backend.page_count() == 1
+
+
+def test_num_pages_multipage():
+    """Test page count for multi-page TIFF."""
+    stream = _make_multipage_tiff_stream(num_pages=5, size=(64, 64))
+    doc_backend = _get_backend_from_stream(stream)
+    assert doc_backend.page_count() == 5
+
+
+def test_get_size():
+    """Test getting page size."""
+    width, height = 120, 90
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+    size = page_backend.get_size()
+    assert size.width == width
+    assert size.height == height
+
+
+def test_one_dpi_defaults_to_72_dpi():
+    stream = _make_multipage_tiff_stream(num_pages=1, size=(64, 48), dpi=None)
+    page_backend = _get_backend_from_stream(stream).load_page(0)
+
+    assert page_backend.get_size().as_tuple() == (64, 48)
+
+
+def test_exif_orientation_rotates_the_frame():
+    """A quarter-turn orientation tag rotates the frame instead of being ignored.
+
+    A camera writes the sensor readout plus the tag, so without this the page
+    reaches OCR and layout on its side.
+    """
+    page_backend = _get_backend_from_stream(
+        _make_jpeg_stream(width=200, height=100, orientation=6)
+    ).load_page(0)
+    image = page_backend.get_page_image()
+
+    assert page_backend.get_size().as_tuple() == (100, 200)
+    assert min(image.getpixel((2, 2))) > 128
+    assert min(image.getpixel((image.width - 3, 2))) < 128
+
+
+def test_exif_orientation_swaps_dpi_axes():
+    """The DPI axes follow the rotation, keeping the physical page size right.
+
+    ``ImageOps.exif_transpose`` swaps the pixel dimensions but leaves
+    ``info["dpi"]`` untouched, which would otherwise turn a square 72x72 pt page
+    into 36x144.
+    """
+    page_backend = _get_backend_from_stream(
+        _make_jpeg_stream(width=300, height=150, orientation=6, dpi=(300, 150))
+    ).load_page(0)
+
+    assert page_backend.get_size().as_tuple() == (72, 72)
+    assert min(page_backend.get_page_image().getpixel((2, 2))) > 128
+
+
+@pytest.mark.parametrize("mode", ["RGBA", "LA", "P"])
+def test_transparent_background_is_flattened_onto_white(mode):
+    """Transparent pixels become white instead of the colour stored under them.
+
+    Fully transparent pixels usually store black, so dropping the alpha channel
+    turned dark text on a transparent background into a black page.
+    """
+    img = Image.new("RGBA", (64, 48), (0, 0, 0, 0))
+    img.paste((0, 0, 0, 255), (0, 0, 16, 12))
+    if mode == "LA":
+        img = img.convert("LA")
+    elif mode == "P":
+        # Index 0 is transparent black, index 1 opaque black.
+        img = Image.new("P", (64, 48), 0)
+        img.putpalette([0, 0, 0, 0, 0, 0])
+        img.paste(1, (0, 0, 16, 12))
+    buf = BytesIO()
+    img.save(buf, format="PNG", **({"transparency": 0} if mode == "P" else {}))
+    buf.seek(0)
+
+    page_backend = _get_backend_from_stream(
+        DocumentStream(name="test.png", stream=buf)
+    ).load_page(0)
+    image = page_backend.get_page_image()
+
+    assert image.getpixel((63, 47)) == (255, 255, 255)
+    assert image.getpixel((2, 2)) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("image_format", ["PNG", "TIFF"])
+def test_16_bit_grayscale_is_scaled_to_8_bits(image_format):
+    """16-bit samples are scaled to 8 bits instead of being clipped to white.
+
+    A plain ``convert("RGB")`` clips every sample above 255, so dark text on a
+    16-bit grayscale scan became a blank white page.
+    """
+    img = Image.new("I", (64, 48), 60000)
+    img.paste(4000, (0, 0, 16, 12))
+    buf = BytesIO()
+    img.convert("I;16").save(buf, format=image_format)
+    buf.seek(0)
+
+    page_backend = _get_backend_from_stream(
+        DocumentStream(name=f"test.{image_format.lower()}", stream=buf)
+    ).load_page(0)
+    image = page_backend.get_page_image()
+
+    assert image.getpixel((63, 47)) == (234, 234, 234)
+    assert image.getpixel((2, 2)) == (15, 15, 15)
+
+
+def test_to_rgb_keeps_8_bit_range_integer_images():
+    """A mode ``I`` image already in the 0..255 range is not scaled down."""
+    img = Image.new("I", (4, 1))
+    img.putdata([0, 100, 200, 255])
+
+    assert list(to_rgb(img).convert("L").getdata()) == [0, 100, 200, 255]
+    assert to_rgb(Image.new("I", (8, 8), 100)).getpixel((0, 0)) == (100, 100, 100)
+
+
+@pytest.mark.parametrize("mode", ["I", "I;16"])
+def test_to_rgb_scales_16_bit_integer_images(mode):
+    """Samples above 255 are scaled from the 16-bit range to 8 bits."""
+    img = Image.new("I", (4, 1))
+    img.putdata([0, 255, 256, 65535])
+
+    scaled = to_rgb(img.convert(mode) if mode != "I" else img)
+
+    assert list(scaled.convert("L").getdata()) == [0, 0, 1, 255]
+
+
+def test_to_rgb_scales_the_transparency_key_of_16_bit_images():
+    """The ``tRNS`` key is scaled with the samples, so it still matches them."""
+    img = Image.new("I", (4, 4), 60000).convert("I;16")
+    img.info["transparency"] = 60000
+
+    assert to_rgb(img).getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_get_page_image_full():
+    """Test getting full page image."""
+    width, height = 100, 80
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+    img = page_backend.get_page_image()
+    assert img.width == width
+    assert img.height == height
+
+
+def test_get_page_image_scaled():
+    """Test getting scaled page image."""
+    width, height = 100, 80
+    scale = 2.0
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+    img = page_backend.get_page_image(scale=scale)
+    assert img.width == round(width * scale)
+    assert img.height == round(height * scale)
+
+
+def test_300_dpi_tiff_uses_72_dpi_document_geometry():
+    stream = _make_multipage_tiff_stream(
+        num_pages=1,
+        size=(2550, 3300),
+        dpi=(300, 300),
+    )
+    page_backend = _get_backend_from_stream(stream).load_page(0)
+
+    assert page_backend.get_size().as_tuple() == pytest.approx((612, 792))
+    assert page_backend.get_page_image().size == (612, 792)
+    assert page_backend.get_page_image(scale=3).size == (1836, 2376)
+    assert page_backend.get_page_image(scale=300 / 72).size == (2550, 3300)
+    assert next(page_backend.get_bitmap_rects()).as_tuple() == pytest.approx(
+        (0, 0, 612, 792)
+    )
+    assert next(page_backend.get_bitmap_rects(scale=3)).as_tuple() == pytest.approx(
+        (0, 0, 1836, 2376)
+    )
+
+
+def test_tiff_centimeter_resolution_is_converted_to_dpi():
+    tiff_info = TiffImagePlugin.ImageFileDirectory_v2()
+    tiff_info[TiffImagePlugin.X_RESOLUTION] = 100
+    tiff_info[TiffImagePlugin.Y_RESOLUTION] = 50
+    tiff_info[TiffImagePlugin.RESOLUTION_UNIT] = "cm"
+    buf = BytesIO()
+    Image.new("RGB", (254, 127)).save(buf, format="TIFF", tiffinfo=tiff_info)
+    buf.seek(0)
+
+    page_backend = _get_backend_from_stream(
+        DocumentStream(name="test.tiff", stream=buf)
+    ).load_page(0)
+
+    assert page_backend.get_size().as_tuple() == pytest.approx((72, 72))
+
+
+@pytest.mark.parametrize(
+    ("image_format", "suffix"),
+    [("PNG", "png"), ("JPEG", "jpg"), ("BMP", "bmp")],
+)
+def test_image_dpi_is_applied_independently_per_axis(image_format, suffix):
+    buf = BytesIO()
+    Image.new("RGB", (300, 150)).save(buf, format=image_format, dpi=(300, 150))
+    buf.seek(0)
+    page_backend = _get_backend_from_stream(
+        DocumentStream(name=f"test.{suffix}", stream=buf)
+    ).load_page(0)
+
+    assert page_backend.get_size().as_tuple() == pytest.approx((72, 72), abs=0.01)
+    assert page_backend.get_page_image(scale=2).size == (144, 144)
+
+
+def test_crop_page_image():
+    """Test cropping page image."""
+    width, height = 200, 150
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+
+    # Crop a region from the center
+    cropbox = BoundingBox(l=50, t=30, r=150, b=120, coord_origin=CoordOrigin.TOPLEFT)
+    img = page_backend.get_page_image(cropbox=cropbox)
+    assert img.width == 100  # 150 - 50
+    assert img.height == 90  # 120 - 30
+
+
+def test_crop_page_image_scaled():
+    """Test cropping and scaling page image."""
+    width, height = 200, 150
+    scale = 0.5
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+
+    cropbox = BoundingBox(l=50, t=30, r=150, b=120, coord_origin=CoordOrigin.TOPLEFT)
+    img = page_backend.get_page_image(scale=scale, cropbox=cropbox)
+    assert img.width == round(100 * scale)  # cropped width * scale
+    assert img.height == round(90 * scale)  # cropped height * scale
+
+
+def test_crop_uses_logical_coordinates_for_high_dpi_image():
+    image = Image.new("RGB", (300, 300), "red")
+    image.paste("blue", (75, 75, 225, 225))
+    buf = BytesIO()
+    image.save(buf, format="PNG", dpi=(300, 300))
+    buf.seek(0)
+    page_backend = _get_backend_from_stream(
+        DocumentStream(name="test.png", stream=buf)
+    ).load_page(0)
+
+    crop = page_backend.get_page_image(
+        scale=2,
+        cropbox=BoundingBox(
+            l=18,
+            t=18,
+            r=54,
+            b=54,
+            coord_origin=CoordOrigin.TOPLEFT,
+        ),
+    )
+
+    assert crop.size == (72, 72)
+    assert crop.getpixel((36, 36)) == (0, 0, 255)
+
+
+def test_get_bitmap_rects():
+    """Test getting bitmap rects - should return full page rectangle."""
+    width, height = 100, 80
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+
+    rects = list(page_backend.get_bitmap_rects())
+    assert len(rects) == 1
+    bbox = rects[0]
+    assert bbox.l == 0.0
+    assert bbox.t == 0.0
+    assert bbox.r == float(width)
+    assert bbox.b == float(height)
+    assert bbox.coord_origin == CoordOrigin.TOPLEFT
+
+
+def test_get_bitmap_rects_scaled():
+    """Test getting bitmap rects with scaling."""
+    width, height = 100, 80
+    scale = 2.0
+    stream = _make_png_stream(width=width, height=height)
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+
+    rects = list(page_backend.get_bitmap_rects(scale=scale))
+    assert len(rects) == 1
+    bbox = rects[0]
+    assert bbox.l == 0.0
+    assert bbox.t == 0.0
+    assert bbox.r == float(width * scale)
+    assert bbox.b == float(height * scale)
+    assert bbox.coord_origin == CoordOrigin.TOPLEFT
+
+
+def test_get_text_in_rect():
+    """Test that get_text_in_rect returns empty string for images (no OCR)."""
+    stream = _make_png_stream()
+    doc_backend = _get_backend_from_stream(stream)
+    page_backend: _ImagePageBackend = doc_backend.load_page(0)
+
+    bbox = BoundingBox(l=10, t=10, r=50, b=50, coord_origin=CoordOrigin.TOPLEFT)
+    text = page_backend.get_text_in_rect(bbox)
+    assert text == ""
+
+
+def test_multipage_access():
+    """Test accessing different pages in multi-page image."""
+    num_pages = 4
+    stream = _make_multipage_tiff_stream(num_pages=num_pages, size=(64, 64))
+    doc_backend = _get_backend_from_stream(stream)
+    assert doc_backend.page_count() == num_pages
+
+    # Access each page
+    for i in range(num_pages):
+        page_backend = doc_backend.load_page(i)
+        assert page_backend.is_valid()
+        size = page_backend.get_size()
+        assert size.width == 64
+        assert size.height == 64
+
+
+def test_zero_dpi_defaults_to_72_dpi():
+    # A PNG pHYs chunk with zero pixels per unit: Pillow reports dpi=(0.0, 0.0).
+    stream = _make_png_stream(width=64, height=48, dpi=(0, 0))
+    page_backend = _get_backend_from_stream(stream).load_page(0)
+
+    assert page_backend.get_size().as_tuple() == (64, 48)
+
+
+def test_invalid_explicit_dpi_rejects_document():
+    stream = _make_png_stream(dpi=(0, 300))
+    in_doc = InputDocument(
+        path_or_stream=stream.stream,
+        format=InputFormat.IMAGE,
+        backend=ImageDocumentBackend,
+        filename=stream.name,
+    )
+
+    assert in_doc.valid is False
+    assert isinstance(get_input_rejection_cause(in_doc), DocumentLoadError)
+
+
+def test_source_image_is_closed_on_unload(tmp_path, monkeypatch):
+    image_path = tmp_path / "test.png"
+    Image.new("RGB", (32, 32), (10, 20, 30)).save(image_path)
+
+    opened_images = []
+    original_open = Image.open
+
+    def tracking_open(*args, **kwargs):
+        image = original_open(*args, **kwargs)
+        opened_images.append(image)
+        return image
+
+    input_doc = InputDocument(
+        path_or_stream=image_path,
+        format=InputFormat.IMAGE,
+        backend=_DummyBackend,
+        filename=image_path.name,
+    )
+
+    monkeypatch.setattr("docling.backend.image_backend.Image.open", tracking_open)
+    backend = ImageDocumentBackend(
+        in_doc=input_doc,
+        path_or_stream=image_path,
+    )
+    page_image = backend.load_page(0).get_page_image()
+    backend.unload()
+
+    assert len(opened_images) == 1
+    assert opened_images[0].fp is None
+    # The decoded page stays usable after the source is closed.
+    assert page_image.getpixel((0, 0)) == (10, 20, 30)
+
+
+def test_frame_count_over_max_num_pages_is_rejected_before_decoding(monkeypatch):
+    decoded = []
+    original_to_rgb = image_backend.to_rgb
+
+    def counting_to_rgb(image):
+        decoded.append(image.size)
+        return original_to_rgb(image)
+
+    monkeypatch.setattr(image_backend, "to_rgb", counting_to_rgb)
+    stream = _make_multipage_tiff_stream(num_pages=5, size=(16, 16))
+    in_doc = InputDocument(
+        path_or_stream=stream.stream,
+        format=InputFormat.IMAGE,
+        backend=ImageDocumentBackend,
+        filename=stream.name,
+        limits=DocumentLimits(max_num_pages=2),
+    )
+
+    assert in_doc.valid is False
+    assert in_doc.page_count == 5
+    assert "max_num_pages limit of 2" in in_doc._rejection.message
+    assert decoded == []
+    in_doc._backend.unload()
+
+
+def test_image_over_pixel_limit_is_rejected():
+    stream = _make_png_stream(width=64, height=48)
+    in_doc = InputDocument(
+        path_or_stream=stream.stream,
+        format=InputFormat.IMAGE,
+        backend=ImageDocumentBackend,
+        backend_options=PdfBackendOptions(max_image_pixels=64 * 48 - 1),
+        filename=stream.name,
+    )
+
+    assert in_doc.valid is False
+    cause = get_input_rejection_cause(in_doc)
+    assert isinstance(cause, DocumentLoadError)
+    assert "exceeds the limit of 3071 pixels" in str(cause)
+
+
+def test_tiff_frame_over_pixel_limit_is_rejected_on_load():
+    frames = [Image.new("RGB", (16, 16)), Image.new("RGB", (64, 64))]
+    buf = BytesIO()
+    frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+    buf.seek(0)
+    in_doc = InputDocument(
+        path_or_stream=buf,
+        format=InputFormat.IMAGE,
+        backend=ImageDocumentBackend,
+        backend_options=PdfBackendOptions(max_image_pixels=1000),
+        filename="test.tiff",
+    )
+    doc_backend = in_doc._backend
+
+    assert in_doc.valid is True
+    assert doc_backend.load_page(0).get_size().width == 16
+    with pytest.raises(ValueError, match="64x64 pixels exceeds the limit"):
+        doc_backend.load_page(1)
+    doc_backend.unload()

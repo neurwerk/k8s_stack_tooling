@@ -1,0 +1,336 @@
+# SPDX-FileCopyrightText: The Docling Contributors
+# SPDX-License-Identifier: MIT
+
+import json
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+from docling_core.types.doc import DocItemLabel
+
+from docling.datamodel.base_models import (
+    ConversionStatus,
+    DocumentStream,
+    InputFormat,
+)
+from docling.datamodel.document import (
+    ConversionResult,
+    DoclingDocument,
+    _DocumentConversionInput,
+)
+from docling.document_converter import DocumentConverter
+
+from .test_data_gen_flag import GEN_TEST_DATA
+from .verify_utils import verify_document, verify_export
+
+GENERATE = GEN_TEST_DATA
+pytestmark = pytest.mark.cross_platform
+
+
+def get_converter() -> DocumentConverter:
+    return DocumentConverter(allowed_formats=[InputFormat.BOXNOTE])
+
+
+def _boxnote_stream(payload: dict, name: str = "test.boxnote") -> DocumentStream:
+    raw = json.dumps(payload).encode("utf-8")
+    return DocumentStream(name=name, stream=BytesIO(raw))
+
+
+def test_e2e_boxnote_conversions():
+    directory = Path("./tests/data/boxnote/sources/")
+    boxnote_paths = sorted(directory.rglob("*.boxnote"))
+    converter = get_converter()
+
+    for boxnote_path in boxnote_paths:
+        gt_path = boxnote_path.parent.parent / "groundtruth" / boxnote_path.name
+
+        conv_result: ConversionResult = converter.convert(boxnote_path)
+        doc: DoclingDocument = conv_result.document
+
+        pred_md: str = doc.export_to_markdown(compact_tables=True)
+        assert verify_export(pred_md, str(gt_path) + ".md", GENERATE), "export to md"
+
+        pred_itxt: str = doc._export_to_indented_text(
+            max_text_len=70, explicit_tables=False
+        )
+        assert verify_export(pred_itxt, str(gt_path) + ".itxt", GENERATE), (
+            "export to indented-text"
+        )
+
+        assert verify_document(doc, str(gt_path) + ".json", GENERATE), "export to json"
+
+
+def test_boxnote_format_detection():
+    payload = {"doc": {"type": "doc", "content": []}}
+    stream = _boxnote_stream(payload)
+    dci = _DocumentConversionInput(path_or_stream_iterator=[])
+
+    assert dci._guess_format(stream) == InputFormat.BOXNOTE
+
+
+def test_legacy_boxnote_reports_unsupported():
+    legacy = {
+        "atext": {"text": "Hello, World!\n", "attribs": "*0+d|1+1"},
+        "pool": {"numToAttrib": {"0": ["author", "1"]}, "nextNum": 1},
+    }
+    conv_result = get_converter().convert(
+        _boxnote_stream(legacy, name="legacy.boxnote"), raises_on_error=False
+    )
+
+    assert conv_result.status == ConversionStatus.FAILURE
+    assert any("legacy" in err.error_message.lower() for err in conv_result.errors)
+
+
+def test_empty_boxnote_fails_cleanly():
+    conv_result = get_converter().convert(
+        DocumentStream(name="empty.boxnote", stream=BytesIO(b"")),
+        raises_on_error=False,
+    )
+
+    assert conv_result.status == ConversionStatus.FAILURE
+
+
+@pytest.mark.parametrize("payload", [b"[1, 2, 3]", b"42", b"null", b'"hello"'])
+def test_non_object_boxnote_fails_cleanly(payload: bytes):
+    conv_result = get_converter().convert(
+        DocumentStream(name="scalar.boxnote", stream=BytesIO(payload)),
+        raises_on_error=False,
+    )
+
+    assert conv_result.status == ConversionStatus.FAILURE
+
+
+def _linked_paragraph(href) -> dict:
+    return {
+        "doc": {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "marks": [{"type": "link", "attrs": {"href": href}}],
+                            "text": "click",
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+
+def test_list_item_text_keeps_boundary_before_rich_paragraph():
+    # The item text is one more run before its leading inline group (joined with "").
+    def run(text: str, mark: str | None = None) -> dict:
+        return {
+            "type": "text",
+            "text": text,
+            **({"marks": [{"type": mark}]} if mark else {}),
+        }
+
+    item = {
+        "type": "list_item",
+        "content": [
+            {"type": "paragraph", "content": [run("Intro")]},
+            {
+                "type": "paragraph",
+                "content": [run("more "), run("x", "strong"), run(" y")],
+            },
+        ],
+    }
+    payload = {
+        "doc": {"type": "doc", "content": [{"type": "bullet_list", "content": [item]}]}
+    }
+    doc = get_converter().convert(_boxnote_stream(payload)).document
+
+    assert doc.export_to_markdown() == "- Intro more **x** y"
+
+
+def test_safe_hyperlink_is_kept():
+    doc = (
+        get_converter()
+        .convert(_boxnote_stream(_linked_paragraph("https://x.com")))
+        .document
+    )
+
+    assert str(doc.texts[0].hyperlink) == "https://x.com/"
+
+
+@pytest.mark.parametrize(
+    "href", ["javascript:alert(1)", "hello", "", "http://[::1", "//cdn.example.com/x"]
+)
+def test_unsafe_hyperlink_is_dropped(href: str):
+    doc = get_converter().convert(_boxnote_stream(_linked_paragraph(href))).document
+
+    assert doc.texts[0].hyperlink is None
+
+
+@pytest.mark.parametrize("href", [42, True, ["http://x.com"], {"href": "http://x.com"}])
+def test_non_string_hyperlink_is_dropped(href):
+    doc = get_converter().convert(_boxnote_stream(_linked_paragraph(href))).document
+
+    assert doc.texts[0].hyperlink is None
+
+
+def test_utf8_bom_does_not_fail_the_load(tmp_path):
+    """A leading UTF-8 BOM must not survive into the text handed to json.loads.
+
+    Decoding with plain utf-8 kept it, so the document failed to load outright
+    rather than losing a heading. Both the stream and the file path are covered,
+    since each decodes separately.
+    """
+    source = Path("./tests/data/boxnote/sources/sample.boxnote")
+    boxnote_bytes = b"\xef\xbb\xbf" + source.read_bytes()
+    converter = get_converter()
+
+    stream_doc = converter.convert(
+        DocumentStream(name="bom.boxnote", stream=BytesIO(boxnote_bytes)),
+        raises_on_error=True,
+    ).document
+
+    boxnote_file = tmp_path / "bom.boxnote"
+    boxnote_file.write_bytes(boxnote_bytes)
+    file_doc = converter.convert(boxnote_file, raises_on_error=True).document
+
+    expected = converter.convert(source, raises_on_error=True).document
+    for doc in (stream_doc, file_doc):
+        assert doc.export_to_markdown() == expected.export_to_markdown()
+
+
+def test_image_caption_is_parented_with_its_picture():
+    # An image inside a list item: its caption must be a child of the picture
+    # itself, not a sibling at the body top level.
+    payload = {
+        "doc": {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "bullet_list",
+                    "content": [
+                        {
+                            "type": "list_item",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [
+                                        {"type": "text", "text": "Item with picture"}
+                                    ],
+                                },
+                                {
+                                    "type": "image",
+                                    "attrs": {"alt": "A chart of revenue"},
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    doc = get_converter().convert(_boxnote_stream(payload)).document
+
+    (picture,) = doc.pictures
+    (caption,) = [t for t in doc.texts if t.label == DocItemLabel.CAPTION]
+    assert picture.parent.cref != "#/body"
+    assert caption.parent == picture.get_ref()
+    assert caption.get_ref() in picture.captions
+
+
+def _table_cell(text: str, **attrs: int) -> dict:
+    return {
+        "type": "table_cell",
+        "attrs": {"colspan": 1, "rowspan": 1, **attrs},
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}],
+    }
+
+
+def test_table_oversized_spans_clamped_to_table_size():
+    # Declared spans far beyond the table must not size the grid: the table
+    # keeps the shape of its real cells, and the spans stop at its edges.
+    payload = {
+        "doc": {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "table",
+                    "content": [
+                        {
+                            "type": "table_row",
+                            "content": [
+                                _table_cell("A", rowspan=100_000_000),
+                                _table_cell("B", colspan=3_000_000),
+                            ],
+                        },
+                        {"type": "table_row", "content": [_table_cell("C")]},
+                    ],
+                }
+            ],
+        }
+    }
+    doc = get_converter().convert(_boxnote_stream(payload)).document
+
+    assert len(doc.tables) == 1
+    data = doc.tables[0].data
+    assert (data.num_rows, data.num_cols) == (2, 2)
+    assert [(c.text, c.row_span, c.col_span) for c in data.table_cells] == [
+        ("A", 2, 1),
+        ("B", 1, 1),
+        ("C", 1, 1),
+    ]
+    assert [[cell.text for cell in row] for row in data.grid] == [
+        ["A", "B"],
+        ["A", "C"],
+    ]
+
+
+def test_empty_leading_paragraph_keeps_the_following_paragraph_in_order():
+    # The first block of a list item becomes its text only when it is a
+    # paragraph. An empty one must not let a later paragraph take that place,
+    # which moved the nested list behind it.
+    payload = {
+        "doc": {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "bullet_list",
+                    "content": [
+                        {
+                            "type": "list_item",
+                            "content": [
+                                {"type": "paragraph", "content": []},
+                                {
+                                    "type": "bullet_list",
+                                    "content": [
+                                        {
+                                            "type": "list_item",
+                                            "content": [
+                                                {
+                                                    "type": "paragraph",
+                                                    "content": [
+                                                        {
+                                                            "type": "text",
+                                                            "text": "Inner",
+                                                        }
+                                                    ],
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "After"}],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    doc = get_converter().convert(_boxnote_stream(payload)).document
+
+    assert [text.text for text in doc.texts if text.text] == ["Inner", "After"]

@@ -33,6 +33,9 @@ jobs:
           - name: Inference Runtime Manager
             project: cli_tools/inference_runtime_manager
             needs_base: false
+          - name: Docling Tester
+            project: cli_tools/docling_tester
+            needs_base: false
           - name: OpenBao Stack Setup
             project: cli_tools/openbao_stack_setup
             needs_base: false
@@ -145,6 +148,15 @@ jobs:
 
       - name: Build
         run: uv build
+
+      - name: Install non-editable document tester
+        if: matrix.project == 'cli_tools/docling_tester'
+        run: uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl
+
+      - name: Verify installed document corpus
+        if: matrix.project == 'cli_tools/docling_tester'
+        working-directory: ${{ runner.temp }}
+        run: '"$GITHUB_WORKSPACE/cli_tools/docling_tester/.venv/bin/docling-tester" inventory'
 
   kokoro_adapter:
     name: Kokoro adapter (Python 3.11, offline)

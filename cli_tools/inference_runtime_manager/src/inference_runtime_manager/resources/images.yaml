@@ -31,8 +31,9 @@ nemotron-diarization-cuda:
 kserve: kserve/huggingfaceserver@sha256:c84aefd18daf9055aa649fba519751c22818834bf0783ebf5e5032613848914f
 gliner:
   build: gliner
-# Official v1.38.2 CUDA 12.8 image; Linux/AMD64 manifest, no local build or overlay.
-docling-standard: ghcr.io/docling-project/docling-serve-cu128:v1.38.2@sha256:a9b2e7ce5074d1639f07805a4ada6a7dcb777f7d096e2ed1af529333912692e8
+# Official Serve base with pinned Docling/XBRL packages and LibreOffice; no custom service.
+docling-standard:
+  build: docling_serve
 # Exporters verified on Linux/AMD64; prepared locally for offline delivery.
 node-exporter: prom/node-exporter:v1.12.1@sha256:da83fae85603c4e47e6c68369a7d746e2dda683dc35ea2e234b4f171e0d92798
 dcgm-exporter: nvcr.io/nvidia/k8s/dcgm-exporter:4.8.3@sha256:b4df763de9558e5b3f1f1d79bc65b772fcf65b8a9c3664ea7173e47153112b4a

@@ -1,0 +1,5 @@
+# Resolve against the pinned official Serve base with --upgrade-strategy only-if-needed.
+# Keep its existing CUDA/PyTorch stack and model files.
+docling-slim[standard,service-client,models-remote,format-opendocument,format-xml-xbrl]==2.151.1
+docling-core==2.107.1
+arelle-release==2.47.5
