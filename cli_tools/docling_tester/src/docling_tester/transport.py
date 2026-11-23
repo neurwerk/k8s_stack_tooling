@@ -29,6 +29,19 @@ MIMES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "asciidoc": "text/asciidoc",
+    "adoc": "text/asciidoc",
+    "html": "text/html",
+    "htm": "text/html",
+    "ics": "text/calendar",
+    "eml": "message/rfc822",
+    "mhtml": "multipart/related",
+    "rtf": "application/rtf",
+    "tex": "application/x-tex",
+    "vtt": "text/vtt",
+    "boxnote": "application/json",
+    "nxml": "application/xml",
 }
 
 

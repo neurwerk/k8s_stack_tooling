@@ -11,7 +11,28 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE = Path(__file__).parent
-GATEWAY_FILES = {"pdf", "docx", "xlsx", "pptx", "txt", "md", "csv"}
+GATEWAY_FILES = {
+    "pdf",
+    "docx",
+    "xlsx",
+    "xlsm",
+    "pptx",
+    "txt",
+    "md",
+    "csv",
+    "asciidoc",
+    "adoc",
+    "html",
+    "htm",
+    "ics",
+    "eml",
+    "mhtml",
+    "rtf",
+    "tex",
+    "vtt",
+    "boxnote",
+    "nxml",
+}
 GATEWAY_IMAGES = {"png", "jpg", "jpeg", "webp"}
 
 

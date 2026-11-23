@@ -41,6 +41,7 @@ from docling_tester.transport import (
     gateway_payload,
     reason_code,
 )
+from docling_tester.triage import failure_label
 from docling_tester.upstream_assertions import CONTRACTS
 
 
@@ -496,6 +497,8 @@ async def run(settings: Settings, corpus: Corpus | None = None) -> tuple[dict[st
                 if "last_response" in trace:
                     artifacts.json(f"{index:04d}.response.json", trace.pop("last_response"))
                     result["http_status"] = trace["http_status"]
+                if (label := failure_label(result)) is not None:
+                    result["failure_label"] = label
                 result["elapsed_seconds"] = time.perf_counter() - case_started
                 report["results"].append(result)
                 current = index

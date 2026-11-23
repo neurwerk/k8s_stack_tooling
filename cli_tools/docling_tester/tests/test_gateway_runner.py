@@ -98,7 +98,7 @@ def test_gateway_sends_fixture_bytes_but_never_trusts_a_response_echo(
 def test_gateway_rejection_requires_both_status_and_reason(
     tmp_path, http_server, status, reason, outcome
 ):
-    corpus = tiny_corpus(tmp_path, ("source.xlsm",))
+    corpus = tiny_corpus(tmp_path, ("source.xls",))
     url = http_server(lambda *args: (status, {"error": {"reason": reason}}))
     report, code = asyncio.run(
         run(Settings("gateway", url, tmp_path / "results", model="fixture-model"), corpus)

@@ -96,6 +96,13 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "expectations-help", help="Show reference schema, results and capture setup"
     )
+    questions = commands.add_parser(
+        "questions", help="Check full-corpus document answers and rejections through Gateway"
+    )
+    questions.add_argument("--config", type=Path, required=True, help="Private JSONC settings")
+    questions.add_argument("--output", type=Path, required=True)
+    questions.add_argument("--model", default="local/qwen3.8-27b")
+    questions.add_argument("--match", default="*", help="Glob against corpus case IDs")
     test = commands.add_parser(
         "run",
         help="Run the complete corpus or an explicit subset",
@@ -178,6 +185,29 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "questions":
+            from docling_tester.questions import run_questions
+            from docling_tester.settings import load
+
+            private = load(args.config)
+            if not private["gateway_url"] or not private["gateway_api_key"]:
+                raise ValueError("Gateway URL and API key are required in private settings")
+            report, code = asyncio.run(
+                run_questions(
+                    Settings(
+                        mode="gateway",
+                        url=private["gateway_url"],
+                        key=private["gateway_api_key"],
+                        output=args.output,
+                        model=args.model,
+                        auth_header=private["gateway_auth_header"],
+                        timeout=private["timeout"],
+                        match=args.match,
+                    )
+                )
+            )
+            print(json.dumps({"scope": report["scope"], "counts": report["counts"]}, indent=2))
+            return code
         if args.command == "menu":
             from docling_tester.live import main as menu_main
 
