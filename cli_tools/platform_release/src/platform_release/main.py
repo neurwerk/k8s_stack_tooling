@@ -154,8 +154,8 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
 
 
 def _default_public_key() -> Path:
-    """Return the public counterpart of the documented operator key location."""
-    return Path.home() / ".ssh" / "neurwerk_base_release_ed25519.pub"
+    """Return the approved release signer's bundled public key."""
+    return Path(__file__).resolve().parent / "release-signing.pub"
 
 
 def _checked(
