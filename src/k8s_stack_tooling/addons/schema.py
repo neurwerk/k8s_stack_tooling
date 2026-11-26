@@ -120,6 +120,9 @@ class ExternalInput(Contract):
 
 class Authentication(Contract):
     client_id: Name = Field(alias="clientId")
+    client_type: Literal["confidential", "public"] = Field(
+        default="confidential", alias="clientType"
+    )
     redirect_uris: list[str] = Field(alias="redirectUris", min_length=1, max_length=100)
     web_origins: list[str] = Field(alias="webOrigins", min_length=1, max_length=100)
     logout_uris: list[str] = Field(
@@ -600,7 +603,10 @@ class IdentityRequest(Contract):
     id: Name
     mode: Literal["browser", "service"]
     client_id: InstanceName = Field(alias="clientId")
-    secret: FieldRef
+    client_type: Literal["confidential", "public"] = Field(
+        default="confidential", alias="clientType"
+    )
+    secret: FieldRef | None = None
     browser: Authentication | None = None
     browser_settings: BrowserSettings | None = Field(default=None, alias="browserSettings")
     service_settings: ServiceSettings | None = Field(default=None, alias="serviceSettings")
@@ -615,11 +621,17 @@ class IdentityRequest(Contract):
     def scope(self):
         if self.client_id in RESERVED_CLIENT_IDS:
             raise ValueError("reserved identity client")
+        if self.client_type == "public":
+            if self.mode != "browser" or self.secret is not None:
+                raise ValueError("public identities require secretless browser authentication")
+        elif self.secret is None:
+            raise ValueError("confidential identities require a secret")
         if self.mode == "browser":
             if (
                 self.service_settings is not None
                 or (self.browser is None) == (self.browser_settings is None)
                 or (self.browser is not None and self.browser.client_id != self.client_id)
+                or (self.browser is not None and self.browser.client_type != self.client_type)
                 or self.realm_roles
                 or self.gateway_permissions
                 or self.audiences
@@ -718,6 +730,8 @@ def resolve_browser_identity(
             not isinstance(approval, dict)
             or approval.get("clientId") != request.client_id
             or browser.client_id != request.client_id
+            or browser.client_type != request.client_type
+            or browser.client_type != approval.get("clientType", "confidential")
         ):
             raise ContractError("effective browser identity does not match client approval")
         for key, requested in (
@@ -876,6 +890,8 @@ def _conditions(
         raise ValueError("undeclared activation feature")
     records = {record.id: record for record in setup.records}
     for identity in identities:
+        if identity.secret is None:
+            continue
         record = records.get(identity.secret.record)
         if record is None or identity.secret.field not in record.fields:
             raise ValueError("identity secret is undeclared")
@@ -1094,7 +1110,8 @@ def expand_identities(addon: Addon, selection: AddonSelection) -> list[IdentityR
             row = identity.model_dump(by_alias=True, exclude={"when"})
             row["id"] = f"{instance.id}-{row['id']}"
             row["clientId"] = row["clientId"].replace("{instance}", instance.id)
-            row["secret"]["record"] = f"{instance.id}-{row['secret']['record']}"
+            if row["secret"] is not None:
+                row["secret"]["record"] = f"{instance.id}-{row['secret']['record']}"
             if row["browser"] is not None:
                 row["browser"]["clientId"] = row["clientId"]
             rows.append(row)

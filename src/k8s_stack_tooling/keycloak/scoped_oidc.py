@@ -54,8 +54,17 @@ def browser_urls(plural: str, singular: str, *, origin: bool = False) -> list[st
 
 def reconcile() -> None:
     base, realm = os.environ["KC_INTERNAL_URL"], os.environ["KC_REALM"]
-    secret, client_id = os.environ["KC_CLIENT_SECRET"], os.environ["KC_CLIENT_ID"]
-    if not secret:
+    client_id = os.environ["KC_CLIENT_ID"]
+    client_type = os.environ.get("KC_CLIENT_TYPE", "confidential")
+    if client_type not in ("confidential", "public"):
+        raise ValueError("Invalid OIDC client type")
+    if client_type != os.environ.get("KC_APPROVED_CLIENT_TYPE", "confidential"):
+        raise ValueError("Unapproved OIDC client type")
+    public = client_type == "public"
+    secret = os.environ.get("KC_CLIENT_SECRET", "")
+    if public and secret:
+        raise ValueError("Public OIDC clients must not supply a secret")
+    if not public and not secret:
         raise ValueError("Missing client secret")
     if client_id in RESERVED_CLIENT_IDS:
         raise ValueError("Reserved platform OIDC client ID")
@@ -211,9 +220,9 @@ def reconcile() -> None:
         "clientId": client_id,
         "enabled": False,
         "protocol": "openid-connect",
-        "publicClient": False,
+        "publicClient": public,
         "bearerOnly": False,
-        "clientAuthenticatorType": "client-secret",
+        "clientAuthenticatorType": "none" if public else "client-secret",
         "standardFlowEnabled": True,
         "directAccessGrantsEnabled": False,
         "serviceAccountsEnabled": False,
@@ -229,6 +238,9 @@ def reconcile() -> None:
         "client.use.refresh.tokens": "true",
         "client.refresh.token.rotation.enabled": rotation,
     }
+    if public:
+        attributes["pkce.code.challenge.method"] = "S256"
+    credentials = {} if public else {"secret": secret}
 
     def disable():
         # A confirmed unsafe client must stop issuing tokens before correction.
@@ -415,7 +427,7 @@ def reconcile() -> None:
                 raise ScopeDriftError("Client readback mismatch")
         if any(configured.get("attributes", {}).get(k) != v for k, v in attributes.items()):
             raise ScopeDriftError("Client attribute readback mismatch")
-        if get_client_secret(base, token, realm, uuid) != secret:
+        if not public and get_client_secret(base, token, realm, uuid) != secret:
             raise ScopeDriftError("Client secret readback mismatch")
 
     def mapper_matches(actual, desired):
@@ -488,7 +500,7 @@ def reconcile() -> None:
         api(
             "/clients",
             "POST",
-            {**expected, "attributes": attributes, "secret": secret},
+            {**expected, "attributes": attributes, **credentials},
             root=realm_url,
         )
         uuid = lookup_client()
@@ -496,7 +508,7 @@ def reconcile() -> None:
             raise RuntimeError("OIDC client lookup mismatch")
         url = f"{realm_url}/clients/{quote(uuid, safe='')}"
     # Never use the generic upsert helper: it temporarily enables full scope.
-    api(method="PUT", body={**expected, "attributes": attributes, "secret": secret})
+    api(method="PUT", body={**expected, "attributes": attributes, **credentials})
     for kind in ("default-client-scopes", "optional-client-scopes"):
         desired_ids = desired_scopes if kind == "default-client-scopes" else set()
         current = {scope["id"] for scope in api("/" + kind)}
