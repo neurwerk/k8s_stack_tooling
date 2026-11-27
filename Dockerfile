@@ -17,6 +17,8 @@ COPY src/ /app/src/
 
 # Install exactly the locked runtime dependencies into the project environment.
 WORKDIR /app
+RUN apt-get update && apt-get install --no-install-recommends -y openssl && \
+    rm -rf /var/lib/apt/lists/*
 RUN uv sync --locked --no-dev --no-editable
 ENV PATH="/app/.venv/bin:$PATH"
 

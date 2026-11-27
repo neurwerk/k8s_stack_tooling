@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8s-stack-tooling"
-version = "0.20.0"
+version = "0.21.0"
 description = "Kubernetes operational utilities and on-demand maintenance pages."
 readme = "README.md"
 authors = [{ name = "neurwerk", email = "dev@neurwerk.com" }]
@@ -46,6 +46,7 @@ addon-acquire = "k8s_stack_tooling.addons.acquisition:main"
 addon-project = "k8s_stack_tooling.addons.sources:projection_main"
 agentgateway-observe = "k8s_stack_tooling.agentgateway_observe:main"
 stage-documentdb-provisioner = "k8s_stack_tooling.postgres.documentdb:main"
+postgres-backup = "k8s_stack_tooling.postgres.backup:main"
 provision-glitchtip = "k8s_stack_tooling.glitchtip.provision:main"
 gateway-model-metadata = "k8s_stack_tooling.gateway_model_metadata_cli:main"
 
